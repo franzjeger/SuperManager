@@ -2227,12 +2227,31 @@ fn build_step5_review(
                 move |result| {
                     if let Ok(file) = result {
                         if let Some(pdf_path) = file.path() {
-                            // Write the HTML to a temp file first
-                            let tmp_html = std::env::temp_dir().join("supermgr-report.html");
-                            if let Err(e) = std::fs::write(&tmp_html, &html) {
+                            // Stage the HTML report in an exclusive 0600 temp file under
+                            // XDG_RUNTIME_DIR (or the user data dir) rather than a predictable
+                            // path in world-writable /tmp.
+                            let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
+                                .map(std::path::PathBuf::from)
+                                .filter(|p| p.is_dir())
+                                .or_else(|| supermgr_core::paths::user_data_dir().ok())
+                                .unwrap_or_else(std::env::temp_dir);
+                            let mut tmp_file = match tempfile::Builder::new()
+                                .prefix("supermgr-report-")
+                                .suffix(".html")
+                                .tempfile_in(&runtime_dir)
+                            {
+                                Ok(f) => f,
+                                Err(e) => {
+                                    tracing::error!("Failed to create temp HTML report: {e}");
+                                    return;
+                                }
+                            };
+                            if let Err(e) = std::io::Write::write_all(&mut tmp_file, html.as_bytes())
+                            {
                                 tracing::error!("Failed to write temp HTML: {e}");
                                 return;
                             }
+                            let tmp_html = tmp_file.path().to_path_buf();
 
                             // Try wkhtmltopdf first, then weasyprint
                             let pdf_result = std::process::Command::new("wkhtmltopdf")
@@ -2255,7 +2274,7 @@ fn build_step5_review(
                                         .output()
                                 });
 
-                            let _ = std::fs::remove_file(&tmp_html);
+                            drop(tmp_file);
 
                             match pdf_result {
                                 Ok(output) if output.status.success() => {

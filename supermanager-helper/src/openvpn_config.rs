@@ -72,9 +72,9 @@ const ANY_ARGUMENTS: &[&str] = &[
     "verb", "mute", "echo", "user", "group", "nice", "mlock", "suppress-timestamps",
     "machine-readable-output", "ignore-unknown-option", "up-delay",
     "down-pre",
-    // Windows-only; harmless where they are not understood.
-    "block-outside-dns", "register-dns", "ip-win32", "route-method", "dhcp-renew",
-    "dhcp-release", "tap-sleep", "win-sys", "windows-driver",
+    // Windows-only; harmless where they are not understood. (`win-sys`,
+    // `ip-win32`, and `route-method` stay refused across platforms.)
+    "block-outside-dns", "register-dns", "dhcp-renew", "dhcp-release", "tap-sleep",
 ];
 
 /// Directives that take a file, allowed only with its contents inline.
@@ -228,12 +228,16 @@ fn directive(name: &str, args: &[String]) -> Result<(), String> {
             Some(device) if tunnel_device(name, device) => Ok(()),
             _ => Err(format!("`{name}` must be tun, tap or utun")),
         },
-        "auth-user-pass" | "askpass" => match arg(0) {
+        "auth-user-pass" => match arg(0) {
             None | Some("[inline]") => Ok(()),
             Some(_) => Err(format!(
                 "`{name}` names a file, which SuperManager does not read; it passes the \
                  credentials itself"
             )),
+        },
+        "windows-driver" => match (arg(0), arg(1)) {
+            (Some("wintun" | "tap-windows6" | "ovpn-dco"), None) => Ok(()),
+            _ => Err("`windows-driver` must be wintun, tap-windows6 or ovpn-dco".into()),
         },
         // Host and port; credentials only inline, or `auto` for an HTTP
         // proxy that says what it wants.
@@ -278,7 +282,23 @@ fn is_dangerous_env(variable: &str) -> bool {
         || upper.starts_with("LD_")
         || upper.starts_with("OPENSSL_")
         || upper.starts_with("SSL_")
-        || matches!(upper.as_str(), "PATH" | "IFS" | "BASH_ENV" | "ENV")
+        || upper.starts_with("PYTHON")
+        || upper.starts_with("PERL")
+        || matches!(
+            upper.as_str(),
+            "PATH"
+                | "PATHEXT"
+                | "IFS"
+                | "BASH_ENV"
+                | "ENV"
+                | "COMSPEC"
+                | "SYSTEMROOT"
+                | "WINDIR"
+                | "TEMP"
+                | "TMP"
+                | "TMPDIR"
+                | "HOME"
+        )
 }
 
 /// `tun`, `tap` or `utun`, for `dev` with a unit number or without.

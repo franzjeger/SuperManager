@@ -48,72 +48,169 @@ impl EngineServer {
             .get("engagement_id")
             .and_then(|v| v.as_str())
             .map(str::to_owned);
-        let targets_raw: Vec<String> = params
-            .get("targets")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|x| x.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let ports: Vec<u16> = params.get("ports").and_then(|v| v.as_array()).map_or_else(
-            || crate::probes::COMMON_PORTS.to_vec(),
-            |arr| {
-                arr.iter()
-                    .filter_map(|x| x.as_u64().map(|n| n as u16))
-                    .collect()
-            },
-        );
-        let cap = params
-            .get("max_targets")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(512) as usize;
-        let targets = crate::discovery::expand_targets(&targets_raw, cap);
+        let targets_raw: Vec<String> = match params.get("targets").and_then(|v| v.as_array()) {
+            Some(arr) => {
+                let mut out = Vec::with_capacity(arr.len());
+                for item in arr {
+                    let Some(s) = item.as_str() else {
+                        return Response::err(
+                            id,
+                            protocol::INVALID_PARAMS,
+                            "every entry in 'targets' must be a string".to_owned(),
+                        );
+                    };
+                    if let Err(reason) = crate::discovery::validate_scan_target(s) {
+                        return Response::err(id, protocol::INVALID_PARAMS, reason);
+                    }
+                    out.push(s.trim().to_owned());
+                }
+                out
+            }
+            None => Vec::new(),
+        };
+        if targets_raw.is_empty() {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                "missing or empty 'targets'".to_owned(),
+            );
+        }
+
+        let ports: Vec<u16> = match params.get("ports") {
+            None => crate::probes::COMMON_PORTS.to_vec(),
+            Some(v) => {
+                let Some(arr) = v.as_array() else {
+                    return Response::err(
+                        id,
+                        protocol::INVALID_PARAMS,
+                        "'ports' must be an array of TCP port numbers (1..=65535)".to_owned(),
+                    );
+                };
+                if arr.is_empty() || arr.len() > crate::discovery::MAX_SCAN_PORTS {
+                    return Response::err(
+                        id,
+                        protocol::INVALID_PARAMS,
+                        format!(
+                            "'ports' must contain between 1 and {} port numbers",
+                            crate::discovery::MAX_SCAN_PORTS
+                        ),
+                    );
+                }
+                let mut out = Vec::with_capacity(arr.len());
+                for item in arr {
+                    let Some(p) = item
+                        .as_u64()
+                        .and_then(|n| u16::try_from(n).ok())
+                        .filter(|&p| p > 0)
+                    else {
+                        return Response::err(
+                            id,
+                            protocol::INVALID_PARAMS,
+                            "invalid port number in 'ports' (expected 1..=65535)".to_owned(),
+                        );
+                    };
+                    out.push(p);
+                }
+                out
+            }
+        };
+
+        let requested_cap = match params.get("max_targets") {
+            None => 512usize,
+            Some(v) => {
+                let Some(n) = v.as_u64() else {
+                    return Response::err(
+                        id,
+                        protocol::INVALID_PARAMS,
+                        "'max_targets' must be a positive integer".to_owned(),
+                    );
+                };
+                if n == 0 || n > crate::discovery::MAX_SCAN_TARGETS as u64 {
+                    return Response::err(
+                        id,
+                        protocol::INVALID_PARAMS,
+                        format!(
+                            "'max_targets' must be between 1 and {}",
+                            crate::discovery::MAX_SCAN_TARGETS
+                        ),
+                    );
+                }
+                n as usize
+            }
+        };
+        let targets = crate::discovery::expand_targets(&targets_raw, requested_cap);
         if targets.is_empty() {
             return Response::err(
                 id,
                 protocol::INVALID_PARAMS,
-                "no targets after expansion".to_owned(),
+                format!("no targets after expansion (CIDR may exceed max_targets={requested_cap})"),
             );
         }
 
-        // Strict-scope enforcement. If the engagement has
-        // `strict_scope = true` AND `scope_cidrs` non-empty, every
-        // target must fall within some scope CIDR and none can fall
-        // inside an exclusion. Reject the WHOLE scan if any target
-        // violates — partial-execute would defeat the audit guarantee
-        // strict mode is there to provide.
-        if let Some(eid) = engagement_id.as_deref() {
-            if let Ok(engagement) = crate::engagement::load(eid) {
-                if engagement.strict_scope {
-                    let violations = crate::engagement::targets_outside_scope(
-                        &targets,
-                        &engagement.scope_cidrs,
-                        &engagement.exclusions,
+        // Strict-scope enforcement. Any specified engagement MUST load
+        // cleanly (failing closed on missing/unreadable/corrupt scope files).
+        // When `strict_scope = true`, every IP must match `scope_cidrs` and
+        // avoid `exclusions`, and any hostname target must appear in
+        // `scope_hosts`.
+        if let Some(eid_raw) = engagement_id.as_deref() {
+            let eid = eid_raw.trim();
+            if eid.is_empty() {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "'engagement_id' must not be empty".to_owned(),
+                );
+            }
+            let engagement = match crate::engagement::load(eid) {
+                Ok(e) => e,
+                Err(err) => {
+                    return Response::err_engine(
+                        id,
+                        &crate::error::EngineError::InvalidScope {
+                            reason: format!("Failed to load engagement '{eid}': {err:#}"),
+                        },
                     );
-                    if !violations.is_empty() {
-                        let sample = violations
-                            .iter()
-                            .take(5)
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        let extra = if violations.len() > 5 {
-                            format!(" (+ {} more)", violations.len() - 5)
-                        } else {
-                            String::new()
-                        };
-                        return Response::err_engine(
-                            id,
-                            &crate::error::EngineError::InvalidScope {
-                                reason: format!(
-                                    "Strict scope: {} target(s) outside engagement scope or inside exclusions: {sample}{extra}",
-                                    violations.len()
-                                ),
-                            },
-                        );
+                }
+            };
+            if engagement.strict_scope {
+                let mut violations = crate::engagement::targets_outside_scope(
+                    &targets,
+                    &engagement.scope_cidrs,
+                    &engagement.exclusions,
+                );
+                if !engagement.scope_cidrs.is_empty() || !engagement.scope_hosts.is_empty() {
+                    for t in &targets {
+                        if t.parse::<std::net::IpAddr>().is_err()
+                            && !engagement
+                                .scope_hosts
+                                .iter()
+                                .any(|allowed| allowed.eq_ignore_ascii_case(t))
+                        {
+                            violations.push(t.clone());
+                        }
                     }
+                }
+                if !violations.is_empty() {
+                    let sample = violations
+                        .iter()
+                        .take(5)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let extra = if violations.len() > 5 {
+                        format!(" (+ {} more)", violations.len() - 5)
+                    } else {
+                        String::new()
+                    };
+                    return Response::err_engine(
+                        id,
+                        &crate::error::EngineError::InvalidScope {
+                            reason: format!(
+                                "Strict scope: {} target(s) outside engagement scope or inside exclusions: {sample}{extra}",
+                                violations.len()
+                            ),
+                        },
+                    );
                 }
             }
         }
@@ -328,6 +425,13 @@ impl EngineServer {
             .map(str::to_owned);
 
         let evidence_dir = if let Some(eid) = engagement_id.as_deref() {
+            if let Err(e) = crate::customer::validate_slug(eid) {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    format!("invalid engagement_id: {e}"),
+                );
+            }
             crate::traffic_sniff::engagement_evidence_dir(eid)
         } else {
             let mut p = crate::secrets::default_data_dir();

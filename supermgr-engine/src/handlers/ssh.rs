@@ -12,7 +12,9 @@ use supermgr_core::host::{Host, HostSummary};
 // the daemon and covered by the invariant tests in `supermgr-core`.
 use supermgr_core::secret_lifecycle::SecretOwner;
 use supermgr_core::ssh::audit::{AuditAction, AuditEntry};
-use supermgr_core::ssh::authorized_keys::{push_public_key, revoke_public_key, PushResult};
+use supermgr_core::ssh::authorized_keys::{
+    push_public_key, revoke_public_key, PushResult, RevokeOutcome,
+};
 use supermgr_core::ssh::key::{SshKey, SshKeySummary, SshKeyType};
 use supermgr_core::ssh::keygen;
 
@@ -932,29 +934,40 @@ impl EngineServer {
                 let _permit = permits.acquire().await.expect("semaphore not closed");
                 match connect_to_host_owned(&state, &secrets, hid).await {
                     Ok((host, session)) => {
-                        let outcome = match op {
-                            FanoutOp::Push => {
-                                push_public_key(&session, &public_key, use_sudo).await
-                            }
-                            FanoutOp::Revoke => {
-                                revoke_public_key(&session, &public_key, use_sudo).await
-                            }
-                        };
-                        let result = match outcome {
-                            Ok(()) => PushResult {
-                                host_id: hid.to_string(),
-                                host_label: host.label.clone(),
-                                success: true,
-                                message: match op {
-                                    FanoutOp::Push => "key pushed".into(),
-                                    FanoutOp::Revoke => "key revoked".into(),
+                        let result = match op {
+                            FanoutOp::Push => match push_public_key(&session, &public_key, use_sudo).await {
+                                Ok(()) => PushResult {
+                                    host_id: hid.to_string(),
+                                    host_label: host.label.clone(),
+                                    success: true,
+                                    message: "key pushed".into(),
+                                },
+                                Err(e) => PushResult {
+                                    host_id: hid.to_string(),
+                                    host_label: host.label.clone(),
+                                    success: false,
+                                    message: e.to_string(),
                                 },
                             },
-                            Err(e) => PushResult {
-                                host_id: hid.to_string(),
-                                host_label: host.label.clone(),
-                                success: false,
-                                message: e.to_string(),
+                            FanoutOp::Revoke => match revoke_public_key(&session, &public_key, use_sudo).await {
+                                Ok(RevokeOutcome::Removed) => PushResult {
+                                    host_id: hid.to_string(),
+                                    host_label: host.label.clone(),
+                                    success: true,
+                                    message: "key revoked".into(),
+                                },
+                                Ok(RevokeOutcome::NotPresent) => PushResult {
+                                    host_id: hid.to_string(),
+                                    host_label: host.label.clone(),
+                                    success: true,
+                                    message: "key not present on host".into(),
+                                },
+                                Err(e) => PushResult {
+                                    host_id: hid.to_string(),
+                                    host_label: host.label.clone(),
+                                    success: false,
+                                    message: e.to_string(),
+                                },
                             },
                         };
                         let _ = session.disconnect().await;

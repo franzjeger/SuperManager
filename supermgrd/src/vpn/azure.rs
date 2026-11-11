@@ -952,19 +952,29 @@ impl VpnBackend for AzureBackend {
         // Send SIGTERM first so openvpn can clean up routes gracefully,
         // then wait briefly before falling back to SIGKILL.
         if let Some(mut child) = child_opt {
-            info!("Azure: stopping openvpn child");
-            // SIGTERM lets openvpn run its cleanup (delete routes, restore defaults).
-            let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(child.id().unwrap_or(0) as i32),
-                nix::sys::signal::Signal::SIGTERM,
-            );
-            match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
-                Ok(_) => info!("Azure: openvpn exited cleanly"),
-                Err(_) => {
-                    warn!("Azure: openvpn did not exit in 5 s, killing");
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
+            if let Some(raw_pid) = child
+                .id()
+                .and_then(|id| i32::try_from(id).ok())
+                .filter(|&pid| pid > 1)
+            {
+                info!("Azure: stopping openvpn child (pid={raw_pid})");
+                // SIGTERM lets openvpn run its cleanup (delete routes, restore defaults).
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(raw_pid),
+                    nix::sys::signal::Signal::SIGTERM,
+                );
+                match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
+                    Ok(_) => info!("Azure: openvpn exited cleanly"),
+                    Err(_) => {
+                        warn!("Azure: openvpn did not exit in 5 s, killing");
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                    }
                 }
+            } else {
+                // Child already reaped; never call kill(0, SIGTERM) which signals
+                // supermgrd's entire process group.
+                let _ = child.wait().await;
             }
         }
 

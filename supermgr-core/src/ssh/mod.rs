@@ -16,7 +16,7 @@ pub mod keygen;
 pub mod known_hosts;
 pub mod remote;
 
-pub use authorized_keys::{push_public_key, revoke_public_key, PushResult};
+pub use authorized_keys::{push_public_key, revoke_public_key, PushResult, RevokeOutcome};
 pub use device_type::DeviceType;
 pub use import::{scan_ssh_directory, ImportCandidate};
 pub use key::{SshKey, SshKeySummary, SshKeyType};
