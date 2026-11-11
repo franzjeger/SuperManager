@@ -1,21 +1,28 @@
 name: Release
-# Triggered when a `v*.*.*` tag is pushed.
+# Triggered when a `v*.*.*` tag is pushed, or manually via `workflow_dispatch`.
 #
-# Pipeline order:
+# Pipeline order & privilege separation (P1-3, P1-4):
 #   1. `ci` runs the full cross-platform CI matrix (`shell`, `linux`, `mac`,
-#      `windows`) on the tagged commit before any signing keys or release
-#      environments are entered.
-#   2. `build-macos` and `build-windows` build, test, sign/notarise, and upload
-#      immutable build artifacts without `contents: write` or persisted git
-#      credentials.
-#   3. `publish` collects both platform artifact sets, stages a single draft
-#      GitHub Release with every asset attached, publishes the release once all
-#      uploads succeed, and finally updates `appcast.xml` / `appcast-beta.xml`
-#      on `main`.
+#      `windows`) before any release builds or signing environments are entered.
+#   2. `build-macos` compiles Rust crates (`--locked`), builds the pinned VPN &
+#      Tailscale runtime, and compiles `SuperManagerMac.app` UNSIGNED on an
+#      isolated runner with ZERO signing or API secrets mounted.
+#   3. `sign-macos` (`needs: [build-macos]`) downloads the unsigned `.app`
+#      artifact on a clean runner that NEVER executes `cargo`, `build.rs`,
+#      `xcodebuild`, or untrusted build outputs. It imports the Developer ID
+#      certificate into a one-shot keychain, signs nested Mach-O binaries and
+#      the app inside-out with hardened runtime + entitlements, notarises and
+#      staples the `.app`, `.pkg`, and `.dmg`, signs the update archive with
+#      Sparkle's official SHA-256-pinned `sign_update`, and writes channel
+#      appcasts (`appcast-beta.xml` + 24h phased-rollout `appcast.xml`).
+#   4. `build-windows` compiles Windows crates with `--locked`, packages the
+#      MSI + Burn bundle, runs installer integration tests, and emits `.sha256`
+#      sidecars without signing secrets or write permissions.
+#   5. `publish` (`needs: [sign-macos, build-windows]`) verifies the complete
+#      artifact set, stages and publishes the GitHub Release, and updates
+#      `appcast-beta.xml` (and `appcast.xml` for stable releases) on `main`.
 #
-# Required repository secrets (Settings → Secrets and variables →
-# Actions → Repository secrets):
-#
+# Required secrets in the `release` environment:
 #   MACOS_CERTIFICATE              — Developer ID Application .p12, base64
 #   MACOS_CERTIFICATE_PASSWORD     — Password for MACOS_CERTIFICATE
 #   MACOS_DEV_ID_APP               — Common Name from `security find-identity`
@@ -31,6 +38,20 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to build and publish (e.g. v1.9.0-beta.1 or v1.9.0)'
+        required: true
+        type: string
+      channel:
+        description: 'Sparkle rollout channel (beta updates appcast-beta.xml only; stable updates appcast.xml with 24h phased rollout + appcast-beta.xml)'
+        required: false
+        type: choice
+        default: 'beta'
+        options:
+          - 'beta'
+          - 'stable'
 
 # Serialize provisioning, release publication, and appcast commits across tags.
 concurrency:
@@ -46,8 +67,141 @@ jobs:
     permissions:
       contents: read
 
+  # Untrusted compilation phase: NO `environment: release` and ZERO signing/API
+  # secrets (`MACOS_CERTIFICATE`, `AC_API_KEY_BASE64`, `SPARKLE_PRIVATE_KEY`,
+  # etc.) are ever passed to this job (P1-3).
   build-macos:
     needs: [ci]
+    runs-on: macos-26
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.99.1
+        with:
+          toolchain: "1.99.1"
+
+      - name: Validate release tag
+        env:
+          RAW_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RAW_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "error: invalid release tag '$RAW_TAG' (expected vX.Y.Z or vX.Y.Z-beta.N)" >&2
+            exit 1
+          fi
+          echo "RELEASE_TAG=$RAW_TAG" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=${RAW_TAG#v}" >> "$GITHUB_ENV"
+
+      - name: Install build deps
+        run: |
+          brew update
+          brew install xcodegen pandoc xcbeautify go cmake
+
+      - name: Build deterministic VPN and Tailscale runtime from pinned sources
+        run: ./scripts/build-vpn-runtime.sh "$RUNNER_TEMP/vpn-runtime"
+
+      - name: Test and build Rust release binaries (--locked)
+        run: |
+          cargo test --locked -p supermanager-helper
+          cargo build --release --locked \
+            -p supermgrd-mac \
+            -p supermanager-helper \
+            -p supermgr-mcp
+
+      - name: Build unsigned SuperManagerMac.app
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          (
+            cd SuperManagerMac
+            xcodegen generate
+            xcodebuild -resolvePackageDependencies \
+              -project SuperManager.xcodeproj \
+              -scheme SuperManagerMac
+            xcodebuild \
+              -project SuperManager.xcodeproj \
+              -scheme SuperManagerMac \
+              -configuration Release \
+              -destination 'platform=macOS' \
+              -onlyUsePackageVersionsFromResolvedFile \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY="" \
+              SUPERMANAGER_VERSION="$RELEASE_VERSION" \
+              clean build \
+              > ../dist/xcodebuild-release.log 2>&1 || {
+                tail -100 ../dist/xcodebuild-release.log >&2
+                exit 1
+              }
+          )
+
+          BUILD_DIR="$(cd SuperManagerMac && xcodebuild \
+            -project SuperManager.xcodeproj \
+            -scheme SuperManagerMac \
+            -configuration Release \
+            -showBuildSettings 2>/dev/null \
+            | awk '/^[[:space:]]*BUILT_PRODUCTS_DIR =/ { print $3 }')"
+          APP="$BUILD_DIR/SuperManagerMac.app"
+          [ -d "$APP" ] || { echo "error: unsigned .app missing at $APP" >&2; exit 1; }
+
+          # Stage the pinned, SHA-256-verified VPN + Tailscale binaries and third-party licenses.
+          rm -rf "$APP/Contents/Resources/vpn-runtime" "$APP/Contents/Resources/tailscale-bin"
+          mkdir -p "$APP/Contents/Resources/vpn-runtime" "$APP/Contents/Resources/tailscale-bin"
+          cp -R "$RUNNER_TEMP/vpn-runtime"/{bash,wg,wg-quick,wireguard-go,charon,swanctl,openvpn3,licenses,THIRD_PARTY_LICENSES.txt} \
+            "$APP/Contents/Resources/vpn-runtime/"
+          install -m 0755 "$RUNNER_TEMP/vpn-runtime/tailscale" "$APP/Contents/Resources/tailscale-bin/tailscale"
+          install -m 0755 "$RUNNER_TEMP/vpn-runtime/tailscaled" "$APP/Contents/Resources/tailscale-bin/tailscaled"
+          shasum -a 256 \
+            "$APP/Contents/Resources/tailscale-bin/tailscale" \
+            "$APP/Contents/Resources/tailscale-bin/tailscaled" \
+            | awk '{print $1}' | tr -d '\n' > "$APP/Contents/Resources/tailscale-bin/.version"
+
+          for key in CFBundleShortVersionString CFBundleVersion; do
+            built="$(/usr/libexec/PlistBuddy -c "Print :$key" "$APP/Contents/Info.plist")"
+            if [ "$built" != "$RELEASE_VERSION" ]; then
+              echo "error: built app $key is '$built', expected '$RELEASE_VERSION'" >&2
+              exit 1
+            fi
+          done
+
+          for req in \
+            "$APP/Contents/MacOS/SuperManagerMac" \
+            "$APP/Contents/MacOS/supermgrd-mac" \
+            "$APP/Contents/MacOS/com.sybr.supermanager.helper" \
+            "$APP/Contents/Resources/tailscale-bin/tailscale" \
+            "$APP/Contents/Resources/tailscale-bin/tailscaled" \
+            "$APP/Contents/Resources/vpn-runtime/bash" \
+            "$APP/Contents/Resources/vpn-runtime/wg" \
+            "$APP/Contents/Resources/vpn-runtime/wg-quick" \
+            "$APP/Contents/Resources/vpn-runtime/wireguard-go" \
+            "$APP/Contents/Resources/vpn-runtime/charon" \
+            "$APP/Contents/Resources/vpn-runtime/swanctl" \
+            "$APP/Contents/Resources/vpn-runtime/openvpn3" \
+            "$APP/Contents/Resources/vpn-runtime/THIRD_PARTY_LICENSES.txt"
+          do
+            [ -e "$req" ] || { echo "error: missing expected bundle member $req" >&2; exit 1; }
+          done
+
+          # Archive with ditto so framework symlinks and Mach-O mode bits survive upload-artifact.
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$RUNNER_TEMP/SuperManagerMac-unsigned.zip"
+
+      - name: Upload unsigned macOS app bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-unsigned-app
+          path: ${{ runner.temp }}/SuperManagerMac-unsigned.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  # Isolated signing & notarisation phase: NEVER runs `cargo`, `build.rs`,
+  # `xcodebuild`, or any executable from the untrusted build artifact (P1-3).
+  sign-macos:
+    needs: [build-macos]
     runs-on: macos-26
     environment: release
     permissions:
@@ -55,19 +209,40 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.99.1
-        with:
-          toolchain: "1.99.1"
-
-      - name: Install build deps
+      - name: Resolve release version and rollout channel
+        env:
+          RAW_TAG: ${{ inputs.tag || github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
         run: |
-          brew update
-          brew install xcodegen pandoc xcbeautify tailscale wireguard-go cmake
+          set -euo pipefail
+          if [[ ! "$RAW_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "error: invalid release tag '$RAW_TAG'" >&2
+            exit 1
+          fi
+          VERSION="${RAW_TAG#v}"
+          if [[ "$RAW_TAG" == *-* ]]; then
+            CHANNEL="beta"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "${INPUT_CHANNEL:-beta}" != "stable" ]; then
+            CHANNEL="beta"
+          else
+            CHANNEL="stable"
+          fi
+          echo "RELEASE_TAG=$RAW_TAG" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "RELEASE_CHANNEL=$CHANNEL" >> "$GITHUB_ENV"
+          echo "Signing $RAW_TAG (channel: $CHANNEL)"
 
-      # Temporary per-run keychain destroyed in the `always()` teardown step.
-      - name: Set up signing keychain
+      - name: Download unsigned macOS app artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: macos-unsigned-app
+          path: ${{ runner.temp }}/unsigned-archive
+
+      - name: Set up temporary signing keychain
         env:
           MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -101,9 +276,6 @@ jobs:
               -T /usr/bin/security
             rm -f "$RUNNER_TEMP/installer-cert.p12"
             echo "DEVELOPER_ID_INSTALLER=$MACOS_DEV_ID_INSTALLER" >> "$GITHUB_ENV"
-            echo "Installer cert imported: $MACOS_DEV_ID_INSTALLER"
-          else
-            echo "MACOS_INSTALLER_CERT not set — .pkg will be unsigned."
           fi
 
           security set-key-partition-list \
@@ -112,7 +284,7 @@ jobs:
             build.keychain
           security find-identity -p codesigning -v build.keychain
 
-      - name: Stage AC API key
+      - name: Stage App Store Connect API key
         env:
           AC_API_KEY_BASE64: ${{ secrets.AC_API_KEY_BASE64 }}
           AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
@@ -120,19 +292,12 @@ jobs:
           set -euo pipefail
           mkdir -p "$HOME/.appstoreconnect"
           chmod 700 "$HOME/.appstoreconnect"
-          printf '%s' "$AC_API_KEY_BASE64" | base64 --decode > "$HOME/.appstoreconnect/AuthKey_${AC_API_KEY_ID}.p8"
-          chmod 600 "$HOME/.appstoreconnect/AuthKey_${AC_API_KEY_ID}.p8"
-          echo "AC_API_KEY_PATH=$HOME/.appstoreconnect/AuthKey_${AC_API_KEY_ID}.p8" >> "$GITHUB_ENV"
+          KEY_PATH="$HOME/.appstoreconnect/AuthKey_${AC_API_KEY_ID}.p8"
+          printf '%s' "$AC_API_KEY_BASE64" | base64 --decode > "$KEY_PATH"
+          chmod 600 "$KEY_PATH"
+          echo "AC_API_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
 
-      - name: Resolve SwiftPM packages
-        run: |
-          cd SuperManagerMac
-          xcodegen generate
-          xcodebuild -resolvePackageDependencies \
-            -project SuperManager.xcodeproj \
-            -scheme SuperManagerMac
-
-      - name: Build, sign, notarise, staple, Sparkle-sign
+      - name: Sign inside-out, notarise, staple, package DMG/ZIP/PKG, and Sparkle-sign
         env:
           DEVELOPER_ID_APP: ${{ secrets.MACOS_DEV_ID_APP }}
           AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
@@ -140,23 +305,233 @@ jobs:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "Releasing v$VERSION"
-          ./scripts/release.sh "$VERSION"
+          VERSION="$RELEASE_VERSION"
+          mkdir -p dist "$RUNNER_TEMP/unsigned"
+          ditto -x -k "$RUNNER_TEMP/unsigned-archive/SuperManagerMac-unsigned.zip" "$RUNNER_TEMP/unsigned"
+          APP="$RUNNER_TEMP/unsigned/SuperManagerMac.app"
+          [ -d "$APP" ] || { echo "error: unpacked SuperManagerMac.app not found" >&2; exit 1; }
 
-      - name: Upload macOS release artifacts
+          # Re-verify bundle version metadata and Mach-O deployment/linkage invariants before signing.
+          for key in CFBundleShortVersionString CFBundleVersion; do
+            built="$(/usr/libexec/PlistBuddy -c "Print :$key" "$APP/Contents/Info.plist")"
+            [ "$built" = "$VERSION" ] || { echo "error: $key mismatch ($built != $VERSION)" >&2; exit 1; }
+          done
+          python3 contrib/openvpn3/check_deployment.py --maximum 14.0 \
+            "$APP/Contents/Resources/vpn-runtime/bash" \
+            "$APP/Contents/Resources/vpn-runtime/wg" \
+            "$APP/Contents/Resources/vpn-runtime/wireguard-go" \
+            "$APP/Contents/Resources/vpn-runtime/charon" \
+            "$APP/Contents/Resources/vpn-runtime/swanctl" \
+            "$APP/Contents/Resources/vpn-runtime/openvpn3" \
+            "$APP/Contents/Resources/tailscale-bin/tailscale" \
+            "$APP/Contents/Resources/tailscale-bin/tailscaled"
+          for sys_bin in \
+            "$APP/Contents/Resources/vpn-runtime/bash" \
+            "$APP/Contents/Resources/vpn-runtime/wg" \
+            "$APP/Contents/Resources/vpn-runtime/wireguard-go" \
+            "$APP/Contents/Resources/vpn-runtime/charon" \
+            "$APP/Contents/Resources/vpn-runtime/swanctl" \
+            "$APP/Contents/Resources/vpn-runtime/openvpn3" \
+            "$APP/Contents/Resources/tailscale-bin/tailscale" \
+            "$APP/Contents/Resources/tailscale-bin/tailscaled"
+          do
+            if otool -L "$sys_bin" | tail -n +2 | grep -vE '^[[:space:]]+/(usr/lib|System/Library)/' >&2; then
+              echo "error: $sys_bin links non-system libraries" >&2
+              exit 1
+            fi
+          done
+
+          # Fetch and validate Developer ID provisioning profile & entitlements.
+          DEVELOPER_ID_PROFILE="$PWD/dist/SuperManager.provisionprofile"
+          APP_ENTITLEMENTS="$PWD/dist/SuperManagerMac-distribution.entitlements"
+          python3 scripts/fetch_mac_provisioning.py "$DEVELOPER_ID_PROFILE"
+          TEAM_ID="$(echo "$DEVELOPER_ID_APP" | sed -n 's/.*(\([A-Z0-9]*\))$/\1/p')"
+          python3 scripts/validate_mac_provisioning.py \
+            "$DEVELOPER_ID_PROFILE" "$TEAM_ID" "$APP_ENTITLEMENTS"
+
+          # Sign inside-out with hardened runtime + secure timestamp (never `--deep`).
+          codesign --force --options runtime --timestamp \
+            --sign "$DEVELOPER_ID_APP" \
+            --identifier com.sybr.supermanager.daemon \
+            --entitlements SuperManagerMac/Signing/supermgrd-mac.entitlements \
+            "$APP/Contents/MacOS/supermgrd-mac"
+
+          codesign --force --options runtime --timestamp \
+            --sign "$DEVELOPER_ID_APP" \
+            --identifier com.sybr.supermanager.helper \
+            --entitlements SuperManagerMac/Signing/supermanager-helper.entitlements \
+            "$APP/Contents/MacOS/com.sybr.supermanager.helper"
+
+          if [ -f "$APP/Contents/MacOS/supermgr-mcp" ]; then
+            codesign --force --options runtime --timestamp \
+              --sign "$DEVELOPER_ID_APP" \
+              --identifier com.sybr.supermanager.mcp \
+              "$APP/Contents/MacOS/supermgr-mcp"
+          fi
+
+          cp "$DEVELOPER_ID_PROFILE" "$APP/Contents/embedded.provisionprofile"
+
+          for ts_bin in tailscale tailscaled; do
+            codesign --force --options runtime --timestamp \
+              --sign "$DEVELOPER_ID_APP" \
+              --identifier "com.sybr.supermanager.$ts_bin" \
+              "$APP/Contents/Resources/tailscale-bin/$ts_bin"
+          done
+
+          for rt_bin in bash wg wireguard-go charon swanctl openvpn3; do
+            codesign --force --options runtime --timestamp \
+              --sign "$DEVELOPER_ID_APP" \
+              --identifier "com.sybr.supermanager.vpn.$rt_bin" \
+              "$APP/Contents/Resources/vpn-runtime/$rt_bin"
+          done
+
+          if [ -d "$APP/Contents/Frameworks" ]; then
+            find "$APP/Contents/Frameworks" \
+              \( -name "*.xpc" -o -name "Updater.app" -o -name "Autoupdate" \) \
+              | while IFS= read -r nested; do
+                  codesign --force --options runtime --timestamp \
+                    --sign "$DEVELOPER_ID_APP" "$nested"
+                done
+            if [ -d "$APP/Contents/Frameworks/Sparkle.framework" ]; then
+              codesign --force --options runtime --timestamp \
+                --sign "$DEVELOPER_ID_APP" "$APP/Contents/Frameworks/Sparkle.framework"
+            fi
+          fi
+
+          codesign --force --options runtime --timestamp \
+            --sign "$DEVELOPER_ID_APP" \
+            --entitlements "$APP_ENTITLEMENTS" \
+            "$APP"
+
+          codesign --verify --verbose=2 "$APP"
+          python3 scripts/validate_mac_provisioning.py \
+            "$APP/Contents/embedded.provisionprofile" "$TEAM_ID" "$APP_ENTITLEMENTS" --app "$APP"
+          for nested in \
+            "$APP/Contents/MacOS/supermgrd-mac" \
+            "$APP/Contents/MacOS/com.sybr.supermanager.helper"
+          do
+            codesign --verify --strict "$nested"
+          done
+
+          # Build VPN DNS cleanup .pkg installer.
+          PKG_FILE="$PWD/dist/SuperManager-vpn-dns-cleanup-$VERSION.pkg"
+          if [ -n "${DEVELOPER_ID_INSTALLER:-}" ]; then
+            ./installer/pkg/build-pkg.sh "$VERSION" --sign "$DEVELOPER_ID_INSTALLER"
+          else
+            ./installer/pkg/build-pkg.sh "$VERSION"
+          fi
+
+          # Notarise and staple SuperManagerMac.app.
+          NOTARIZE_ZIP="$PWD/dist/SuperManager-$VERSION-notarize.zip"
+          ditto -c -k --keepParent "$APP" "$NOTARIZE_ZIP"
+          xcrun notarytool submit "$NOTARIZE_ZIP" \
+            --key "$AC_API_KEY_PATH" \
+            --key-id "$AC_API_KEY_ID" \
+            --issuer "$AC_API_ISSUER_ID" \
+            --wait
+          rm -f "$NOTARIZE_ZIP"
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+
+          # Notarise and staple .pkg when signed.
+          if [ -n "${DEVELOPER_ID_INSTALLER:-}" ]; then
+            xcrun notarytool submit "$PKG_FILE" \
+              --key "$AC_API_KEY_PATH" \
+              --key-id "$AC_API_KEY_ID" \
+              --issuer "$AC_API_ISSUER_ID" \
+              --wait
+            xcrun stapler staple "$PKG_FILE"
+            xcrun stapler validate "$PKG_FILE"
+          fi
+
+          # Package stapled distribution .zip (Sparkle enclosure + install.sh).
+          DIST_ZIP="$PWD/dist/SuperManager-$VERSION.zip"
+          ditto -c -k --keepParent "$APP" "$DIST_ZIP"
+
+          # Package, sign, notarise, and staple distribution .dmg.
+          DMG_STAGE="$RUNNER_TEMP/dmg-stage"
+          mkdir -p "$DMG_STAGE"
+          ditto "$APP" "$DMG_STAGE/SuperManagerMac.app"
+          ln -s /Applications "$DMG_STAGE/Applications"
+          DIST_DMG="$PWD/dist/SuperManager-$VERSION.dmg"
+          hdiutil create -volname "SuperManager" -srcfolder "$DMG_STAGE" -ov -format UDZO "$DIST_DMG"
+          codesign --force --timestamp --sign "$DEVELOPER_ID_APP" "$DIST_DMG"
+          xcrun notarytool submit "$DIST_DMG" \
+            --key "$AC_API_KEY_PATH" \
+            --key-id "$AC_API_KEY_ID" \
+            --issuer "$AC_API_ISSUER_ID" \
+            --wait
+          xcrun stapler staple "$DIST_DMG"
+          xcrun stapler validate "$DIST_DMG"
+
+          # Fetch official SHA-256-pinned Sparkle 2.9.6 tools so we never run an
+          # untrusted binary from DerivedData.
+          SPARKLE_URL="https://github.com/sparkle-project/Sparkle/releases/download/2.9.6/Sparkle-for-Swift-Package-Manager.zip"
+          SPARKLE_SHA256="8d5fb41d960b43f4a68aa14126bf62b098544ec8d191cdcc73eb14e63a8e7606"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/sparkle.zip" "$SPARKLE_URL"
+          echo "$SPARKLE_SHA256  $RUNNER_TEMP/sparkle.zip" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/sparkle-tools"
+          ditto -x -k "$RUNNER_TEMP/sparkle.zip" "$RUNNER_TEMP/sparkle-tools"
+          SIGN_UPDATE="$RUNNER_TEMP/sparkle-tools/bin/sign_update"
+          codesign --verify --strict "$SIGN_UPDATE"
+
+          SPARKLE_SIG_LINE="$(printf '%s' "$SPARKLE_PRIVATE_KEY" \
+            | "$SIGN_UPDATE" --ed-key-file - "$DIST_ZIP")"
+
+          PUB_DATE="$(date -u +"%a, %d %b %Y %H:%M:%S +0000")"
+          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/SuperManager-${VERSION}.zip"
+
+          write_appcast() {
+            local dest="$1" phased_line="$2"
+            cat > "$dest" <<EOF
+          <?xml version="1.0" standalone="yes"?>
+          <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+              <channel>
+                  <title>SuperManager</title>
+                  <description>Update feed for SuperManager.app</description>
+                  <language>en</language>
+                  <item>
+                      <title>Version $VERSION</title>
+                      <pubDate>$PUB_DATE</pubDate>
+                      <sparkle:version>$VERSION</sparkle:version>
+                      <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
+                      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>${phased_line}
+                      <enclosure
+                          url="$DOWNLOAD_URL"
+                          type="application/octet-stream"
+                          $SPARKLE_SIG_LINE />
+                  </item>
+              </channel>
+          </rss>
+          EOF
+            sed -i '' 's/^          //' "$dest"
+            xmllint --noout "$dest"
+          }
+
+          # Beta feed always receives new releases immediately (both beta/rc tags
+          # and promoted stable releases).
+          write_appcast "dist/appcast-beta.xml" ""
+
+          # Stable feed is updated ONLY on stable channel promotions and enforces
+          # a 24-hour (86400s) phased rollout window (P1-4).
+          if [ "$RELEASE_CHANNEL" = "stable" ]; then
+            write_appcast "dist/appcast.xml" $'\n                      <sparkle:phasedRolloutInterval>86400</sparkle:phasedRolloutInterval>'
+          fi
+
+      - name: Upload signed macOS release artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: macos-release-dist
           path: |
             dist/SuperManager-*.zip
             !dist/*-notarize.zip
+            dist/SuperManager-*.dmg
             dist/SuperManager-vpn-dns-cleanup-*.pkg
             dist/appcast*.xml
           if-no-files-found: error
           retention-days: 1
 
-      - name: Tear down keychain
+      - name: Tear down signing material
         if: always()
         run: |
           security delete-keychain build.keychain || true
@@ -166,28 +541,28 @@ jobs:
   build-windows:
     needs: [ci]
     runs-on: windows-2025
-    environment: release
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.99.1
         with:
           toolchain: "1.99.1"
 
-      - name: Cargo build (release)
+      - name: Cargo build (release, --locked)
         env:
-          SUPERMGR_RELEASE_VERSION: ${{ github.ref_name }}
+          SUPERMGR_RELEASE_VERSION: ${{ inputs.tag || github.ref_name }}
         run: |
           cargo build --release --locked `
             -p supermgrd-win `
             -p supermgr-win `
             -p supermgr-mcp
 
-      - name: Test Windows daemon
+      - name: Test Windows daemon (--locked)
         run: cargo test --release --locked -p supermgr-core -p supermgrd-win -p supermgr-win -p supermgr-mcp
 
       - name: Install WiX v5
@@ -216,9 +591,14 @@ jobs:
 
       - name: Stage and hash Windows release artifacts
         shell: pwsh
+        env:
+          RAW_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $version = "$env:GITHUB_REF_NAME".TrimStart('v')
+          if ($env:RAW_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$') {
+              throw "Invalid release tag: $($env:RAW_TAG)"
+          }
+          $version = "$env:RAW_TAG".TrimStart('v')
           New-Item -ItemType Directory -Force -Path "dist-win" | Out-Null
           $msi = "dist-win\SuperManager-$version.msi"
           $exe = "dist-win\SuperManager-Setup-$version.exe"
@@ -245,12 +625,38 @@ jobs:
           retention-days: 1
 
   publish:
-    needs: [build-macos, build-windows]
+    needs: [sign-macos, build-windows]
     runs-on: ubuntu-26.04
+    environment: release
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+
+      - name: Resolve release tag and channel
+        env:
+          RAW_TAG: ${{ inputs.tag || github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RAW_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "error: invalid release tag '$RAW_TAG'" >&2
+            exit 1
+          fi
+          if [[ "$RAW_TAG" == *-* ]]; then
+            CHANNEL="beta"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "${INPUT_CHANNEL:-beta}" != "stable" ]; then
+            CHANNEL="beta"
+          else
+            CHANNEL="stable"
+          fi
+          echo "RELEASE_TAG=$RAW_TAG" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION=${RAW_TAG#v}" >> "$GITHUB_ENV"
+          echo "RELEASE_CHANNEL=$CHANNEL" >> "$GITHUB_ENV"
 
       - name: Download macOS release artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
@@ -267,16 +673,12 @@ jobs:
       - name: Verify complete cross-platform artifact set
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
-            FEED_FILE="appcast-beta.xml"
-          else
-            FEED_FILE="appcast.xml"
-          fi
+          VERSION="$RELEASE_VERSION"
           for required in \
             "release-assets/macos/SuperManager-${VERSION}.zip" \
+            "release-assets/macos/SuperManager-${VERSION}.dmg" \
             "release-assets/macos/SuperManager-vpn-dns-cleanup-${VERSION}.pkg" \
-            "release-assets/macos/${FEED_FILE}" \
+            "release-assets/macos/appcast-beta.xml" \
             "release-assets/windows/SuperManager-${VERSION}.msi" \
             "release-assets/windows/SuperManager-${VERSION}.msi.sha256" \
             "release-assets/windows/SuperManager-Setup-${VERSION}.exe" \
@@ -286,19 +688,31 @@ jobs:
           do
             [ -s "$required" ] || { echo "missing or empty release asset: $required" >&2; exit 1; }
           done
+
           command -v xmllint >/dev/null \
             || { sudo apt-get update -qq && sudo apt-get install -y -qq libxml2-utils; }
-          xmllint --noout "release-assets/macos/${FEED_FILE}"
+          xmllint --noout "release-assets/macos/appcast-beta.xml"
+
+          if [ "$RELEASE_CHANNEL" = "stable" ]; then
+            [ -s "release-assets/macos/appcast.xml" ] \
+              || { echo "missing stable appcast.xml" >&2; exit 1; }
+            xmllint --noout "release-assets/macos/appcast.xml"
+            grep -Fq "<sparkle:phasedRolloutInterval>86400</sparkle:phasedRolloutInterval>" \
+              "release-assets/macos/appcast.xml" \
+              || { echo "stable appcast.xml missing 86400s phasedRolloutInterval" >&2; exit 1; }
+          fi
 
       - name: Stage draft GitHub Release with all assets
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           draft: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ env.RELEASE_CHANNEL != 'stable' }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
             release-assets/macos/SuperManager-*.zip
+            release-assets/macos/SuperManager-*.dmg
             release-assets/macos/SuperManager-vpn-dns-cleanup-*.pkg
             release-assets/macos/appcast*.xml
             release-assets/windows/SuperManager-*.msi
@@ -313,30 +727,40 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release edit "$GITHUB_REF_NAME" --draft=false
+          gh release edit "$RELEASE_TAG" --draft=false
 
-      - name: Publish appcast to main
+      - name: Publish appcast feed(s) to main
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
-            FEED_FILE="appcast-beta.xml"
-          else
-            FEED_FILE="appcast.xml"
+          FEEDS=("appcast-beta.xml")
+          if [ "$RELEASE_CHANNEL" = "stable" ]; then
+            FEEDS+=("appcast.xml")
           fi
-          cp "release-assets/macos/$FEED_FILE" "$RUNNER_TEMP/$FEED_FILE"
-          git fetch origin main
+          for feed in "${FEEDS[@]}"; do
+            cp "release-assets/macos/$feed" "$RUNNER_TEMP/$feed"
+          done
+
+          # Authenticate transiently per git command since persist-credentials: false is enforced.
+          AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          git -c "http.https://github.com/.extraheader=${AUTH_HEADER}" fetch origin main
           git checkout --detach origin/main
-          cp "$RUNNER_TEMP/$FEED_FILE" "$FEED_FILE"
-          if git diff --quiet -- "$FEED_FILE"; then
-            echo "$FEED_FILE is already current."
+
+          for feed in "${FEEDS[@]}"; do
+            cp "$RUNNER_TEMP/$feed" "$feed"
+          done
+          if git diff --quiet -- "${FEEDS[@]}"; then
+            echo "Appcast feed(s) (${FEEDS[*]}) already current on main."
             exit 0
           fi
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$FEED_FILE"
-          git commit -m "chore(release): publish ${GITHUB_REF_NAME} appcast"
-          git push origin HEAD:main || {
-            git fetch origin main
+          git add "${FEEDS[@]}"
+          git commit -m "chore(release): publish ${RELEASE_TAG} (${RELEASE_CHANNEL}) appcast"
+          git -c "http.https://github.com/.extraheader=${AUTH_HEADER}" push origin HEAD:main || {
+            git -c "http.https://github.com/.extraheader=${AUTH_HEADER}" fetch origin main
             git rebase origin/main
-            git push origin HEAD:main
+            git -c "http.https://github.com/.extraheader=${AUTH_HEADER}" push origin HEAD:main
           }

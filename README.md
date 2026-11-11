@@ -2,13 +2,32 @@
 
 A unified SSH, VPN, and network device management application for **Linux** (GTK4), **macOS** (SwiftUI), and **Windows** (Slint), built with a shared Rust core.
 
-SuperManager consolidates SSH key management, VPN connections (WireGuard, FortiGate IPsec + SSL VPN, OpenVPN, Azure VPN, IKEv2), network device monitoring (FortiGate, UniFi, OPNsense, Sophos XG), and remote desktop into a single desktop application with an integrated AI assistant.
+SuperManager consolidates SSH key management, VPN connections (WireGuard, FortiGate IPsec/IKEv2, OpenVPN, Azure VPN, Tailscale), and network device management (FortiGate, UniFi, OPNsense, Sophos XG) into native desktop applications with an MCP server (`supermgr-mcp`) for AI assistants.
 
-- **Linux** — GTK4 + libadwaita GUI talking to a `supermgrd` D-Bus system daemon.
+- **Linux** — GTK4 + libadwaita GUI talking to a `supermgrd` D-Bus system daemon (includes Linux-only Remote Desktop, Fleet operations, and built-in Claude AI console).
 - **macOS** — native SwiftUI app talking to `supermgrd-mac` (`supermgr-engine`) and a privileged `supermanager-helper` LaunchDaemon over Unix sockets.
-- **Windows** — Slint GUI covering core VPN, SSH host/key management, and in-app updates, talking to a `supermgrd-win` Windows Service over a named pipe. See [WINDOWS.md](WINDOWS.md) for current scope, install, and build instructions.
+- **Windows** — Slint GUI covering core VPN, SSH host/key management, appliance checks, and in-app updates, talking to a `supermgrd-win` Windows Service over a named pipe. See [WINDOWS.md](WINDOWS.md) for current scope, install, and build instructions.
 
 All three share `supermgr-core` (domain types, traits, SSH primitives, validation, and RPC clients), while `supermgr-engine` backs the macOS daemon (`supermgrd-mac`).
+
+## Platform Support Matrix
+
+| Capability | Linux (`supermgr` + `supermgrd`) | macOS (`SuperManagerMac` + helper) | Windows (`supermgr-win` + `supermgrd-win`) |
+|---|---|---|---|
+| **WireGuard** | Supported (kernel netlink) | Supported (`wireguard-go` + `wg`) | Supported (WireGuardNT) |
+| **IKEv2 / FortiGate IPsec** | Supported (strongSwan) | Supported (strongSwan `charon`/`swanctl`) | Supported (native Windows RAS) |
+| **OpenVPN (`.ovpn`)** | Supported (`openvpn3`) | Supported (`openvpn` 2.x / `ovpncli`) | Supported (`openvpn.exe` 2.6+) |
+| **Azure VPN (Entra ID)** | Supported (`openvpn` 2.7+) | Supported (bundled `openvpn3`) | Supported (`openvpn.exe` 2.6+) |
+| **FortiGate SSL VPN** | Not supported (use IPsec/IKEv2) | Not supported (use IPsec/IKEv2) | Supported (`openfortivpn.exe`, user-supplied) |
+| **Tailscale** | Supported (`tailscale` package) | Supported (bundled runtime) | Not supported |
+| **VPN Kill Switch** | Supported (`nftables`) | Supported (`pf` per-profile anchor) | Not supported |
+| **SSH Keys & Host Management** | Supported | Supported | Supported |
+| **FortiGate & UniFi Monitoring** | Supported | Supported | Supported (FortiGate/OPNsense RPC) |
+| **Compliance & Provisioning** | Supported | Supported | Not supported |
+| **MCP Server (`supermgr-mcp`)** | Supported | Supported | Supported |
+| **Fleet / Multi-Host Batch Ops** | **Linux only** | — | — |
+| **Remote Desktop (RDP / VNC)** | **Linux only** | — | — |
+| **Built-in Claude AI Console** | **Linux only** | — (use `supermgr-mcp`) | — (use `supermgr-mcp`) |
 
 ## Install
 
@@ -86,7 +105,7 @@ supermgr-update --check    # just tell me; exit 10 = update available
 
 The install records where the checkout lives, so `supermgr-update` works
 from anywhere. In the app, **Settings → Updates** does the same thing:
-checks your build's commit against `origin/main` on GitHub and runs
+checks your build against signed release tags on GitHub and runs
 `supermgr-update` with its output streamed into a dialog (elevating via
 polkit, since there is no terminal to ask for `sudo` in).
 
@@ -101,8 +120,8 @@ take the bare `.msi` instead. See [WINDOWS.md](WINDOWS.md).
 
 Updates after that are in-app: **Settings → About → Check for updates**
 (also in the tray menu) compares against the newest GitHub release,
-downloads the installer, verifies it against the published SHA-256, and
-hands over to it.
+downloads the installer, verifies its SHA-256 digest and Authenticode
+signature on the locked file handle, and hands over to it.
 
 ### What works out of the box, and what needs a tool
 
@@ -114,12 +133,12 @@ machine by hand or wondering why one profile type won't connect.
 | Feature | Needs |
 |---|---|
 | SSH, key management, network scan, compliance, UniFi, FortiGate API | nothing |
-| Tailscale | macOS: bundled (`tailscaled` installed on first use); Linux: `tailscale` package (GUI can install/repair) |
+| Tailscale | macOS: bundled (`tailscaled` installed on first use); Linux: `tailscale` system package |
 | WireGuard | `wireguard-tools` (Linux/macOS) / bundled WireGuardNT (Windows) |
 | IKEv2 / FortiGate IPsec | `strongswan` (Linux/macOS) / native Windows RAS (Windows) |
 | FortiGate SSL VPN | **Windows only** — `openfortivpn.exe`, which you supply (no upstream Windows release). Linux and macOS have no backend for it; use the IPsec/IKEv2 profile type instead |
-| Standard `.ovpn` profiles | macOS & Windows: `openvpn` (2.x); Linux: `openvpn3` (AUR on Arch, upstream repo elsewhere) |
-| Azure VPN (Entra ID) | Linux & Windows: `openvpn` (2.7+); macOS: bundled, protected `openvpn3` runtime |
+| Standard `.ovpn` profiles | macOS & Windows: `openvpn` (2.6+); Linux: `openvpn3` (AUR on Arch, upstream repo elsewhere) |
+| Azure VPN (Entra ID) | Linux: `openvpn` (2.7+); Windows: `openvpn` (2.6+); macOS: bundled, protected `openvpn3` runtime |
 | Reading stored credentials (Linux) | `polkit` — the daemon fails closed without it |
 
 The app tells you again if you try to connect a profile whose tool isn't
@@ -154,7 +173,7 @@ installer asks for `sudo` to place system files and start the daemon.
 - Host-key verification with a visible fingerprint and a Forget action
   ([details](#ssh-host-keys))
 - Host health monitoring with live reachability indicators
-- **Batch command execution** — run commands on multiple hosts simultaneously
+- **Batch / Fleet command execution (Linux only)** — run commands across multiple hosts simultaneously
 - **~/.ssh/config sync** — generate SSH config entries for all managed hosts
 - Search, filter, and pin favorite hosts
 - Bastion/jump host support with ProxyJump
@@ -176,7 +195,7 @@ installer asks for `sudo` to place system files and start the daemon.
   replay — captured on the first successful manual connect. The toggle shows that
   state rather than claiming protection it cannot yet deliver
 
-### Remote Desktop
+### Remote Desktop (Linux only)
 - RDP and VNC with one-click launch from host detail
 - Credentials auto-filled from stored SSH passwords
 - Configurable client: Auto / Remmina / xfreerdp3 / xfreerdp
@@ -196,16 +215,16 @@ installer asks for `sudo` to place system files and start the daemon.
 - Timestamps, icons, wrapping text, clear button
 - Webhook notifications for offline UniFi devices (Slack/Teams/Discord)
 
-### Claude AI Console
-- Built-in chat interface with Claude (Anthropic)
+### Claude AI Console (Linux only; use `supermgr-mcp` on macOS/Windows)
+- Built-in chat interface with Claude (Anthropic) in the Linux GTK app
 - Two modes: **Subscription** (Claude Code CLI) or **API key** (pay-per-token)
 - Streaming responses with conversation memory
-- 10+ tools: list hosts/keys, execute remote commands, manage VPN, FortiGate API
+- Scoped `supermgr-mcp` MCP server available on Linux, macOS, and Windows
 
 ### Network Provisioning Wizard
 - 5-step guided setup for FortiGate and UniFi devices
 - Customer info, network design (WAN/LAN/VLANs), services, security policies
-- Claude generates production-ready configurations following CIS benchmarks
+- Template-driven configurations following CIS benchmarks with idempotent FortiOS deployment
 - Push config via SSH/REST API or export to file
 
 ### Daemon Logs
@@ -216,8 +235,11 @@ installer asks for `sudo` to place system files and start the daemon.
 - Configurable daemon log level (ERROR through TRACE)
 
 ### Security
-- Desktop UI lock with Argon2id (Linux) / PBKDF2-SHA256 (macOS) password verification and configurable inactivity auto-lock (locks the GUI window; daemon secret storage is protected by OS-level access controls)
-- Secrets stored in a root-restricted `0600` store on Linux (`/etc/supermgrd/secrets.json`), Keychain + `0600` user store on macOS, and `LocalSystem` Credential Manager on Windows
+- Desktop UI lock with Argon2id (Linux) / PBKDF2-SHA256 (macOS) password verification and configurable inactivity auto-lock (locks the GUI windows and menu bar; daemon secret storage is protected by OS-level access controls)
+- Secret storage per platform:
+  - **Linux:** Daemon secrets in a root-owned `0600` store (`/etc/supermgrd/secrets.json`); GTK GUI API keys in Secret Service / GNOME Keyring
+  - **macOS:** VPN credentials in the macOS Keychain; `supermgr-engine` secrets AES-256-GCM encrypted at rest (`secrets.json`, `0600`) with a master wrapping key held in the macOS Keychain
+  - **Windows:** `LocalSystem` Credential Manager (`CredWriteW` / `CredReadW`)
 - Audit logging for all SSH, VPN, and API operations
 - **SSH host-key verification** on every platform — trust-on-first-use, then
   a fingerprint mismatch refuses the connection (see below)
@@ -307,15 +329,14 @@ starting with an empty store and re-trusting the whole fleet.
 
 ```
 # Shared by every platform
-supermgr-core/         Types, IPC interface definitions (D-Bus / named pipe),
-                       keychain abstraction (Linux: secret-service, macOS:
-                       Keychain, Windows: Credential Manager), error
-                       hierarchy, and the shared SSH layer — key generation,
-                       ~/.ssh import scanning, known-hosts verification, and
-                       authorized_keys push/revoke
-supermgr-engine/       Renderers (Azure VPN, OpenVPN), scan and recon logic,
-                       JSON-RPC handlers (used by the macOS daemon)
-supermgr-mcp/          MCP server for Claude Code integration
+supermgr-core/         Domain types, IPC framing and clients, validation,
+                       compliance baselines, error hierarchy, and the shared
+                       SSH layer — key generation, ~/.ssh import scanning,
+                       known-hosts verification, and authorized_keys push/revoke
+supermgr-engine/       FortiGate/UniFi clients, provisioning, compliance,
+                       network discovery, encrypted secret store, and JSON-RPC
+                       handlers (used by the macOS daemon)
+supermgr-mcp/          Scoped MCP server for AI assistant integration
 
 # Linux
 supermgrd/             Privileged daemon (runs as root via systemd, D-Bus)
@@ -325,7 +346,7 @@ supermgr/              GTK4/Adwaita GUI (runs as user)
 supermgrd-mac/         User-space daemon — wraps supermgr-engine, JSON-RPC
                        over Unix socket
 supermanager-helper/   Privileged helper (LaunchDaemon, JSON-RPC over Unix
-                       socket, ovpncli/openvpn/strongSwan supervision)
+                       socket, ovpncli/openvpn/strongSwan/wireguard-go/pf)
 SuperManagerMac/       Native SwiftUI app
 
 # Windows
@@ -334,11 +355,11 @@ supermgrd-win/         Privileged daemon (Windows Service running as
 supermgr-win/          Slint GUI (runs as user)
 ```
 
-**Linux:** the GUI talks to `supermgrd` over D-Bus on the system bus. The daemon handles privileged operations: network interface creation, secret storage (Secret Service), SSH connections, and VPN management.
+**Linux:** the GUI talks to `supermgrd` over D-Bus on the system bus. The daemon handles privileged operations: network interface creation, nftables kill switch, root-owned `0600` secret storage (`/etc/supermgrd/secrets.json`, while the GTK GUI stores user API keys in Secret Service), SSH connections, and VPN management.
 
-**macOS:** the SwiftUI app talks to `supermgrd-mac` (user) and `supermanager-helper` (root) over Unix sockets. The helper supervises VPN tunnels (`ovpncli` for OpenVPN3 / `openvpn` for 2.x, `strongSwan` for IKEv2, kernel `wg` for WireGuard). Secrets live in the macOS Keychain via `security-framework`.
+**macOS:** the SwiftUI app talks to `supermgrd-mac` (user) and `supermanager-helper` (root) over Unix sockets. The helper supervises VPN tunnels (`ovpncli` for OpenVPN3 / `openvpn` for 2.x, `strongSwan` for IKEv2, `wireguard-go`/`wg` for WireGuard, and per-profile `pf` kill-switch anchors). VPN credentials live in the macOS Keychain, and engine secrets are AES-256-GCM encrypted with a Keychain-held master key.
 
-**Windows:** the Slint GUI talks to the `supermgrd-win` service over `\\.\pipe\supermgrd`. The service drives WireGuardNT, the OpenVPN and openfortivpn executables, Windows RAS for IKEv2, and WFP for the kill switch. Secrets live in Credential Manager. See [WINDOWS.md](WINDOWS.md).
+**Windows:** the Slint GUI talks to the `supermgrd-win` service over `\\.\pipe\supermgrd`. The service drives WireGuardNT, Authenticode-verified OpenVPN and openfortivpn executables, and Windows RAS for IKEv2. Secrets live in `LocalSystem` Credential Manager. See [WINDOWS.md](WINDOWS.md).
 
 ### Where the shared code lives
 
@@ -542,12 +563,6 @@ cargo test -p supermgr-core -p supermgr-mcp -p supermgrd-win -p supermgr-win
 any machine. It is **not** the set to build or test against — see the Linux build
 note above.
 
-Extra system packages the tests need beyond the build dependencies:
-
-- **Linux:** `tcpdump` — the engine's traffic-sniff analysis shells out to it, and
-  its tests do too. Without it, two `traffic_sniff` tests fail with
-  `spawn tcpdump: No such file or directory`; nothing else in the suite needs it.
-
 ### Checkouts on filesystems that don't preserve the exec bit
 
 Cloud-sync and foreign filesystems — OneDrive/Dropbox FUSE mounts, exFAT/NTFS,
@@ -600,9 +615,9 @@ shortcut for the GUI.
 - **GUI (Windows):** Slint
 - **IPC:** zbus D-Bus on Linux, JSON-RPC over Unix sockets on macOS, named pipe on Windows
 - **SSH:** russh (pure Rust, async), with host-key verification and `authorized_keys` editing shared across all three platforms in `supermgr-core`
-- **VPN:** WireGuard netlink (Linux) / kernel `wg` (macOS) / WireGuardNT (Windows), strongSwan swanctl, OpenVPN3 `ovpncli` (macOS Azure path) + OpenVPN 2.x CLI, Windows RAS for IKEv2, Azure Entra ID OAuth2 (PKCE)
-- **Keychain:** Secret Service / GNOME Keyring on Linux, `security-framework` on macOS, Credential Manager on Windows
-- **Password hashing:** Argon2id (`argon2` crate, OWASP defaults)
+- **VPN:** WireGuard netlink (Linux) / `wireguard-go` + `wg` (macOS) / WireGuardNT (Windows), strongSwan `swanctl`, OpenVPN3 `ovpncli` (macOS Azure path) + OpenVPN 2.6+ CLI, Windows RAS for IKEv2, Azure Entra ID OAuth2 (PKCE)
+- **Secret storage:** root-owned `0600` store + Secret Service for UI keys on Linux, macOS Keychain + Keychain-wrapped AES-256-GCM store on macOS, `LocalSystem` Credential Manager on Windows
+- **Password hashing:** Argon2id (`argon2` crate, OWASP defaults) on Linux, PBKDF2-SHA256 on macOS
 - **AI:** Anthropic Claude API + Claude Code CLI
 - **HTTP:** reqwest (native-tls)
 - **Cloud:** UI.com Site Manager API (UniFi)

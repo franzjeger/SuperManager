@@ -708,8 +708,14 @@ mod tests {
         assert!(super::validate_rasdial_username("-flag").is_err());
         assert!(super::validate_rasdial_username("alice\nbob").is_err());
 
-        assert_eq!(super::split_ras_domain_user("CORP\\alice"), ("CORP", "alice"));
-        assert_eq!(super::split_ras_domain_user("alice@example.com"), ("", "alice@example.com"));
+        assert_eq!(
+            super::split_ras_domain_user("CORP\\alice"),
+            ("CORP", "alice")
+        );
+        assert_eq!(
+            super::split_ras_domain_user("alice@example.com"),
+            ("", "alice@example.com")
+        );
         assert!(super::encode_ras_field::<16>("CORP", "domain").is_ok());
         assert!(super::encode_ras_field::<8>("12345678", "password").is_err());
         assert!(super::encode_ras_field::<8>("ab\0cd", "password").is_err());

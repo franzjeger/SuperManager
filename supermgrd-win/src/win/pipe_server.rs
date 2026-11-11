@@ -45,9 +45,7 @@ fn create_listener(first: bool) -> std::io::Result<(NamedPipeServer, PipeSecurit
     Ok((server, security))
 }
 
-async fn next_listener_or_shutdown(
-    shutdown: &Notify,
-) -> Option<(NamedPipeServer, PipeSecurity)> {
+async fn next_listener_or_shutdown(shutdown: &Notify) -> Option<(NamedPipeServer, PipeSecurity)> {
     let mut delay = Duration::from_millis(50);
     loop {
         match create_listener(false) {
@@ -156,7 +154,8 @@ async fn handle_connection(
         }
 
         if caller_auth.is_none() {
-            let raw_handle = reader.get_ref().as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+            let raw_handle =
+                reader.get_ref().as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
             match caller_auth_from_pipe(raw_handle) {
                 Ok(auth) => caller_auth = Some(auth),
                 Err(e) => {

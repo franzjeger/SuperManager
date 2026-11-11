@@ -766,73 +766,26 @@ fn hex_to_openvpn_key(hex: &str) -> String {
 }
 
 /// Assemble the `.ovpn` text from the profile config + tempfile paths after
-/// validating `gateway_fqdn`, `tenant_id`, `client_id`, and `ca_cert_pem`.
+/// validating `gateway_fqdn`, `tenant_id`, `client_id`, `ca_cert_pem`, and
+/// quoting Windows runtime paths with forward slashes (`P2-41`).
+///
+/// Split tunnel means what the gateway pushes — the networks behind it, as the
+/// Azure VPN Client gets them — plus any routes the profile adds. Forcing
+/// `redirect-gateway` when the profile listed no routes caused P2S gateways
+/// not built for forced tunnelling to drop internet traffic.
 fn build_ovpn_config(
     cfg: &AzureVpnConfig,
     key_path: &str,
     auth_path: &str,
     full_tunnel: bool,
 ) -> Result<String, VpnError> {
-    crate::rpc_args::validate_azure_ovpn_inputs(cfg).map_err(VpnError::MissingDependency)?;
-    let mut s = format!(
-        "client\n\
-         dev tun\n\
-         proto tcp\n\
-         remote {fqdn} 443\n\
-         resolv-retry infinite\n\
-         nobind\n\
-         persist-tun\n\
-         remote-cert-tls server\n\
-         auth SHA256\n\
-         cipher AES-256-GCM\n\
-         data-ciphers AES-256-GCM\n\
-         disable-dco\n\
-         verb 3\n\
-         suppress-timestamps\n\
-         <ca>\n",
-        fqdn = cfg.gateway_fqdn,
-    );
-    s.push_str(&cfg.ca_cert_pem);
-    if !cfg.ca_cert_pem.ends_with('\n') {
-        s.push('\n');
-    }
-    s.push_str("</ca>\n");
-
-    s.push_str(&format!("auth-user-pass {auth_path}\n"));
-    s.push_str(&format!("tls-auth {key_path} 1\n"));
-
-    // Split tunnel means what the gateway pushes — the networks behind it,
-    // as the Azure VPN Client gets them — plus any routes the profile adds.
-    // This used to force `redirect-gateway` whenever the profile listed no
-    // routes, the usual case, and a P2S gateway not built for forced
-    // tunnelling drops internet traffic: connected, and nothing loads.
-    if full_tunnel {
-        s.push_str("redirect-gateway def1\n");
-    } else {
-        for route in &cfg.routes {
-            match route {
-                ipnet::IpNet::V4(n) => {
-                    s.push_str(&format!("route {} {}\n", n.network(), n.netmask()));
-                }
-                ipnet::IpNet::V6(n) => {
-                    s.push_str(&format!("route-ipv6 {}/{}\n", n.network(), n.prefix_len()));
-                }
-            }
-        }
-    }
-
-    if !cfg.dns_servers.is_empty() {
-        s.push_str("dhcp-option DNS ");
-        s.push_str(
-            &cfg.dns_servers
-                .iter()
-                .map(|ip| ip.to_string())
-                .collect::<Vec<_>>()
-                .join(" "),
-        );
-        s.push('\n');
-    }
-    Ok(s)
+    crate::rpc_args::render_azure_ovpn_config(
+        cfg,
+        std::path::Path::new(key_path),
+        std::path::Path::new(auth_path),
+        full_tunnel,
+    )
+    .map_err(VpnError::MissingDependency)
 }
 
 // ---------------------------------------------------------------------------
@@ -954,6 +907,20 @@ mod tests {
         let mut bad_gw = config(&[]);
         bad_gw.gateway_fqdn = "gw.vpn.azure.com\nup calc.exe".into();
         assert!(build_ovpn_config(&bad_gw, "k", "a", false).is_err());
+    }
+
+    #[test]
+    fn build_ovpn_config_normalizes_windows_backslashes_for_openvpn_parser() {
+        let ovpn = build_ovpn_config(
+            &config(&[]),
+            r"C:\ProgramData\SuperManager\azure\tls-auth.key",
+            r"C:\ProgramData\SuperManager\azure\auth.txt",
+            false,
+        )
+        .unwrap();
+        assert!(!ovpn.contains('\\'), "{ovpn}");
+        assert!(ovpn.contains(r#"auth-user-pass "C:/ProgramData/SuperManager/azure/auth.txt""#));
+        assert!(ovpn.contains(r#"tls-auth "C:/ProgramData/SuperManager/azure/tls-auth.key" 1"#));
     }
 
     const STATE: &str = "5b1c1f9e-state";

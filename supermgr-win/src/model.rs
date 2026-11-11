@@ -678,6 +678,20 @@ pub fn sanitize_installer_filename(raw: &str) -> Result<&str, String> {
     Ok(file_name)
 }
 
+/// Extract and validate the 64-character hex digest from a `<hex>  <filename>`
+/// `.sha256` release sidecar (`P1-6`).
+pub fn parse_sha256_sidecar(raw: &str) -> Result<String, String> {
+    let token = raw
+        .trim_start_matches('\u{feff}')
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| "empty .sha256 sidecar".to_owned())?;
+    if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("malformed .sha256 sidecar (expected 64-character hex digest)".into());
+    }
+    Ok(token.to_ascii_lowercase())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -986,5 +1000,20 @@ mod tests {
                 "accepted unsafe installer name {bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn sha256_sidecar_parser_validates_exact_hex_digest() {
+        let valid = "ABCDEF0123456789abcdef0123456789ABCDEF0123456789abcdef0123456789  SuperManager-Setup-1.8.0.exe\r\n";
+        assert_eq!(
+            parse_sha256_sidecar(valid).unwrap(),
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        );
+        let with_bom = "\u{feff}0000000000000000000000000000000000000000000000000000000000000000 *SuperManager.msi";
+        assert_eq!(parse_sha256_sidecar(with_bom).unwrap(), "0".repeat(64));
+        assert!(parse_sha256_sidecar("").is_err());
+        assert!(parse_sha256_sidecar("not-a-hex-digest  SuperManager.msi").is_err());
+        assert!(parse_sha256_sidecar(&"z".repeat(64)).is_err());
+        assert!(parse_sha256_sidecar(&"a".repeat(63)).is_err());
     }
 }

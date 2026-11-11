@@ -16,4 +16,4 @@ At this point, you're ready to make your changes. Feel free to ask for help; eve
 
 ## 4. Make a Pull Request
 
-At this point, you should switch back to the master branch and make sure it's up to date with the main repository. Once your feature branch is up to date, make a Pull Request!
+Switch back to the `main` branch and make sure your feature branch is rebased or up to date with `origin/main`. Before opening a Pull Request, run `cargo fmt --all -- --check`, `cargo clippy`, and `cargo test` for the crates on your platform.
