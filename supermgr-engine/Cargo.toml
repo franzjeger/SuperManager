@@ -13,6 +13,7 @@ async-trait     = { workspace = true }
 base64          = { workspace = true }
 chrono          = { workspace = true }
 ipnet           = { workspace = true }
+native-tls      = "0.2"
 reqwest         = { workspace = true }
 rsa             = { workspace = true }
 russh           = { workspace = true }
@@ -23,9 +24,11 @@ sha2            = { workspace = true }
 ssh-key         = { workspace = true }
 thiserror       = { workspace = true }
 tokio           = { workspace = true }
+tokio-native-tls = "0.3"
 toml            = { workspace = true }
 tera            = { workspace = true }
 tracing         = { workspace = true }
+url             = { workspace = true }
 uuid            = { workspace = true }
 zeroize         = { workspace = true }
 # Secure temp files — random suffix + 0o600 mode + auto-unlink on drop.

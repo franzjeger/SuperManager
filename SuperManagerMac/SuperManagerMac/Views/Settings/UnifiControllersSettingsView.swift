@@ -211,6 +211,7 @@ struct UnifiControllersSettingsView: View {
                 Section("Connection") {
                     LabeledContent("Site", value: c.siteId)
                     LabeledContent("Username", value: c.username)
+                    LabeledContent("TLS verification", value: c.verifyTls ? "Strict CA" : "Pinned on first use (TOFU)")
                     LabeledContent("Verified") {
                         if let v = c.verifiedAt {
                             Text(v.formatted(date: .abbreviated, time: .shortened))
@@ -441,6 +442,7 @@ struct UnifiControllerEditSheet: View {
     @State private var username: String
     @State private var credential: String   // password OR api key, depending on authMethod
     @State private var customerSlug: String
+    @State private var verifyTls: Bool
     @State private var saving = false
     @State private var errorMessage: String?
 
@@ -453,6 +455,7 @@ struct UnifiControllerEditSheet: View {
         _username = State(initialValue: controller?.username ?? "")
         _credential = State(initialValue: "")
         _customerSlug = State(initialValue: controller?.customerSlug ?? "")
+        _verifyTls = State(initialValue: controller?.verifyTls ?? true)
     }
 
     private var isEdit: Bool { controller != nil }
@@ -542,6 +545,12 @@ struct UnifiControllerEditSheet: View {
                         )
                         .help("Paste the X-API-KEY value minted in the controller UI.")
                     }
+                    Toggle("Verify TLS certificate", isOn: $verifyTls)
+                    if !verifyTls {
+                        Text("Self-signed controller certificates are pinned on first connection (TOFU).")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 if let err = errorMessage {
                     Section { Text(err).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
@@ -605,7 +614,8 @@ struct UnifiControllerEditSheet: View {
             username: authMethod == .password ? username : "",
             credential: credential.isEmpty ? nil : credential,
             siteId: siteId.isEmpty ? "default" : siteId,
-            customerSlug: trimmedSlug.isEmpty ? nil : trimmedSlug
+            customerSlug: trimmedSlug.isEmpty ? nil : trimmedSlug,
+            verifyTls: verifyTls
         )
         switch result {
         case .success:

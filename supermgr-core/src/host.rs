@@ -38,6 +38,11 @@ fn default_port() -> u16 {
     22
 }
 
+/// Default `api_verify_tls` value (`true` — strict certificate verification).
+const fn default_true() -> bool {
+    true
+}
+
 /// A managed SSH host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Host {
@@ -95,8 +100,10 @@ pub struct Host {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_token_ref: Option<SecretRef>,
 
-    /// Skip TLS certificate verification for `FortiGate` REST API calls.
-    #[serde(default)]
+    /// Verify TLS certificate chain and hostname for appliance REST API calls.
+    /// Defaults to `true`; when `false`, callers pin the server certificate on
+    /// first use (`KnownHostsStore`).
+    #[serde(default = "default_true")]
     pub api_verify_tls: bool,
 
     /// `UniFi` Controller URL (e.g. "<https://unifi.example.com:8443>").
@@ -190,6 +197,10 @@ pub struct HostSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_port: Option<u16>,
 
+    /// Whether TLS certificates are strictly verified on appliance REST API calls.
+    #[serde(default = "default_true")]
+    pub api_verify_tls: bool,
+
     /// Whether an SSH certificate is stored for this host.
     #[serde(default)]
     pub has_certificate: bool,
@@ -244,6 +255,7 @@ impl From<&Host> for HostSummary {
             has_certificate: host.auth_cert_ref.is_some(),
             has_api: host.api_token_ref.is_some(),
             api_port: host.api_port,
+            api_verify_tls: host.api_verify_tls,
             has_unifi_controller: host.unifi_controller_url.is_some(),
             unifi_controller_url: host.unifi_controller_url.clone(),
             rdp_port: host.rdp_port,
@@ -327,6 +339,10 @@ mod tests {
         }"#;
         let host: Host = serde_json::from_str(json).expect("deserialize host without port");
         assert_eq!(host.port, 22);
+        assert!(
+            host.api_verify_tls,
+            "api_verify_tls must default to true when omitted"
+        );
     }
 
     #[test]

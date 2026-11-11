@@ -250,11 +250,12 @@ impl EngineServer {
                 // list under a single lock acquisition so we
                 // don't hold the state lock during the
                 // network round-trips below.
-                let (controllers, override_store) = {
+                let (controllers, override_store, known_hosts) = {
                     let st = self.state.lock().await;
                     (
                         st.unifi_controllers.values().cloned().collect::<Vec<_>>(),
                         st.device_type_overrides.clone(),
+                        std::sync::Arc::clone(&st.known_hosts),
                     )
                 };
                 // Apply manual device-type overrides FIRST so
@@ -275,6 +276,7 @@ impl EngineServer {
                     if !macs.is_empty() {
                         let by_mac = crate::unifi_controllers::cross_reference(
                             &self.secrets,
+                            &known_hosts,
                             &controllers,
                             &macs,
                         )

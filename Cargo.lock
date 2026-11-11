@@ -7711,6 +7711,7 @@ dependencies = [
  "core-foundation 0.10.1",
  "core-foundation-sys",
  "ipnet",
+ "native-tls",
  "nix 0.31.3",
  "proptest",
  "reqwest",
@@ -7728,8 +7729,10 @@ dependencies = [
  "tera",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-native-tls",
  "toml 0.8.2",
  "tracing",
+ "url",
  "uuid",
  "zeroize",
 ]

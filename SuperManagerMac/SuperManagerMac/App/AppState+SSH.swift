@@ -50,7 +50,8 @@ extension AppState {
                  unrecognizedDeviceTypeRawValue: String? = nil,
                  authMethod: AuthMethod,
                  authKeyId: String? = nil, password: String? = nil,
-                 certificate: String? = nil) async {
+                 certificate: String? = nil,
+                 apiVerifyTls: Bool = true) async {
         // Use the original wire string for unrecognised types to
         // prevent round-trip data loss. For all known types (and
         // genuinely-.custom hosts), rawValue is the right thing.
@@ -63,6 +64,7 @@ extension AppState {
             "group": group,
             "device_type": wireDeviceType,
             "auth_method": authMethod.rawValue,
+            "api_verify_tls": apiVerifyTls,
             "pinned": false,
         ]
         if let keyId = authKeyId {
@@ -94,7 +96,8 @@ extension AppState {
                     username: String, group: String, deviceType: DeviceType,
                     unrecognizedDeviceTypeRawValue: String? = nil,
                     authMethod: AuthMethod, authKeyId: String? = nil,
-                    password: String? = nil, certificate: String? = nil) async {
+                    password: String? = nil, certificate: String? = nil,
+                    apiVerifyTls: Bool = true) async {
         // Same write-amplification prevention as addHost: prefer the
         // original wire string when the host's type was unrecognised.
         // If the operator explicitly changed the picker (in which
@@ -109,6 +112,7 @@ extension AppState {
             "group": group,
             "device_type": wireDeviceType,
             "auth_method": authMethod.rawValue,
+            "api_verify_tls": apiVerifyTls,
         ]
         if let keyId = authKeyId { host["auth_key_id"] = keyId }
         do {
@@ -135,6 +139,30 @@ extension AppState {
             if selectedHostId == id { selectedHostId = nil }
         } catch {
             handleError(error)
+        }
+    }
+
+    func listKnownHosts() async -> [String: String] {
+        do {
+            return try await client.call("ssh_list_known_hosts")
+        } catch {
+            handleError(error)
+            return [:]
+        }
+    }
+
+    @discardableResult
+    func forgetHostKey(hostname: String, port: UInt16) async -> Bool {
+        struct ForgetResp: Codable { let removed: Bool }
+        do {
+            let resp: ForgetResp = try await client.call(
+                "ssh_forget_host_key",
+                params: ["hostname": hostname, "port": Int(port)]
+            )
+            return resp.removed
+        } catch {
+            handleError(error)
+            return false
         }
     }
 

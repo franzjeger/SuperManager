@@ -72,12 +72,15 @@ impl client::Handler for SshClientHandler {
                 // the GUI with both fingerprints.
                 Err(anyhow::anyhow!(
                     "host key mismatch for {}:{} — stored={}, server-presented={}; \
-                     refusing to connect. If you trust this host, run `forget` to \
-                     drop the saved fingerprint and reconnect.",
+                     refusing to connect. If you verified the rotation out-of-band, \
+                     call `ssh_forget_host_key` for {}:{} to drop the saved fingerprint \
+                     and reconnect.",
                     self.host,
                     self.port,
                     stored,
-                    current
+                    current,
+                    self.host,
+                    self.port
                 ))
             }
         }

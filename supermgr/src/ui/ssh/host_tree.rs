@@ -682,6 +682,7 @@ mod tests {
             has_password: false,
             has_api: false,
             api_port: None,
+            api_verify_tls: true,
             has_certificate: false,
             has_unifi_controller: false,
             unifi_controller_url: None,

@@ -54,6 +54,7 @@ struct AddHostSheet: View {
     @State private var selectedKeyId: String?
     @State private var password = ""
     @State private var certificate = ""
+    @State private var apiVerifyTls = true
     @State private var showingNewCustomer = false
     @State private var slugsBeforeAdd: Set<String> = []
     @FocusState private var firstFieldFocused: Bool
@@ -100,6 +101,13 @@ struct AddHostSheet: View {
                 if authMethod == .password {
                     SecureField("Password", text: $password)
                 }
+
+                Toggle("Verify HTTPS API certificate", isOn: $apiVerifyTls)
+                if !apiVerifyTls {
+                    Text("Self-signed appliance certificates are pinned on first connection (TOFU).")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
             .formStyle(.grouped)
 
@@ -119,7 +127,8 @@ struct AddHostSheet: View {
                             authMethod: authMethod,
                             authKeyId: authMethod.requiresKey ? selectedKeyId : nil,
                             password: authMethod == .password ? password : nil,
-                            certificate: authMethod == .certificate ? certificate : nil
+                            certificate: authMethod == .certificate ? certificate : nil,
+                            apiVerifyTls: apiVerifyTls
                         )
                         dismiss()
                     }

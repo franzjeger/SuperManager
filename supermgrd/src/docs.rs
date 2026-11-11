@@ -256,7 +256,7 @@ mod tests {
             vpn_profile_id: None,
             api_port: None,
             api_token_ref: None,
-            api_verify_tls: false,
+            api_verify_tls: true,
             unifi_controller_url: None,
             unifi_api_token_ref: None,
             rdp_port: None,

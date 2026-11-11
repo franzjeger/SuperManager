@@ -47,7 +47,8 @@ extension AppState {
         username: String,
         credential: String?,
         siteId: String = "default",
-        customerSlug: String? = nil
+        customerSlug: String? = nil,
+        verifyTls: Bool = true
     ) async -> Result<UnifiController, AppError> {
         // Wire payload shape — server accepts the credential
         // under either `password` or `api_key` so we use the
@@ -58,6 +59,7 @@ extension AppState {
             "username": username,
             "site_id": siteId,
             "auth_method": authMethod.rawValue,
+            "verify_tls": verifyTls,
         ]
         if let id { params["id"] = id }
         if let credential {
