@@ -655,6 +655,20 @@ async fn detect_interface(name: &str) -> anyhow::Result<String> {
 /// `wg-quick` runs these as shell commands, as root.
 const HOOK_KEYS: [&str; 4] = ["PreUp", "PostUp", "PreDown", "PostDown"];
 
+/// Validate WireGuard connect arguments before storing for auto-reconnect or
+/// bringing up a tunnel.
+pub(crate) fn validate_connect_args(args: &WgConnectArgs) -> anyhow::Result<()> {
+    const MAX_CONF_BYTES: usize = 1024 * 1024;
+    if args.conf_content.is_empty() || args.conf_content.len() > MAX_CONF_BYTES {
+        return Err(anyhow!("invalid WireGuard config length"));
+    }
+    refuse_hooks(&args.conf_content)?;
+    if !args.dns_servers.is_empty() {
+        crate::tailscale::dns_servers(&args.dns_servers)?;
+    }
+    Ok(())
+}
+
 /// Refuse a config with `wg-quick` hooks. SuperManager renders its configs
 /// from profile fields and never writes one, so a config that has them did
 /// not come from SuperManager.

@@ -67,14 +67,9 @@ pub struct OpenVpn {
 #[derive(Deserialize)]
 pub struct OvpnConnectArgs {
     pub profile_id: String,
-    /// The profile's configuration.
+    /// The profile's inline configuration body.
     #[serde(default)]
     pub config: Option<String>,
-    /// Where helpers up to 1.8.14 were told to read the configuration.
-    /// Only a connect stored for auto-reconnect by one of them still
-    /// names it; see `OvpnConnectArgs::configuration`.
-    #[serde(default)]
-    pub config_file: Option<String>,
     /// Azure Entra ID tokens require our OpenVPN 3 client path.
     /// Never silently fall back to OpenVPN 2 for these sessions.
     #[serde(default)]
@@ -91,7 +86,6 @@ impl fmt::Debug for OvpnConnectArgs {
         f.debug_struct("OvpnConnectArgs")
             .field("profile_id", &self.profile_id)
             .field("has_config", &self.config.is_some())
-            .field("config_file", &self.config_file)
             .field("require_openvpn3", &self.require_openvpn3)
             .field("username", &self.username)
             .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
@@ -119,37 +113,40 @@ impl OvpnConnectArgs {
     /// Whether the request carries a configuration to run.
     #[must_use]
     pub fn has_configuration(&self) -> bool {
-        self.config.is_some() || self.config_file.is_some()
+        self.config.is_some()
     }
 
-    /// The configuration to run: the one the request carries or, for a
-    /// connect an older helper stored for auto-reconnect, the file it
-    /// names. That file is read without following a symlink and must be
-    /// a regular file of configuration size; it is checked like any other
-    /// configuration.
+    /// The inline configuration carried by the request, bounded to [`MAX_CONFIG_BYTES`].
     fn configuration(&self) -> anyhow::Result<String> {
-        use std::io::Read as _;
-        if let Some(config) = &self.config {
-            return Ok(config.clone());
-        }
-        let Some(path) = &self.config_file else {
+        let Some(config) = &self.config else {
             return Err(anyhow!("the connect request carries no configuration"));
         };
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(path)
-            .with_context(|| format!("open {path}"))?;
-        let meta = file.metadata().with_context(|| format!("stat {path}"))?;
-        if !meta.is_file() || meta.len() > MAX_CONFIG_BYTES {
-            return Err(anyhow!("{path} is not a profile configuration"));
+        if config.len() as u64 > MAX_CONFIG_BYTES {
+            return Err(anyhow!("the profile configuration exceeds the size limit"));
         }
-        let mut config = String::new();
-        file.take(MAX_CONFIG_BYTES)
-            .read_to_string(&mut config)
-            .with_context(|| format!("read {path}"))?;
-        Ok(config)
+        Ok(config.clone())
     }
+}
+
+/// Validate OpenVPN connect arguments before storing for auto-reconnect or spawning OpenVPN.
+pub(crate) fn validate_connect_args(args: &OvpnConnectArgs) -> anyhow::Result<()> {
+    validate_profile_id(&args.profile_id)?;
+    let config_body = args.configuration()?;
+    crate::openvpn_config::check(&config_body)
+        .map_err(|refusal| anyhow!("the profile can't be used as it is: {refusal}"))?;
+    if args.require_openvpn3 && (args.username.is_some() || args.password.is_some()) {
+        let u = args.username.as_deref().unwrap_or("AzureAD");
+        let p = args.password.as_deref().unwrap_or("");
+        validate_v3_credentials(u, p)?;
+    }
+    for (field, val) in [("username", &args.username), ("password", &args.password)] {
+        if let Some(s) = val {
+            if s.contains('\n') || s.contains('\r') || s.contains('\0') {
+                return Err(anyhow!("invalid {field}: newline or NUL characters are not permitted"));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -238,6 +235,7 @@ impl OpenVpn {
     /// its own and writes its PID to the file we pass via
     /// `--writepid`.
     pub async fn connect(&mut self, args: &OvpnConnectArgs) -> anyhow::Result<OvpnConnectResult> {
+        validate_connect_args(args)?;
         let safe = validate_profile_id(&args.profile_id)?;
         let openvpn = locate_openvpn(self.policy, args.require_openvpn3)?;
         tracing::info!(
@@ -246,8 +244,6 @@ impl OpenVpn {
             openvpn.display()
         );
         let config_body = args.configuration()?;
-        crate::openvpn_config::check(&config_body)
-            .map_err(|refusal| anyhow!("the profile can't be used as it is: {refusal}"))?;
 
         // Suppress the connectivity watchdog during the connect/handshake window.
         // A full-tunnel OpenVPN/Azure profile installs 0/1+128/1 and briefly has
@@ -1683,28 +1679,17 @@ mod tests {
         assert!(args.configuration().is_err());
     }
 
-    /// A connect an older helper stored for auto-reconnect names a file.
-    /// It is read only as a regular file, never through a symlink.
+    /// Legacy `config_file` payloads are no longer read from disk; inline
+    /// `config` is required.
     #[test]
-    fn a_stored_connect_that_names_a_file_reads_only_a_regular_file() {
-        let dir = std::env::temp_dir().join(format!("supermanager-ovpn-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&dir).unwrap();
-        let file = dir.join("profile.ovpn");
-        std::fs::write(&file, "client\n").unwrap();
-        let link = dir.join("link.ovpn");
-        std::os::unix::fs::symlink(&file, &link).unwrap();
-        let stored = |path: &Path| OvpnConnectArgs {
-            profile_id: "test".into(),
-            config: None,
-            config_file: Some(path.display().to_string()),
-            require_openvpn3: false,
-            username: None,
-            password: None,
-        };
-        assert_eq!(stored(&file).configuration().unwrap(), "client\n");
-        assert!(stored(&link).configuration().is_err());
-        assert!(stored(&dir).configuration().is_err());
-        std::fs::remove_dir_all(dir).unwrap();
+    fn connect_requests_ignore_legacy_config_file_and_require_inline_config() {
+        let legacy: OvpnConnectArgs = serde_json::from_str(
+            r#"{"profile_id":"26b4fcc6-097a-41e7-932e-9a6d2a4663e5","config_file":"/etc/hosts"}"#,
+        )
+        .unwrap();
+        assert!(!legacy.has_configuration());
+        assert!(legacy.configuration().is_err());
+        assert!(validate_connect_args(&legacy).is_err());
     }
 
     #[test]

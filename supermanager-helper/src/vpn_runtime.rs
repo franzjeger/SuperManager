@@ -160,6 +160,27 @@ fn install_into(bundled: &Path, dir: &Path) -> Result<InstallResult> {
     if bundled.join("charon").is_file() && bundled.join("swanctl").is_file() {
         install_strongswan_config(dir)?;
     }
+    if dir == Path::new(RUNTIME_DIR) {
+        if let Some(bundled_ts_cli) = bundled
+            .parent()
+            .map(|res| res.join("tailscale-bin/tailscale"))
+            .filter(|path| path.is_file())
+        {
+            let target = Path::new(crate::tailscale::CLI_INSTALL_PATH);
+            let unchanged = installed_file_is_protected(target, 0)
+                && same_content(&bundled_ts_cli, target);
+            if unchanged {
+                record("tailscale", false);
+            } else {
+                match crate::tailscale::install_cli_binary(&bundled_ts_cli, target) {
+                    Ok(()) => record("tailscale", true),
+                    Err(e) => {
+                        tracing::warn!("tailscale CLI not installed during runtime sync: {e:#}");
+                    }
+                }
+            }
+        }
+    }
     Ok(result)
 }
 

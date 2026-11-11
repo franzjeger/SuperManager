@@ -1598,7 +1598,7 @@ fn sanitize_name(s: &str) -> String {
 }
 
 /// Validate wire inputs before starting charon or touching root-owned files.
-fn validate_connect_args(args: &ConnectArgs) -> anyhow::Result<()> {
+pub(crate) fn validate_connect_args(args: &ConnectArgs) -> anyhow::Result<()> {
     validate_profile_id(&args.profile_id)?;
     validate_host(&args.host)?;
     for route in &args.routes {
