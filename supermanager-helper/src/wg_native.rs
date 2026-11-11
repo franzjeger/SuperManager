@@ -183,10 +183,11 @@ pub async fn up(
 /// (`dns::follow_system_resolvers`), and its supervisor follows them when
 /// the network changes them.
 fn apply_dns(state: &mut State, pushed: &[String]) {
+    let owner = format!("wg-{}", state.name);
     if !pushed.is_empty() {
-        crate::dns::set_vpn_dns(pushed);
+        crate::dns::set_vpn_dns_for(&owner, pushed);
     } else if state.all4 || state.all6 {
-        state.system_dns = Some(crate::dns::follow_system_resolvers());
+        state.system_dns = Some(crate::dns::follow_system_resolvers_for(&owner));
     }
 }
 
@@ -200,7 +201,8 @@ fn refresh_system_dns(state: &mut State) -> bool {
     if now.is_empty() || &now == following {
         return false;
     }
-    crate::dns::set_vpn_dns(&now);
+    let owner = format!("wg-{}", state.name);
+    crate::dns::set_vpn_dns_for(&owner, &now);
     state.system_dns = Some(now);
     true
 }
@@ -760,10 +762,9 @@ mod tests {
             key(1),
             key(2)
         );
-        let (interface, tunnel) =
-            up(name, &config, &[], crate::client_auth::Policy::Development)
-                .await
-                .unwrap();
+        let (interface, tunnel) = up(name, &config, &[], crate::client_auth::Policy::Development)
+            .await
+            .unwrap();
         assert!(net::exists(&interface));
         assert_eq!(read_name_file(name).as_deref(), Some(interface.as_str()));
         assert!(net::has_own_route(&"10.213.1.0/24".parse().unwrap(), &interface).await);

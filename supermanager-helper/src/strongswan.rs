@@ -266,6 +266,11 @@ pub struct StatusResult {
 /// Where charon records its pid; it refuses to start while that names a
 /// running charon.
 const CHARON_PID_FILE: &str = "/var/run/charon.pid";
+/// Helper-owned pid record (`0600`) proving this helper (or an earlier
+/// SuperManager helper) spawned the running `charon`.
+const HELPER_CHARON_PID_FILE: &str = "/var/run/supermanager-charon.pid";
+/// VICI Unix domain socket created by `charon` while running.
+const CHARON_VICI_SOCKET: &str = "/var/run/charon.vici";
 
 /// Holds onto the strongSwan install paths and the charon in use.
 /// `&mut self` is required for connect/disconnect because they may need
@@ -290,6 +295,7 @@ pub struct Strongswan {
     /// A charon an earlier helper started, which this one took over.
     adopted_charon: Option<i32>,
     pid_file: PathBuf,
+    helper_pid_file: PathBuf,
     log_file: PathBuf,
 }
 
@@ -407,6 +413,7 @@ impl Strongswan {
             charon_child: None,
             adopted_charon: None,
             pid_file: PathBuf::from(CHARON_PID_FILE),
+            helper_pid_file: PathBuf::from(HELPER_CHARON_PID_FILE),
             log_file: PathBuf::from(crate::HELPER_LOG),
         }
     }
@@ -438,15 +445,6 @@ impl Strongswan {
     /// relying on a separate LaunchDaemon so a SuperManager uninstall
     /// doesn't leave charon registered as a system service.
     async fn ensure_charon(&mut self) -> anyhow::Result<()> {
-        if let Some(child) = &mut self.charon_child {
-            // try_wait returns Ok(None) while still running.
-            match child.try_wait() {
-                Ok(None) => return Ok(()),
-                Ok(Some(status)) => tracing::warn!("charon previously exited: {status:?}"),
-                Err(e) => tracing::warn!("charon try_wait error: {e}"),
-            }
-            self.charon_child = None;
-        }
         let charon = self
             .charon
             .clone()
@@ -455,24 +453,41 @@ impl Strongswan {
             .swanctl
             .clone()
             .context("strongSwan swanctl path not resolved")?;
+        if let Some(child) = &mut self.charon_child {
+            match child.try_wait() {
+                Ok(None) => {
+                    if answers(&swanctl).await {
+                        return Ok(());
+                    }
+                    tracing::warn!("managed charon child is not answering VICI; restarting");
+                }
+                Ok(Some(status)) => tracing::warn!("charon previously exited: {status:?}"),
+                Err(e) => tracing::warn!("charon try_wait error: {e}"),
+            }
+            self.stop_charon().await;
+        }
         let running = self
             .adopted_charon
-            .or_else(|| running_charon(&self.pid_file, &charon));
-        if let Some(pid) = running.filter(|&pid| is_charon(pid, &charon)) {
+            .or_else(|| running_charon(&self.pid_file, &self.helper_pid_file, &charon));
+        if let Some(pid) =
+            running.filter(|&pid| is_charon(pid, &charon, &self.pid_file, &self.helper_pid_file))
+        {
             if answers(&swanctl).await {
                 if self.adopted_charon.replace(pid).is_none() {
                     tracing::info!(pid, "took over the charon an earlier helper started");
+                    let _ = crate::private_file::write(
+                        &self.helper_pid_file,
+                        format!("{pid}\n").as_bytes(),
+                    );
                 }
                 return Ok(());
             }
             tracing::warn!(pid, "charon is not answering; starting a new one");
-            stop_process(pid, &charon).await;
+            stop_process(pid, &charon, &self.pid_file, &self.helper_pid_file).await;
         }
         self.adopted_charon = None;
-        // Clear any leftover pidfile before spawning: charon's check_pidfile()
-        // only checks `kill(pid, 0) == 0`, so a dead charon whose PID was
-        // recycled by an unrelated process would otherwise block startup.
         let _ = std::fs::remove_file(&self.pid_file);
+        let _ = std::fs::remove_file(&self.helper_pid_file);
         self.start_charon(&charon, &swanctl).await
     }
 
@@ -525,23 +540,47 @@ impl Strongswan {
                 details.trim()
             ));
         }
+        if let Some(pid) = child.id() {
+            let _ =
+                crate::private_file::write(&self.helper_pid_file, format!("{pid}\n").as_bytes());
+        }
         self.charon_child = Some(child);
         Ok(())
     }
 
-    /// Stop the charon in use, ours or adopted, before a fresh one starts.
+    /// Gracefully stop our managed `charon` (`SIGTERM` with bounded wait before
+    /// `SIGKILL`).
     async fn stop_charon(&mut self) {
         if let Some(mut child) = self.charon_child.take() {
+            if let (Some(pid), Some(charon)) = (
+                child.id().and_then(|p| i32::try_from(p).ok()),
+                self.charon.as_deref(),
+            ) {
+                stop_process(pid, charon, &self.pid_file, &self.helper_pid_file).await;
+            }
             let _ = child.kill().await;
         }
         let adopted = self.adopted_charon.take().or_else(|| {
             self.charon
                 .as_deref()
-                .and_then(|charon| running_charon(&self.pid_file, charon))
+                .and_then(|charon| running_charon(&self.pid_file, &self.helper_pid_file, charon))
         });
         if let (Some(pid), Some(charon)) = (adopted, self.charon.as_deref()) {
-            stop_process(pid, charon).await;
+            stop_process(pid, charon, &self.pid_file, &self.helper_pid_file).await;
         }
+        let _ = std::fs::remove_file(&self.helper_pid_file);
+    }
+
+    /// Run `sweep_stale_configs` while holding the `Strongswan` controller lock
+    /// so a post-wake sweep never races an in-flight `connect` (`P2-19`).
+    pub async fn sweep_stale(&mut self) {
+        sweep_stale_configs(self.policy).await;
+    }
+
+    /// Run `terminate_and_sweep` while holding the `Strongswan` controller lock
+    /// (`P2-19`).
+    pub async fn terminate_all_and_sweep(&mut self) {
+        terminate_and_sweep(self.policy).await;
     }
 
     pub async fn connect(&mut self, args: &ConnectArgs) -> anyhow::Result<ConnectResult> {
@@ -564,13 +603,9 @@ impl Strongswan {
             args.profile_id,
             args.host
         );
-        // Force a fresh charon on every connect. strongSwan caches secrets
-        // and connections on the IKE-SA level; re-initiating against an
-        // existing charon that was started with stale config can produce
-        // hard-to-diagnose "no shared key found" errors. Killing and
-        // re-spawning is cheap (~500 ms) and guarantees clean state.
-        self.stop_charon().await;
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // Reuse a single healthy `charon` across profiles (`P2-13`): restarting
+        // `charon` here would tear down every other active IKEv2 profile and
+        // make two Always-on IKEv2 profiles flap against each other every 30 s.
         self.ensure_charon().await?;
 
         let etc = self
@@ -583,6 +618,14 @@ impl Strongswan {
             .as_ref()
             .context("strongSwan swanctl path not resolved")?
             .clone();
+        // Tear down ONLY this profile's pre-existing SA (if any) before
+        // reloading its updated config/secrets.
+        let _ = run_with_timeout(
+            &swanctl,
+            &["--terminate", "--ike", &args.profile_id],
+            std::time::Duration::from_secs(10),
+        )
+        .await;
         let swanctl_dir = etc.join("swanctl");
         tokio::fs::create_dir_all(swanctl_dir.join("conf.d")).await?;
         tokio::fs::create_dir_all(swanctl_dir.join("swanctl.d")).await?;
@@ -725,7 +768,7 @@ impl Strongswan {
             } else {
                 servers
             };
-            crate::dns::set_vpn_dns(&servers);
+            crate::dns::set_vpn_dns_for(&format!("ikev2-{}", args.profile_id), &servers);
         }
 
         if ok && want_kill_switch {
@@ -852,7 +895,10 @@ impl Strongswan {
 
         tokio::fs::remove_file(&conf_path).await.ok();
         tokio::fs::remove_file(&secrets_path).await.ok();
-        let _ = run(&swanctl, &["--load-all"]).await;
+        let _ = run(&swanctl, &["--load-conns"]).await;
+        if !has_established_strongswan_sa() {
+            let _ = run(&swanctl, &["--load-creds", "--clear"]).await;
+        }
 
         if let Some(host) = server_host {
             delete_server_host_route(&host);
@@ -865,16 +911,8 @@ impl Strongswan {
         // breaking internet access until the next VPN connect or reboot.
         // Deleting them here is idempotent: `route delete` ignores missing routes.
         delete_full_tunnel_routes();
-        // Restore DNS. strongSwan's charon daemon can push DNS servers
-        // via IKEv2 Mode Config (gateway sends INTERNAL_IP4_DNS
-        // attributes); charon applies them to the system resolver but
-        // does not reliably clean them up when killed. Calling
-        // clear_vpn_dns here guarantees the Setup and State stores are
-        // both cleared regardless of how charon exited.
-        //
-        // Routes first, then DNS: with the split-defaults gone the resolver
-        // list is the last thing still pointing into the dead tunnel.
-        crate::dns::clear_vpn_dns();
+        // Restore ONLY this profile's ephemeral DNS key (`P2-18`).
+        crate::dns::clear_vpn_dns_for(&format!("ikev2-{}", args.profile_id));
 
         Ok(DisconnectResult {
             ok: true,
@@ -1231,29 +1269,42 @@ fn utun_for_address(addr: &str) -> Option<(String, String)> {
     None
 }
 
-/// The pid in charon's pid file, if that process is a charon.
-fn running_charon(pid_file: &Path, charon: &Path) -> Option<i32> {
-    let pid = std::fs::read_to_string(pid_file)
+fn read_pid(path: &Path) -> Option<i32> {
+    std::fs::read_to_string(path)
         .ok()?
         .trim()
-        .parse()
-        .ok()?;
-    is_charon(pid, charon).then_some(pid)
+        .parse::<i32>()
+        .ok()
+        .filter(|&pid| pid > 1)
 }
 
-/// Whether `pid` is a charon of ours: one running `charon`, or one of the
-/// helper's user with its name.
-///
-/// Homebrew installs each strongSwan version in a directory of its own and
-/// deletes the old one on upgrade. A charon started from it keeps running,
-/// with its tunnels and the IKE ports, and the kernel then has no path for
-/// its executable, only its name. Requiring the current binary left such a
-/// charon neither taken over nor stopped, so every new one failed to bind
-/// and gave up with "charon already running". That happened on 2026-10-20,
-/// a week after strongSwan `6.1.0` was upgraded to `6.1.0_1`.
-fn is_charon(pid: i32, charon: &Path) -> bool {
+/// Find the `charon` PID owned by SuperManager (`helper_pid_file` first,
+/// falling back to `pid_file` only when `is_charon` confirms it belongs to our
+/// resolved `charon` binary or a deleted Cellar binary recorded in `pid_file`).
+fn running_charon(pid_file: &Path, helper_pid_file: &Path, charon: &Path) -> Option<i32> {
+    if let Some(pid) = read_pid(helper_pid_file) {
+        if is_charon(pid, charon, pid_file, helper_pid_file) {
+            return Some(pid);
+        }
+    }
+    let pid = read_pid(pid_file)?;
+    is_charon(pid, charon, pid_file, helper_pid_file).then_some(pid)
+}
+
+/// Whether `pid` is a `charon` owned by SuperManager:
+/// - running our exact `charon` binary path (`process_is`), OR
+/// - running from an unlinked executable (`process_path(pid).is_none()`, e.g.
+///   after a Homebrew Cellar upgrade while `charon` stayed up) AND recorded in
+///   `helper_pid_file` or `pid_file` with matching kernel command name and uid.
+/// A live executable at a *different* path (e.g. a user-managed strongSwan in
+/// `/opt/local` or `/bin/sleep`) is never matched.
+fn is_charon(pid: i32, charon: &Path, pid_file: &Path, helper_pid_file: &Path) -> bool {
     if crate::proc::process_is(pid, charon) {
         return true;
+    }
+    let recorded = read_pid(helper_pid_file) == Some(pid) || read_pid(pid_file) == Some(pid);
+    if !recorded || crate::proc::process_path(pid).is_some() {
+        return false;
     }
     let Some(name) = charon.file_name().and_then(std::ffi::OsStr::to_str) else {
         return false;
@@ -1270,22 +1321,40 @@ async fn answers(swanctl: &Path) -> bool {
         .is_ok()
 }
 
-/// Kill `pid` after verifying it still belongs to `charon`, and wait briefly
-/// for it to be gone so a recycled pid can never be signalled.
-async fn stop_process(pid: i32, charon: &Path) {
-    if pid <= 1 || !is_charon(pid, charon) {
+/// Stop `pid` gracefully (`SIGTERM` with a 2.5 s deadline so `charon` sends
+/// IKE DELETE notifications and releases gateway sessions cleanly, escalating
+/// to `SIGKILL` only if wedged; `P2-14`).
+async fn stop_process(pid: i32, charon: &Path, pid_file: &Path, helper_pid_file: &Path) {
+    if pid <= 1 || !is_charon(pid, charon, pid_file, helper_pid_file) {
         return;
     }
-    // SAFETY: `pid > 1` was just verified by `is_charon` to be our `charon` process.
+    // SAFETY: `pid > 1` was verified by `is_charon` to be our `charon` process.
     unsafe {
-        libc::kill(pid, libc::SIGKILL);
+        libc::kill(pid, libc::SIGTERM);
     }
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-    while is_charon(pid, charon)
+    let term_deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(2500);
+    while is_charon(pid, charon, pid_file, helper_pid_file)
         && unsafe { libc::kill(pid, 0) } == 0
-        && tokio::time::Instant::now() < deadline
+        && tokio::time::Instant::now() < term_deadline
     {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    if is_charon(pid, charon, pid_file, helper_pid_file) && unsafe { libc::kill(pid, 0) } == 0 {
+        tracing::warn!(
+            pid,
+            "charon did not exit after SIGTERM; escalating to SIGKILL"
+        );
+        // SAFETY: `is_charon` re-verified `pid` right before signalling.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+        let kill_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        while is_charon(pid, charon, pid_file, helper_pid_file)
+            && unsafe { libc::kill(pid, 0) } == 0
+            && tokio::time::Instant::now() < kill_deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 }
 
@@ -1970,19 +2039,37 @@ pub(crate) fn has_established_strongswan_sa() -> bool {
 /// cleanly with none, `None` = the probe could not complete (missing binary,
 /// spawn error, or a wedged charon that timed out).
 fn swanctl_list_sas_established() -> Option<bool> {
+    // If charon's VICI socket does not exist on disk, charon is not running —
+    // definitively zero SAs are established (`P2-20`).
+    if !Path::new(CHARON_VICI_SOCKET).exists() {
+        return Some(false);
+    }
     let swanctl = locate_swanctl(crate::vpn_runtime::current_policy())?;
-    // Via proc::bounded rather than a bare worker thread: on timeout that
-    // SIGKILLs the wedged swanctl instead of abandoning it, so a 2s reaper
-    // cycle can't accumulate one stuck child (and one stuck thread) per tick.
     match crate::proc::bounded(
         std::process::Command::new(&swanctl).arg("--list-sas"),
         LIST_SAS_BUDGET,
     ) {
-        Ok(o) if o.status.success() => {
-            Some(String::from_utf8_lossy(&o.stdout).contains("ESTABLISHED"))
-        }
-        _ => None, // spawn error / non-zero exit / 3s timeout
+        Ok(o) => classify_list_sas_output(
+            o.status.success(),
+            &String::from_utf8_lossy(&o.stdout),
+            &String::from_utf8_lossy(&o.stderr),
+        ),
+        Err(_) => None,
     }
+}
+
+fn classify_list_sas_output(success: bool, stdout: &str, stderr: &str) -> Option<bool> {
+    if success {
+        return Some(stdout.contains("ESTABLISHED"));
+    }
+    // Stale VICI socket file left after a charon crash/exit: `swanctl`
+    // immediately fails connect() with ENOENT / ECONNREFUSED — charon is dead,
+    // so zero SAs exist (`P2-20`).
+    let err_lower = stderr.to_ascii_lowercase();
+    if err_lower.contains("no such file or directory") || err_lower.contains("connection refused") {
+        return Some(false);
+    }
+    None
 }
 
 /// FAIL-SAFE liveness probe for the orphan-route reaper. Returns `true` if an IKE
@@ -2259,6 +2346,7 @@ async fn extract_remote_addr(path: impl AsRef<std::path::Path>) -> anyhow::Resul
 ///   3. Run `swanctl --load-all` so charon sees the empty namespace.
 pub async fn terminate_and_sweep(policy: Policy) {
     crate::kill_switch::deactivate_backend(crate::kill_switch::KillSwitchBackend::Ikev2);
+    crate::dns::clear_vpn_dns_prefix("ikev2-");
     // Find the first working swanctl binary permitted by policy. Return early
     // if strongSwan isn't installed — nothing to clean up.
     let Some(swanctl) = locate_swanctl(policy) else {
@@ -2422,6 +2510,7 @@ mod tests {
                 charon_child: None,
                 adopted_charon: None,
                 pid_file: self.0.join("charon.pid"),
+                helper_pid_file: self.0.join("supermanager-charon.pid"),
                 log_file: self.0.join("helper.log"),
             }
         }
@@ -2488,8 +2577,9 @@ mod tests {
         assert!(engine.charon_child.is_none(), "a second charon was started");
         engine.stop_charon().await;
         // Here it is the test's own child, so the test reaps it; a real
-        // adopted charon belongs to launchd, which does.
-        assert_eq!(earlier.wait().await.unwrap().signal(), Some(libc::SIGKILL));
+        // adopted charon belongs to launchd, which does. Graceful shutdown
+        // sends SIGTERM first (`P2-14`).
+        assert_eq!(earlier.wait().await.unwrap().signal(), Some(libc::SIGTERM));
     }
 
     /// What `a_charon_from_a_deleted_version_is_taken_over_and_stopped` runs as
@@ -2533,7 +2623,7 @@ mod tests {
         assert!(engine.charon_child.is_none(), "a second charon was started");
 
         engine.stop_charon().await;
-        assert_eq!(running.wait().await.unwrap().signal(), Some(libc::SIGKILL));
+        assert_eq!(running.wait().await.unwrap().signal(), Some(libc::SIGTERM));
     }
 
     /// A pid file can outlive charon, and the pid be reused. Only a process
@@ -2574,7 +2664,44 @@ mod tests {
         // The replacement cannot come up either: `/bin/sleep` without
         // arguments exits at once.
         assert!(engine.ensure_charon().await.is_err());
-        assert_eq!(hung.wait().await.unwrap().signal(), Some(libc::SIGKILL));
+        assert_eq!(hung.wait().await.unwrap().signal(), Some(libc::SIGTERM));
+    }
+
+    #[tokio::test]
+    async fn an_unrelated_live_charon_at_another_path_is_left_alone() {
+        let fixture = StartupFixture::new();
+        let foreign_dir = fixture.0.join("foreign");
+        std::fs::create_dir_all(&foreign_dir).unwrap();
+        let foreign_charon = foreign_dir.join("charon");
+        std::fs::copy(std::env::current_exe().unwrap(), &foreign_charon).unwrap();
+        let mut foreign = Command::new(&foreign_charon)
+            .args([
+                "--ignored",
+                "--exact",
+                "strongswan::tests::stand_in_charon",
+                "--quiet",
+            ])
+            .stdout(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = i32::try_from(foreign.id().unwrap()).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        std::fs::write(fixture.0.join("charon.pid"), format!("{pid}\n")).unwrap();
+
+        let our_charon = fixture.script("charon", "exec /bin/sleep 30");
+        let swanctl = fixture.script("swanctl", "exit 0");
+        let mut engine = fixture.engine(our_charon, swanctl);
+        engine.ensure_charon().await.unwrap();
+        assert_eq!(engine.adopted_charon, None);
+        assert!(engine.charon_child.is_some());
+        engine.stop_charon().await;
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "foreign charon at another live path must not be signalled"
+        );
+        foreign.kill().await.unwrap();
     }
 
     /// charon leads its own session, out of the helper's process group,
@@ -3089,7 +3216,12 @@ conn: #1, ESTABLISHED, IKEv2, a_i* b_r
 
     #[test]
     fn connect_args_debug_redacts_secrets() {
-        let a = args("vpn.example.com", "alice", "top-secret-pw", "super-psk-value");
+        let a = args(
+            "vpn.example.com",
+            "alice",
+            "top-secret-pw",
+            "super-psk-value",
+        );
         let debug = format!("{a:?}");
         assert!(debug.contains("alice"), "{debug}");
         assert!(!debug.contains("top-secret-pw"), "{debug}");
@@ -3260,5 +3392,35 @@ mod traffic_tests {
     #[test]
     fn missing_counters_are_zero() {
         assert_eq!(parse_traffic("  established 8s ago"), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn list_sas_treats_absent_vici_socket_as_no_established_sa() {
+        use super::classify_list_sas_output;
+        assert_eq!(
+            classify_list_sas_output(
+                false,
+                "",
+                "connecting to 'unix:///var/run/charon.vici' failed: No such file or directory"
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            classify_list_sas_output(
+                false,
+                "",
+                "connecting to 'unix:///var/run/charon.vici' failed: Connection refused"
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            classify_list_sas_output(false, "", "vici request timed out"),
+            None
+        );
+        assert_eq!(classify_list_sas_output(true, "", ""), Some(false));
+        assert_eq!(
+            classify_list_sas_output(true, REAL_LIST_SAS_FULL_TUNNEL, ""),
+            Some(true)
+        );
     }
 }

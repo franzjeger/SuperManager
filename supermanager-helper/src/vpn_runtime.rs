@@ -167,8 +167,8 @@ fn install_into(bundled: &Path, dir: &Path) -> Result<InstallResult> {
             .filter(|path| path.is_file())
         {
             let target = Path::new(crate::tailscale::CLI_INSTALL_PATH);
-            let unchanged = installed_file_is_protected(target, 0)
-                && same_content(&bundled_ts_cli, target);
+            let unchanged =
+                installed_file_is_protected(target, 0) && same_content(&bundled_ts_cli, target);
             if unchanged {
                 record("tailscale", false);
             } else {
@@ -200,8 +200,7 @@ fn install_strongswan_config(dir: &Path) -> Result<()> {
     let etc = dir.join("etc");
     for relative in ["swanctl", "swanctl/conf.d", "swanctl/swanctl.d"] {
         let path = etc.join(relative);
-        std::fs::create_dir_all(&path)
-            .with_context(|| format!("create {}", path.display()))?;
+        std::fs::create_dir_all(&path).with_context(|| format!("create {}", path.display()))?;
         check_path(&path)?;
     }
     for (name, content) in [
@@ -210,7 +209,12 @@ fn install_strongswan_config(dir: &Path) -> Result<()> {
     ] {
         let path = etc.join(name);
         use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-        match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o644).open(&path) {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o644)
+            .open(&path)
+        {
             Ok(mut file) => {
                 use std::io::Write as _;
                 file.write_all(content.as_bytes())?;

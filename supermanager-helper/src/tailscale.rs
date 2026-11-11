@@ -25,8 +25,22 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 // Every command here is bounded: see `proc::Bounded`.
 use crate::proc::Bounded as Command;
+
+/// Serializes all helper-side Tailscale daemon, route-table, resolver, and DNS
+/// mutations so RPC handlers (`install_exit_routes`, `remove_exit_routes`,
+/// `panic_reset`, `force_dns_state`, `set_dns_servers`, `install_magicdns_resolver`)
+/// cannot interleave with background loops (`reconcile_exit_node`,
+/// `tailscale_routes::restore_missing`, `connectivity_watchdog`).
+static TAILSCALE_OP_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) fn lock_tailscale_ops() -> MutexGuard<'static, ()> {
+    TAILSCALE_OP_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
 
 /// Stable on-disk path for the daemon binary: next to the helper, in a
 /// directory only root can write, so nothing but the helper replaces
@@ -150,6 +164,7 @@ pub fn status(_: DaemonStatusArgs) -> Result<DaemonStatus> {
 /// daemon re-copies the binary (in case the version bundled with
 /// SuperManager has changed) and re-bootstraps.
 pub fn install(args: InstallArgs) -> Result<InstallResult> {
+    let _guard = lock_tailscale_ops();
     // 1. Copy the bundled binary to its stable location and check the
     // copy, before touching the running daemon: a binary that is not
     // SuperManager's leaves the current install as it is. We copy (not
@@ -187,7 +202,7 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
     // `bootout` returns once launchd has stopped the job, and launchd gives
     // a job 20 s (its default ExitTimeOut) before SIGKILL. Cut shorter, the
     // bootstrap below races a daemon that is still going away.
-    let _ = remove_exit_routes(ExitRoutesArgs::default());
+    let _ = remove_exit_routes_inner(ExitRoutesArgs::default());
     let _ = Command::new("/bin/launchctl")
         .args(["bootout", &format!("system/{}", LAUNCH_LABEL)])
         .budget(crate::proc::SLOW)
@@ -267,6 +282,8 @@ pub(crate) fn install_cli_binary(source: &Path, target: &Path) -> Result<()> {
 /// the user's node key + tailnet identity is in there, and a future
 /// reinstall (whether ours or Tailscale.app's) will pick it up.
 pub fn uninstall(_: UninstallArgs) -> Result<InstallResult> {
+    let _guard = lock_tailscale_ops();
+    let _ = remove_exit_routes_inner(ExitRoutesArgs::default());
     // SLOW: see the bootout in `install`.
     let _ = Command::new("/bin/launchctl")
         .args(["bootout", &format!("system/{}", LAUNCH_LABEL)])
@@ -515,10 +532,9 @@ fn is_routeable_public_ipv4(ip: &str) -> bool {
 const EXEMPTION_STATE_FILE: &str = "/var/run/supermanager-tailscale-exemptions";
 
 fn write_exemption_state(ips: &[String]) {
-    if let Err(e) = crate::private_file::write(
-        Path::new(EXEMPTION_STATE_FILE),
-        ips.join("\n").as_bytes(),
-    ) {
+    if let Err(e) =
+        crate::private_file::write(Path::new(EXEMPTION_STATE_FILE), ips.join("\n").as_bytes())
+    {
         tracing::warn!("failed to write {EXEMPTION_STATE_FILE}: {e}");
     }
 }
@@ -613,7 +629,12 @@ fn foreign_full_tunnel_owns_default(ts_utun: &str) -> Option<String> {
     None
 }
 
-pub fn install_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
+pub fn install_exit_routes(args: ExitRoutesArgs) -> Result<InstallResult> {
+    let _guard = lock_tailscale_ops();
+    install_exit_routes_inner(args)
+}
+
+fn install_exit_routes_inner(_: ExitRoutesArgs) -> Result<InstallResult> {
     tracing::info!("install_exit_routes: starting");
     let utun = detect_tailscale_utun()
         .context("could not find Tailscale utun interface — is tailscaled running?")?;
@@ -789,6 +810,7 @@ fn rollback_exemptions(ips: &[String]) {
 /// store, so this works regardless of the user's specific
 /// service ID.
 pub fn force_dns_state(args: SetDnsArgs) -> Result<InstallResult> {
+    let _guard = lock_tailscale_ops();
     let servers = dns_servers(&args.servers)?;
     // Find the active service UUID. We look in
     // Setup:/Network/Service/<UUID>/DNS keys and pick the one
@@ -859,6 +881,7 @@ fn scutil_find_service_uuid() -> Option<String> {
 /// again. Pass `["1.1.1.1", "1.0.0.1"]` (or similar) for a
 /// known-good fallback when DHCP-provided DNS is broken.
 pub fn set_dns_servers(args: SetDnsArgs) -> Result<InstallResult> {
+    let _guard = lock_tailscale_ops();
     let clear = args.servers.is_empty()
         || (args.servers.len() == 1 && args.servers[0].trim().eq_ignore_ascii_case("empty"));
     let validated = if clear {
@@ -963,7 +986,12 @@ fn detect_active_network_service() -> Option<String> {
 /// Always-cleans-up: even on early-return, we remove the /32
 /// route. A leftover host route to 1.1.1.1 via utun would mean
 /// pinging Cloudflare goes through Tailscale forever.
-pub fn test_exit_reachability(_: TestExitArgs) -> Result<TestExitResult> {
+pub fn test_exit_reachability(args: TestExitArgs) -> Result<TestExitResult> {
+    let _guard = lock_tailscale_ops();
+    test_exit_reachability_inner(args)
+}
+
+fn test_exit_reachability_inner(_: TestExitArgs) -> Result<TestExitResult> {
     tracing::info!("test_exit_reachability: starting");
     let utun = detect_tailscale_utun().context("tailscale utun not found — daemon not running?")?;
     tracing::info!(utun = %utun, "test_exit_reachability: utun detected");
@@ -1086,7 +1114,12 @@ fn delete_split_default_if_unowned(
 /// Remove the split-default exit-node routes. Always succeeds —
 /// missing routes are a no-op. Called when the user clears the
 /// exit node, when auto-revert kicks in, and from `panic_reset`.
-pub fn remove_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
+pub fn remove_exit_routes(args: ExitRoutesArgs) -> Result<InstallResult> {
+    let _guard = lock_tailscale_ops();
+    remove_exit_routes_inner(args)
+}
+
+fn remove_exit_routes_inner(_: ExitRoutesArgs) -> Result<InstallResult> {
     // 1. Drop the /1 split routes — but ONLY the ones tailscale owns.
     //
     // This runs from panic_reset (fired by the connectivity watchdog on a
@@ -1237,11 +1270,13 @@ fn write_or_remove_magicdns_resolver(
     if !install {
         match fs::symlink_metadata(&path) {
             Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
-                bail!("refusing to remove non-regular resolver path {}", path.display());
+                bail!(
+                    "refusing to remove non-regular resolver path {}",
+                    path.display()
+                );
             }
             Ok(_) => {
-                fs::remove_file(&path)
-                    .with_context(|| format!("removing {}", path.display()))?;
+                fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
                 return Ok((true, path, domain));
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -1287,8 +1322,12 @@ fn write_or_remove_magicdns_resolver(
 }
 
 pub fn install_magicdns_resolver(args: MagicdnsResolverArgs) -> Result<InstallResult> {
-    let (changed, path, domain) =
-        write_or_remove_magicdns_resolver(Path::new("/etc/resolver"), &args.tailnet_suffix, args.install)?;
+    let _guard = lock_tailscale_ops();
+    let (changed, path, domain) = write_or_remove_magicdns_resolver(
+        Path::new("/etc/resolver"),
+        &args.tailnet_suffix,
+        args.install,
+    )?;
     let path_str = path.display().to_string();
     if !args.install {
         return Ok(InstallResult {
@@ -1347,6 +1386,7 @@ pub struct MagicdnsResolverArgs {
 /// exit-node pref is enough on the daemon side; the route fix is
 /// `ipconfig set en0 DHCP` which is fast (< 1 s) and idempotent.
 pub fn panic_reset(args: PanicResetArgs) -> Result<InstallResult> {
+    let _guard = lock_tailscale_ops();
     // 0. Wipe the split-default exit-node routes FIRST. If the
     // user got here by selecting an exit-node that broke
     // routing, those /1 routes are why their internet is dead.
@@ -1354,7 +1394,7 @@ pub fn panic_reset(args: PanicResetArgs) -> Result<InstallResult> {
     // again immediately — ipconfig DHCP renew below is belt-
     // and-braces. Removing routes is always FAIL OPEN (egress
     // falls back to the local uplink); it can never black-hole.
-    let _ = remove_exit_routes(ExitRoutesArgs::default());
+    let _ = remove_exit_routes_inner(ExitRoutesArgs::default());
 
     // 1. Optionally tell the daemon to drop exit-node + accept-routes.
     //
@@ -1653,6 +1693,7 @@ fn physical_uplink_iface() -> Option<String> {
 /// exact gate the safe user flow uses. It can never install `0/1` into a dead
 /// tunnel, and it never removes a working local default.
 pub fn reconcile_exit_node() {
+    let _guard = lock_tailscale_ops();
     let desired = crate::tailscale_state::load();
     if !desired.desired {
         return; // no exit node wanted — nothing to heal
@@ -1736,12 +1777,12 @@ pub fn reconcile_exit_node() {
     // GATE: a real /32 probe through the peer (self-cleaning, never persists a
     // route). Only a 2xx/3xx response — i.e. the peer actually forwards — lets
     // us re-install the split-defaults.
-    match test_exit_reachability(TestExitArgs {}) {
+    match test_exit_reachability_inner(TestExitArgs {}) {
         Ok(r) if r.success => {
             // Pause the connectivity watchdog so the reinstall's brief
             // disruption can't itself trip panic_reset.
             crate::connectivity_watchdog::pause_for(20);
-            match install_exit_routes(ExitRoutesArgs::default()) {
+            match install_exit_routes_inner(ExitRoutesArgs::default()) {
                 Ok(_) => {
                     tracing::info!(utun = %ts_utun, "reconcile: exit-node routes re-established")
                 }
@@ -2232,7 +2273,12 @@ mod tests {
 
     #[test]
     fn set_dns_servers_refuses_non_ip_before_running_networksetup() {
-        for bad in ["-setwebproxy", "dns.google", "1.1.1.1\n9.9.9.9", "1.1.1.1 8.8.8.8"] {
+        for bad in [
+            "-setwebproxy",
+            "dns.google",
+            "1.1.1.1\n9.9.9.9",
+            "1.1.1.1 8.8.8.8",
+        ] {
             let err = set_dns_servers(SetDnsArgs {
                 servers: vec![bad.into()],
             })
@@ -2302,7 +2348,10 @@ mod tests {
 
     #[test]
     fn tailscale_cli_requires_root_owned_privileged_helper_path() {
-        assert_eq!(CLI_INSTALL_PATH, "/Library/PrivilegedHelperTools/com.sybr.supermanager.tailscale");
+        assert_eq!(
+            CLI_INSTALL_PATH,
+            "/Library/PrivilegedHelperTools/com.sybr.supermanager.tailscale"
+        );
         assert_eq!(
             select_tailscale_cli(CLI_INSTALL_PATH, |_| true, |_, _| Ok(())),
             Some(CLI_INSTALL_PATH)

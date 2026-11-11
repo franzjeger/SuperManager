@@ -285,7 +285,9 @@ impl WireGuard {
                         .await;
                     return Ok(WgConnectResult {
                         success: false,
-                        message: format!("Kill-switch activation failed (tunnel rolled back): {e:#}"),
+                        message: format!(
+                            "Kill-switch activation failed (tunnel rolled back): {e:#}"
+                        ),
                         interface: None,
                     });
                 }
@@ -351,12 +353,13 @@ impl WireGuard {
         let interface = detect_interface(&name).await.ok();
         tracing::info!(tunnel = %name, interface = ?interface, wg_quick = %wg_quick.describe(), "WireGuard tunnel up");
 
+        let dns_owner = format!("wg-{name}");
         if !args.dns_servers.is_empty() {
-            crate::dns::set_vpn_dns(&args.dns_servers);
+            crate::dns::set_vpn_dns_for(&dns_owner, &args.dns_servers);
         } else if crate::wg_native::takes_all(&args.conf_content) {
             // The halves leave the Mac's own resolvers unreachable where
-            // mDNSResponder asks them; see `dns::follow_system_resolvers`.
-            crate::dns::follow_system_resolvers();
+            // mDNSResponder asks them; see `dns::follow_system_resolvers_for`.
+            crate::dns::follow_system_resolvers_for(&dns_owner);
         }
 
         if want_kill_switch {
@@ -403,9 +406,10 @@ impl WireGuard {
     ) -> anyhow::Result<WgDisconnectResult> {
         let _ = crate::kill_switch::deactivate_for_profile(&args.profile_id);
         let name = interface_name(&args.profile_id);
+        let dns_owner = format!("wg-{name}");
         if let Some(result) = self.native_down(&name).await {
             let _ = std::fs::remove_file(conf_path_for(&name));
-            crate::dns::clear_vpn_dns();
+            crate::dns::clear_vpn_dns_for(&dns_owner);
             match &result {
                 Ok(()) => tracing::info!(tunnel = %name, "WireGuard tunnel down"),
                 Err(e) => tracing::warn!(tunnel = %name, "WireGuard tunnel still up: {e:#}"),
@@ -431,7 +435,7 @@ impl WireGuard {
         // and running wg-quick for each one only failed and said so in
         // the log. DNS is cleared as the teardown below would.
         if !wg_quick_has_tunnel(utun_name_before.as_deref(), &conf_path) {
-            crate::dns::clear_vpn_dns();
+            crate::dns::clear_vpn_dns_for(&dns_owner);
             tracing::debug!(tunnel = %name, "WireGuard tunnel was not up");
             return Ok(WgDisconnectResult {
                 success: true,
@@ -509,7 +513,7 @@ impl WireGuard {
         //    the `ifconfig destroy` fallback above does not. Calling
         //    `clear_vpn_dns` here covers both paths and also removes
         //    any State-store entries, matching macOS best-practice.
-        crate::dns::clear_vpn_dns();
+        crate::dns::clear_vpn_dns_for(&dns_owner);
 
         // Final verdict: success iff the interface is gone now.
         let final_alive = utun_name_before
