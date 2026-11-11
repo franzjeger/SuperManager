@@ -42,7 +42,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -268,6 +268,14 @@ async fn main() -> anyhow::Result<()> {
     let client_policy = client_auth::own_policy();
     vpn_runtime::init_policy(client_policy);
     info!(?client_policy, "only SuperManager may use this helper");
+
+    // Rotate oversized helper / tailscaled logs at startup so long-running
+    // LaunchDaemons never grow `/var/log` unboundedly (`P3-6`).
+    rotate_log_if_oversize(Path::new(HELPER_LOG), 5 * 1024 * 1024);
+    rotate_log_if_oversize(
+        Path::new("/var/log/supermanager-tailscaled.log"),
+        5 * 1024 * 1024,
+    );
 
     let socket_path = PathBuf::from(SOCKET_PATH);
     // Wipe any stale socket from a crashed previous instance — `bind` would
@@ -1315,6 +1323,58 @@ fn mach_sleep_duration() -> std::time::Duration {
     std::time::Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
 }
 
+fn dir_has_matching_entry(dir: &Path, pred: impl Fn(&str) -> bool) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .any(|name| pred(&name))
+}
+
+/// Zero-fork check whether SuperManager currently manages any active Tailscale
+/// daemon, exit-node route intent, kill-switch lease, or WireGuard / OpenVPN /
+/// IKEv2 tunnel state (`P3-1`).
+pub(crate) fn has_managed_network_state() -> bool {
+    if tailscale::has_managed_daemon()
+        || tailscale_state::load().desired
+        || Path::new("/var/run/supermanager-tailscale-exemptions").exists()
+        || Path::new("/var/run/supermanager-charon.pid").exists()
+        || Path::new("/var/run/charon.vici").exists()
+        || kill_switch::has_active_leases()
+    {
+        return true;
+    }
+    dir_has_matching_entry(Path::new("/var/lib/supermanager/wg"), |n| {
+        n.ends_with(".json")
+    }) || dir_has_matching_entry(Path::new("/var/run/wireguard"), |n| {
+        n.starts_with("smgr") && n.ends_with(".name")
+    }) || dir_has_matching_entry(Path::new("/etc/wireguard"), |n| {
+        n.starts_with("smgr") && n.ends_with(".conf")
+    }) || dir_has_matching_entry(Path::new("/var/run/supermanager-vpn"), |n| {
+        n.ends_with(".pid") || n.ends_with(".ovpn")
+    })
+}
+
+/// Bounded log rotation (`P3-6`): when `path` exceeds `max_bytes`, atomically
+/// move it to `<path>.1` (refusing symlinks) so the next open starts fresh.
+pub(crate) fn rotate_log_if_oversize(path: &Path, max_bytes: u64) {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return;
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() <= max_bytes {
+        return;
+    }
+    let mut rotated = path.as_os_str().to_os_string();
+    rotated.push(".1");
+    let rotated_path = PathBuf::from(rotated);
+    if std::fs::symlink_metadata(&rotated_path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return;
+    }
+    let _ = std::fs::rename(path, &rotated_path);
+}
+
 #[cfg(test)]
 mod connection_tests {
     use super::*;
@@ -1384,5 +1444,24 @@ mod connection_tests {
             d2.saturating_sub(d1) < Duration::from_secs(1),
             "unexpected sleep delta while awake: d1={d1:?}, d2={d2:?}"
         );
+    }
+
+    #[test]
+    fn rotate_log_rotates_only_when_exceeding_cap() {
+        let dir = std::env::temp_dir().join(format!("smgr-log-rot-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("helper.log");
+        std::fs::write(&log, vec![b'a'; 64]).unwrap();
+        rotate_log_if_oversize(&log, 128);
+        assert!(log.is_file());
+        assert!(!dir.join("helper.log.1").exists());
+
+        rotate_log_if_oversize(&log, 32);
+        assert!(!log.exists());
+        assert_eq!(
+            std::fs::metadata(dir.join("helper.log.1")).unwrap().len(),
+            64
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

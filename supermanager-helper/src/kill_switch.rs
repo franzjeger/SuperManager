@@ -156,6 +156,13 @@ pub fn status() -> StatusResponse {
     status_from_state(&state)
 }
 
+/// Zero-fork check whether any kill-switch lease or `pf` token is active.
+pub(crate) fn has_active_leases() -> bool {
+    let _guard = PF_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    let state = load_state(Path::new(STATE_PATH));
+    !state.active.is_empty() || state.pf_token.is_some()
+}
+
 /// Activate or update `profile_id`'s kill-switch lease.
 ///
 /// Called by `wireguard`, `openvpn`, and `strongswan` during `connect` whenever

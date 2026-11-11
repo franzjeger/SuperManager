@@ -15,6 +15,7 @@
 //! prefix that another route holds is left alone: the local network's route
 //! at home, or a VPN's.
 
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
 use ipnet::IpNet;
@@ -22,16 +23,36 @@ use serde_json::Value;
 
 use crate::proc::Bounded as Command;
 
-/// The longest a subnet goes without its route. Each check is two CLI calls
-/// and one route lookup per subnet.
-const INTERVAL: Duration = Duration::from_secs(20);
+/// Backstop interval when Tailscale's managed daemon is running; primary
+/// wakeups arrive immediately on kernel `PF_ROUTE` changes (`P3-1`, `P3-5`).
+const BACKSTOP_INTERVAL: Duration = Duration::from_secs(120);
+
+static ROUTE_SIGNAL: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+
+pub(crate) fn notify_route_change() {
+    let (lock, cvar) = &ROUTE_SIGNAL;
+    *lock.lock().unwrap_or_else(PoisonError::into_inner) = true;
+    cvar.notify_all();
+}
 
 pub fn spawn() -> anyhow::Result<()> {
     std::thread::Builder::new()
         .name("tailscale-routes".into())
         .spawn(|| loop {
-            std::thread::sleep(INTERVAL);
-            restore_missing();
+            let (lock, cvar) = &ROUTE_SIGNAL;
+            let changed = lock.lock().unwrap_or_else(PoisonError::into_inner);
+            if !*changed {
+                let (mut guard, _) = cvar
+                    .wait_timeout(changed, BACKSTOP_INTERVAL)
+                    .unwrap_or_else(PoisonError::into_inner);
+                *guard = false;
+            } else {
+                let mut guard = changed;
+                *guard = false;
+            }
+            if crate::tailscale::has_managed_daemon() {
+                restore_missing();
+            }
         })?;
     Ok(())
 }

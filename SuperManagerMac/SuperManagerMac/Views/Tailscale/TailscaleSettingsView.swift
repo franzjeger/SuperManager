@@ -257,10 +257,10 @@ struct TailscaleSettingsView: View {
                     .controlSize(.small)
                     .help("Force the system resolver to this list immediately.")
                 }
-                TextField("1.1.1.1, 9.9.9.9", text: $dnsFallbacksText)
+                TextField("Leave empty to disable (e.g. 1.1.1.1, 9.9.9.9)", text: $dnsFallbacksText)
                     .textFieldStyle(.roundedBorder)
                     .font(.body.monospaced())
-                Text("DNS health watchdog uses these when the resolver gets stuck on a non-responsive nameserver.")
+                Text("Optional: when set, the DNS health watchdog installs these if all resolvers fail for 30s. Clear and click Apply to disable.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -485,13 +485,12 @@ struct TailscaleSettingsView: View {
     }
 
     /// Push the user's edited DNS fallback list to the helper.
-    /// The watchdog will use this list on its next escalation.
+    /// An empty list disables the opt-in DNS health watchdog.
     private func commitDNSFallbacks() async {
         let servers = dnsFallbacksText
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-        guard !servers.isEmpty else { return }
         do {
             _ = try await HelperClient.shared.tailscaleSetDNSFallbacks(servers: servers)
             originalDNSFallbacksText = servers.joined(separator: ", ")

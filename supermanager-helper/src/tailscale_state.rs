@@ -76,6 +76,7 @@ pub fn set_desired(id: &str, ip: &str) {
         exit_node_ip: ip.to_string(),
         updated_unix: now_unix(),
     });
+    crate::connectivity_watchdog::notify_state_changed();
 }
 
 /// Record that the user wants `auto:any` — tailscaled picks the exit node.
@@ -92,6 +93,7 @@ pub fn set_desired_auto(observed_id: &str, observed_ip: &str) {
         exit_node_ip: observed_ip.to_string(),
         updated_unix: now_unix(),
     });
+    crate::connectivity_watchdog::notify_state_changed();
 }
 
 /// Record that the user intentionally cleared the exit node — stops self-heal.
@@ -101,6 +103,7 @@ pub fn clear_desired() {
         updated_unix: now_unix(),
         ..Default::default()
     });
+    crate::connectivity_watchdog::notify_state_changed();
 }
 
 fn write(state: &DesiredExitNode) {

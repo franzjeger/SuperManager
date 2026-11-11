@@ -58,10 +58,11 @@
 //! now (`ndp -r`), and a default through any other is replaced by one.
 
 use anyhow::{anyhow, Result};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Shared mutable snapshots of the most-recent observation of the
 /// default route — separate for v4 and v6. Mutex is fine here —
@@ -73,9 +74,9 @@ static SNAPSHOT_V6: OnceLock<Mutex<Option<RouteSnapshot>>> = OnceLock::new();
 /// `spawn` calls collapse to a no-op.
 static SPAWNED: Mutex<bool> = Mutex::new(false);
 
-/// How many 500 ms ticks pass between checks that the IPv6 default goes
-/// through a router on the link. Each costs an `ndp` run.
-const IPV6_ROUTER_CHECK_TICKS: u32 = 20;
+/// Minimum interval between `ndp -r` checks of the IPv6 default router on
+/// `PF_ROUTE` events.
+const IPV6_ROUTER_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, PartialEq)]
 struct RouteSnapshot {
@@ -126,15 +127,17 @@ pub fn spawn_guardian() -> Result<()> {
 
     SNAPSHOT_V4.get_or_init(|| Mutex::new(None));
     SNAPSHOT_V6.get_or_init(|| Mutex::new(None));
-    remove_stray_loopback_default(Af::V4);
-    remove_stray_loopback_default(Af::V6);
+    if crate::has_managed_network_state() {
+        remove_stray_loopback_default(Af::V4);
+        remove_stray_loopback_default(Af::V6);
+    }
 
     thread::Builder::new()
         .name("route-guardian".into())
-        .spawn(move || guardian_loop())
+        .spawn(guardian_loop)
         .map_err(|e| anyhow!("could not spawn guardian thread: {e}"))?;
 
-    tracing::info!("route guardian spawned (v4 + v6)");
+    tracing::info!("route guardian spawned (event-driven PF_ROUTE)");
     Ok(())
 }
 
@@ -199,17 +202,189 @@ pub fn force_restore_now() -> Result<()> {
     }
 }
 
+fn open_pf_route_socket() -> std::io::Result<OwnedFd> {
+    // SAFETY: `socket` returns either `-1` or a fresh descriptor we wrap immediately.
+    let raw = unsafe { libc::socket(libc::PF_ROUTE, libc::SOCK_RAW, libc::AF_UNSPEC) };
+    if raw < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `raw` is a valid open descriptor owned exclusively here.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    // Ensure child subprocesses never inherit the routing socket and reads never block.
+    // SAFETY: `fcntl` on a valid descriptor we own.
+    unsafe {
+        let fd_flags = libc::fcntl(fd.as_raw_fd(), libc::F_GETFD);
+        if fd_flags >= 0 {
+            let _ = libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, fd_flags | libc::FD_CLOEXEC);
+        }
+        let fl_flags = libc::fcntl(fd.as_raw_fd(), libc::F_GETFL);
+        if fl_flags >= 0 {
+            let _ = libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, fl_flags | libc::O_NONBLOCK);
+        }
+    }
+    Ok(fd)
+}
+
+/// XNU `<net/route.h>` message types that indicate routing-table or interface
+/// state changed (`RTM_ADD`, `RTM_DELETE`, `RTM_CHANGE`, `RTM_LOSING`,
+/// `RTM_REDIRECT`, `RTM_NEWADDR`, `RTM_DELADDR`, `RTM_IFINFO`).
+fn is_relevant_rtm_type(rtm_type: u8) -> bool {
+    matches!(
+        i32::from(rtm_type),
+        libc::RTM_ADD
+            | libc::RTM_DELETE
+            | libc::RTM_CHANGE
+            | libc::RTM_LOSING
+            | libc::RTM_REDIRECT
+            | libc::RTM_NEWADDR
+            | libc::RTM_DELADDR
+            | libc::RTM_IFINFO
+    )
+}
+
+/// Drain pending `PF_ROUTE` datagrams and return `true` if any message carried
+/// a route/interface mutation.
+fn drain_pf_route(sock: &OwnedFd) -> bool {
+    let mut buf = [0u8; 2048];
+    let mut saw_relevant = false;
+    loop {
+        // SAFETY: `buf` is a writable stack slice.
+        let n = unsafe { libc::read(sock.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+        if n >= 4 {
+            if is_relevant_rtm_type(buf[3]) {
+                saw_relevant = true;
+            }
+            continue;
+        }
+        if n < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+        }
+        break;
+    }
+    saw_relevant
+}
+
+/// Wait on `PF_ROUTE` for either a route-change event (settling bursts up to
+/// 250 ms quiet / 1.5 s max) or `timeout_ms` (`-1` = block indefinitely in the
+/// kernel with zero CPU and zero subprocesses; `P3-5`).
+fn wait_for_route_change(sock: &OwnedFd, timeout_ms: libc::c_int) {
+    let mut pfd = libc::pollfd {
+        fd: sock.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        // SAFETY: single `pollfd` on stack.
+        let rc = unsafe { libc::poll(&raw mut pfd, 1, timeout_ms) };
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            thread::sleep(Duration::from_secs(1));
+            return;
+        }
+        if rc == 0 {
+            // Debounce / follow-up timer expired.
+            return;
+        }
+        if drain_pf_route(sock) {
+            break;
+        }
+        // Unrelated `RTM_GET` lookup chatter: if we had a finite follow-up
+        // timer, return to let the caller evaluate; if idle (`-1`), keep sleeping.
+        if timeout_ms >= 0 {
+            return;
+        }
+    }
+
+    // Settle a route-change burst (e.g. Wi-Fi roam or tunnel setup) before
+    // running `netstat`.
+    let max_deadline = Instant::now() + Duration::from_millis(1500);
+    loop {
+        let now = Instant::now();
+        if now >= max_deadline {
+            break;
+        }
+        let rem_ms = libc::c_int::try_from(
+            max_deadline
+                .saturating_duration_since(now)
+                .min(Duration::from_millis(250))
+                .as_millis(),
+        )
+        .unwrap_or(250);
+        pfd.revents = 0;
+        // SAFETY: single `pollfd` on stack.
+        let rc = unsafe { libc::poll(&raw mut pfd, 1, rem_ms.max(1)) };
+        if rc <= 0 {
+            break;
+        }
+        let _ = drain_pf_route(sock);
+    }
+}
+
 fn guardian_loop() {
     let mut missing_v4 = 0u32;
     let mut missing_v6 = 0u32;
-    let mut ticks = 0u32;
-    loop {
-        thread::sleep(Duration::from_millis(500));
+    let mut orphan_pending = false;
+    let mut last_ipv6_check: Option<Instant> = None;
+    let mut sock = open_pf_route_socket()
+        .map_err(|e| {
+            tracing::warn!("route-guardian: PF_ROUTE socket failed ({e}); using 5s fallback")
+        })
+        .ok();
+
+    // Seed initial snapshot only when SuperManager already owns active state at boot.
+    if crate::has_managed_network_state() {
         tick_one(Af::V4, &mut missing_v4);
         tick_one(Af::V6, &mut missing_v6);
-        ticks = ticks.wrapping_add(1);
-        if ticks.is_multiple_of(IPV6_ROUTER_CHECK_TICKS) {
+        orphan_pending = crate::connectivity_watchdog::reap_orphaned_routes_once();
+    }
+
+    loop {
+        let timeout_ms: libc::c_int = if missing_v4 > 0 || missing_v6 > 0 {
+            500
+        } else if orphan_pending {
+            2000
+        } else {
+            -1
+        };
+
+        if let Some(ref fd) = sock {
+            wait_for_route_change(fd, timeout_ms);
+        } else {
+            let fallback = if timeout_ms > 0 {
+                Duration::from_millis(timeout_ms as u64)
+            } else {
+                Duration::from_secs(5)
+            };
+            thread::sleep(fallback);
+            sock = open_pf_route_socket().ok();
+        }
+
+        // Wake the Tailscale subnet-route keeper on kernel route changes (`P3-5`).
+        crate::tailscale_routes::notify_route_change();
+
+        // Gate all subprocess work (`netstat`, `ndp`, `route`) on SuperManager
+        // actually owning active Tailscale or VPN state (`P3-1`).
+        if !crate::has_managed_network_state() {
+            missing_v4 = 0;
+            missing_v6 = 0;
+            orphan_pending = false;
+            continue;
+        }
+
+        orphan_pending = crate::connectivity_watchdog::reap_orphaned_routes_once();
+        tick_one(Af::V4, &mut missing_v4);
+        tick_one(Af::V6, &mut missing_v6);
+
+        let now = Instant::now();
+        if last_ipv6_check.is_none_or(|t| now.duration_since(t) >= IPV6_ROUTER_CHECK_INTERVAL) {
             repair_ipv6_default();
+            last_ipv6_check = Some(now);
         }
     }
 }
@@ -551,5 +726,15 @@ mod tests {
         assert_eq!(snapshot_of(route("::1", "lo0")), None);
         assert_eq!(snapshot_of(route("link#6", "en0")), None);
         assert_eq!(snapshot_of(None), None);
+    }
+
+    #[test]
+    fn pf_route_socket_opens_and_filters_mutation_types() {
+        let sock = open_pf_route_socket().expect("PF_ROUTE socket should open on macOS");
+        assert!(sock.as_raw_fd() >= 0);
+        assert!(is_relevant_rtm_type(libc::RTM_ADD as u8));
+        assert!(is_relevant_rtm_type(libc::RTM_DELETE as u8));
+        assert!(is_relevant_rtm_type(libc::RTM_IFINFO as u8));
+        assert!(!is_relevant_rtm_type(libc::RTM_GET as u8));
     }
 }
