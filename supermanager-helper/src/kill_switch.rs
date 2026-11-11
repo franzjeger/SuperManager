@@ -430,8 +430,8 @@ fn apply_active_leases(state: &mut PersistedState) -> Result<()> {
         return Ok(());
     }
 
-    let tailscale_utun = crate::tailscale::detect_tailscale_utun()
-        .filter(|u| validate_interface(u).is_ok());
+    let tailscale_utun =
+        crate::tailscale::detect_tailscale_utun().filter(|u| validate_interface(u).is_ok());
     let rules = build_anchor_rules(&state.active, tailscale_utun.as_deref())?;
 
     if let Some(parent) = Path::new(ANCHOR_FILE).parent() {
@@ -444,7 +444,8 @@ fn apply_active_leases(state: &mut PersistedState) -> Result<()> {
     // `pfctl -X <token>` when `state.active` drains back to empty.
     let need_enable = state.pf_token.is_none() || !pf_is_enabled();
     if need_enable {
-        let out = checked_pfctl_output(Command::new("/sbin/pfctl").arg("-E").output(), "enable pf")?;
+        let out =
+            checked_pfctl_output(Command::new("/sbin/pfctl").arg("-E").output(), "enable pf")?;
         if let Some(tok) = parse_pf_token(&out.stderr).or_else(|| parse_pf_token(&out.stdout)) {
             if let Some(old) = state.pf_token.replace(tok) {
                 if is_valid_pf_token(&old) {
@@ -603,7 +604,10 @@ fn load_state(path: &Path) -> PersistedState {
     match serde_json::from_slice::<PersistedState>(&bytes) {
         Ok(s) => s,
         Err(e) => {
-            tracing::warn!("kill-switch state {} unreadable ({e}); starting empty", path.display());
+            tracing::warn!(
+                "kill-switch state {} unreadable ({e}); starting empty",
+                path.display()
+            );
             PersistedState::default()
         }
     }
@@ -611,12 +615,10 @@ fn load_state(path: &Path) -> PersistedState {
 
 fn save_state(path: &Path, state: &PersistedState) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
     let body = serde_json::to_vec_pretty(state).context("serializing kill-switch state")?;
-    atomic_write_file(path, &body, 0o600)
-        .with_context(|| format!("writing {}", path.display()))
+    atomic_write_file(path, &body, 0o600).with_context(|| format!("writing {}", path.display()))
 }
 
 fn install_referrer_if_missing() -> Result<()> {
@@ -638,7 +640,9 @@ fn install_referrer_if_missing() -> Result<()> {
         atomic_write_pf_conf(&new_body)?;
     }
     checked_pfctl_output(
-        Command::new("/sbin/pfctl").args(["-f", PF_CONF_PATH]).output(),
+        Command::new("/sbin/pfctl")
+            .args(["-f", PF_CONF_PATH])
+            .output(),
         "activate kill-switch anchor reference",
     )?;
     Ok(())
@@ -656,7 +660,9 @@ fn remove_referrer_if_present() -> Result<()> {
     if new_body != body {
         atomic_write_pf_conf(&new_body)?;
         checked_pfctl_output(
-            Command::new("/sbin/pfctl").args(["-f", PF_CONF_PATH]).output(),
+            Command::new("/sbin/pfctl")
+                .args(["-f", PF_CONF_PATH])
+                .output(),
             "reload pf.conf after removing kill-switch anchor",
         )?;
     }
@@ -868,7 +874,8 @@ mod tests {
 
         assert!(rules.contains("pass quick on utun7 all"));
         assert!(rules.contains("pass quick on utun9 all"));
-        assert!(rules.contains("pass out quick inet proto udp from any to 51.174.175.4 port { 500, 4500 }"));
+        assert!(rules
+            .contains("pass out quick inet proto udp from any to 51.174.175.4 port { 500, 4500 }"));
         assert!(rules.contains("pass quick inet proto esp from any to 51.174.175.4"));
         assert!(rules.contains("pass out quick inet from any to 198.51.100.10"));
         assert!(rules.contains("pass out quick inet6 from any to 2001:db8::42"));

@@ -163,7 +163,7 @@ fn watchdog_loop() {
                     own_resolvers = ?own,
                     "primary network service DNS is healthy again — clearing supplemental fallback"
                 );
-                crate::dns::clear_vpn_dns();
+                crate::dns::clear_vpn_dns_for("watchdog");
                 already_forced = false;
                 consecutive_failures = 0;
                 continue;
@@ -237,7 +237,7 @@ fn watchdog_loop() {
             );
             // Install under SuperManager's own ephemeral State key rather than
             // overwriting the primary network service's DHCP State:/.../DNS entry.
-            crate::dns::set_vpn_dns(&fallbacks);
+            crate::dns::set_vpn_dns_for("watchdog", &fallbacks);
             already_forced = true;
         }
     }

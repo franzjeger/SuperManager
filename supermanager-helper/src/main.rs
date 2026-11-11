@@ -86,7 +86,6 @@ pub(crate) const HELPER_LOG: &str = "/var/log/supermanager-helper.log";
 /// `Arc::clone` per field.
 #[derive(Clone)]
 struct Controllers {
-    policy: client_auth::Policy,
     strongswan: Arc<Mutex<strongswan::Strongswan>>,
     wireguard: Arc<Mutex<wireguard::WireGuard>>,
     openvpn: Arc<Mutex<openvpn::OpenVpn>>,
@@ -148,7 +147,11 @@ impl Response {
 fn ok_json<T: Serialize>(id: u64, value: T) -> Response {
     match serde_json::to_value(value) {
         Ok(v) => Response::ok(id, v),
-        Err(e) => Response::err(id, -32603, format!("internal error: serialize response: {e}")),
+        Err(e) => Response::err(
+            id,
+            -32603,
+            format!("internal error: serialize response: {e}"),
+        ),
     }
 }
 
@@ -271,11 +274,17 @@ async fn main() -> anyhow::Result<()> {
     // fail otherwise. This is safe: only root can write to /var/run.
     let _ = tokio::fs::remove_file(&socket_path).await;
 
+    let controllers = Controllers {
+        strongswan: Arc::new(Mutex::new(strongswan::Strongswan::new(client_policy))),
+        wireguard: Arc::new(Mutex::new(wireguard::WireGuard::new(client_policy))),
+        openvpn: Arc::new(Mutex::new(openvpn::OpenVpn::new(client_policy))),
+    };
+
     // Sweep transient strongSwan configs left behind by a previous helper
     // crash. We own the `supermanager-*` namespace under swanctl's dirs, and
     // any leftover file from before this start is a credential we'd rather not
     // have on disk. The next `vpn_connect` regenerates them from scratch.
-    strongswan::sweep_stale_configs(client_policy).await;
+    controllers.strongswan.lock().await.sweep_stale().await;
     openvpn::sweep_legacy_logs();
 
     // Spawn the default-route guardian. It lives for the helper's
@@ -327,28 +336,27 @@ async fn main() -> anyhow::Result<()> {
     // black-holing traffic on wake, with nothing to clean them.
     //
     // We can't observe *will-sleep* without IOKit, but we can detect that a
-    // sleep HAPPENED: tokio's timer runs on the monotonic clock, which does
-    // NOT advance while the machine is suspended, whereas the wall clock does.
-    // So a `sleep(TICK)` that comes back with a wall-clock delta far exceeding
-    // TICK means the machine was suspended in between. On detection we run the
-    // same post-wake cleanup as the system_wake RPC — snapshot reset plus the
-    // race-guarded stale-config/route sweep (which no-ops if a tunnel
-    // auto-reconnected). Pre-sleep teardown for the GUI-closed case still
-    // wants IOKit IORegisterForSystemPower; tracked as a follow-up.
+    // sleep HAPPENED without touching wall clock (`SystemTime`), which jumps on
+    // NTP corrections and manual clock adjustments: Darwin's
+    // `mach_continuous_time()` advances monotonically across system sleep while
+    // `mach_absolute_time()` pauses during sleep. Any delta in
+    // `(mach_continuous_time - mach_absolute_time)` across a tick is genuine
+    // hardware sleep time.
+    let sw_for_wake = controllers.strongswan.clone();
     tokio::spawn(async move {
-        use std::time::{Duration, SystemTime};
+        use std::time::Duration;
         const TICK: Duration = Duration::from_secs(30);
-        const SLEEP_THRESHOLD: Duration = Duration::from_secs(60);
-        let mut last = SystemTime::now();
+        const SLEEP_THRESHOLD: Duration = Duration::from_secs(15);
+        let mut last_slept = mach_sleep_duration();
         loop {
             tokio::time::sleep(TICK).await;
-            let now = SystemTime::now();
-            let elapsed = now.duration_since(last).unwrap_or(TICK);
-            if elapsed > TICK + SLEEP_THRESHOLD {
+            let now_slept = mach_sleep_duration();
+            let slept = now_slept.saturating_sub(last_slept);
+            if slept >= SLEEP_THRESHOLD {
                 info!(
-                    "wake detector: {}s wall-clock jump across a {}s tick — \
+                    "wake detector: {}s Mach sleep delta across a {}s tick — \
                      machine slept; running post-wake cleanup",
-                    elapsed.as_secs(),
+                    slept.as_secs(),
                     TICK.as_secs()
                 );
                 // Suspend watchdog escalation for the fragile post-wake settle
@@ -357,13 +365,13 @@ async fn main() -> anyhow::Result<()> {
                 // fire panic_reset before the exit node is re-established.
                 connectivity_watchdog::pause_for(45);
                 route_guardian::reset_snapshot();
-                strongswan::sweep_stale_configs(client_policy).await;
+                sw_for_wake.lock().await.sweep_stale().await;
                 // Don't wait up to 30s for the auto_reconnect tick to heal a
                 // desired exit node — this is the GUI-closed wake case, so
                 // there is no Swift-side system_wake RPC coming either.
                 tailscale::schedule_wake_reconcile();
             }
-            last = now;
+            last_slept = now_slept;
         }
     });
 
@@ -377,12 +385,6 @@ async fn main() -> anyhow::Result<()> {
 
     info!("listening on {}", socket_path.display());
 
-    let controllers = Controllers {
-        policy: client_policy,
-        strongswan: Arc::new(Mutex::new(strongswan::Strongswan::new(client_policy))),
-        wireguard: Arc::new(Mutex::new(wireguard::WireGuard::new(client_policy))),
-        openvpn: Arc::new(Mutex::new(openvpn::OpenVpn::new(client_policy))),
-    };
     // WireGuard tunnels this helper's predecessor set up itself outlive it;
     // supervise them before anything asks about them.
     controllers.wireguard.lock().await.adopt_native().await;
@@ -1218,7 +1220,12 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
             // through (GUI not open, connect happened from auto-reconnect,
             // etc.). terminate_and_sweep is idempotent — no-op if nothing
             // is active.
-            strongswan::terminate_and_sweep(controllers.policy).await;
+            controllers
+                .strongswan
+                .lock()
+                .await
+                .terminate_all_and_sweep()
+                .await;
 
             // SIGTERM any live OpenVPN tunnels we manage. If one outlived a
             // helper restart or the Swift disconnect path didn't fire, it
@@ -1227,7 +1234,10 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
             // thinks it's still alive). The old `pkill -f ovpncli` was dead
             // code — the spawned binary is `openvpn3`/`openvpn`, never named
             // "ovpncli" — so we kill by tracked pid instead.
-            let killed = openvpn::terminate_all().await;
+            let killed = {
+                let _ovpn_guard = controllers.openvpn.lock().await;
+                openvpn::terminate_all().await
+            };
             if killed > 0 {
                 info!("system_sleep: terminated {killed} OpenVPN process(es)");
             }
@@ -1253,7 +1263,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
             // stale kernel host routes, which prevents "unable to
             // determine source address" errors on the first post-wake
             // connect attempt.
-            strongswan::sweep_stale_configs(controllers.policy).await;
+            controllers.strongswan.lock().await.sweep_stale().await;
 
             // Accelerate exit-node recovery past the 30s reconcile tick. The
             // sweep above runs first on purpose: it is what may have removed
@@ -1266,6 +1276,43 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
 
         other => Response::err(id, -32601, format!("unknown method: {other}")),
     }
+}
+
+/// Cumulative time the machine has spent in system sleep since boot, computed
+/// from Darwin's `mach_continuous_time() - mach_absolute_time()`.
+///
+/// Neither Mach clock is affected by NTP adjustments or manual wall-clock
+/// changes: `mach_continuous_time` advances monotonically across sleep while
+/// `mach_absolute_time` pauses during sleep. Sampling `mach_absolute_time`
+/// again *after* `mach_continuous_time` ensures thread preemption between the
+/// reads never masquerades as sleep time.
+fn mach_sleep_duration() -> std::time::Duration {
+    #[repr(C)]
+    #[derive(Copy, Clone)]
+    struct MachTimebaseInfo {
+        numer: u32,
+        denom: u32,
+    }
+    extern "C" {
+        fn mach_absolute_time() -> u64;
+        fn mach_continuous_time() -> u64;
+        fn mach_timebase_info(info: *mut MachTimebaseInfo) -> libc::kern_return_t;
+    }
+
+    let (abs_before, cont, abs_after, tb) = unsafe {
+        let mut tb = MachTimebaseInfo { numer: 1, denom: 1 };
+        let _ = mach_timebase_info(&raw mut tb);
+        let a1 = mach_absolute_time();
+        let c = mach_continuous_time();
+        let a2 = mach_absolute_time();
+        (a1, c, a2, tb)
+    };
+    let sleep_ticks = cont.saturating_sub(abs_after.max(abs_before));
+    if tb.denom == 0 {
+        return std::time::Duration::ZERO;
+    }
+    let nanos = (u128::from(sleep_ticks) * u128::from(tb.numer)) / u128::from(tb.denom);
+    std::time::Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
 }
 
 #[cfg(test)]
@@ -1323,5 +1370,19 @@ mod connection_tests {
         ] {
             assert!(!is_read_only(method), "{method}");
         }
+    }
+
+    #[test]
+    fn mach_sleep_duration_stays_stable_while_awake() {
+        let d1 = mach_sleep_duration();
+        std::thread::sleep(Duration::from_millis(20));
+        let d2 = mach_sleep_duration();
+        // While awake, `mach_continuous_time - mach_absolute_time` does not
+        // advance (allow at most a small scheduling jitter margin, well below
+        // the 15s wake threshold).
+        assert!(
+            d2.saturating_sub(d1) < Duration::from_secs(1),
+            "unexpected sleep delta while awake: d1={d1:?}, d2={d2:?}"
+        );
     }
 }

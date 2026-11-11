@@ -98,22 +98,25 @@ impl WatchedProfile {
     pub fn is_armed(&self) -> bool {
         let a = self.last_connect_args.clone();
         match self.backend.as_str() {
-            "wireguard" => serde_json::from_value::<crate::wireguard::WgConnectArgs>(a)
-                .is_ok_and(|args| {
+            "wireguard" => {
+                serde_json::from_value::<crate::wireguard::WgConnectArgs>(a).is_ok_and(|args| {
                     args.profile_id == self.profile_id
                         && crate::wireguard::validate_connect_args(&args).is_ok()
-                }),
-            "openvpn" => serde_json::from_value::<crate::openvpn::OvpnConnectArgs>(a)
-                .is_ok_and(|args| {
+                })
+            }
+            "openvpn" => {
+                serde_json::from_value::<crate::openvpn::OvpnConnectArgs>(a).is_ok_and(|args| {
                     args.profile_id == self.profile_id
                         && args.has_configuration()
                         && crate::openvpn::validate_connect_args(&args).is_ok()
-                }),
-            "ikev2" => serde_json::from_value::<crate::strongswan::ConnectArgs>(a)
-                .is_ok_and(|args| {
+                })
+            }
+            "ikev2" => {
+                serde_json::from_value::<crate::strongswan::ConnectArgs>(a).is_ok_and(|args| {
                     args.profile_id == self.profile_id
                         && crate::strongswan::validate_connect_args(&args).is_ok()
-                }),
+                })
+            }
             _ => false,
         }
     }
@@ -194,30 +197,99 @@ pub(crate) fn validate_enrollment(
     Ok(())
 }
 
+const MAX_BACKOFF_SECS: u64 = 300;
+
+/// Exponential backoff after `attempts` consecutive failures:
+/// `30s -> 60s -> 120s -> 240s -> 300s (cap)`.
+fn backoff_duration(attempts: u32) -> Duration {
+    let shift = attempts.saturating_sub(1).min(4);
+    let secs = POLL_INTERVAL_SECS
+        .saturating_mul(1u64 << shift)
+        .min(MAX_BACKOFF_SECS);
+    Duration::from_secs(secs)
+}
+
+/// True when `error` indicates a definitive authentication/credential rejection
+/// (where retrying every tick would only risk locking the operator's account).
+fn is_auth_failure(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    [
+        "authentication failed",
+        "auth_failed",
+        "eap_failure",
+        "eap authentication failed",
+        "received eap_failure",
+        "invalid credentials",
+        "bad username or password",
+        "logon failure",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+#[derive(Clone, Debug, Default)]
+struct FailureRecord {
+    attempts: u32,
+    next_retry_at: Option<std::time::Instant>,
+    auth_failed: bool,
+}
+
 /// Process-wide state. Built up at startup by `spawn_watchdog`,
 /// then mutated via the public `enable` / `disable` APIs.
 #[derive(Default)]
 struct State {
     watched: HashMap<String, WatchedProfile>,
-    /// Failed replays in a row, per profile. In memory only: a restarted
-    /// helper counts from zero again.
-    failures: HashMap<String, u32>,
+    /// Failed replays in a row + backoff/auth-halt state, per profile.
+    /// In memory only: a restarted helper counts from zero again.
+    failures: HashMap<String, FailureRecord>,
 }
 
 impl State {
+    fn should_skip_for_backoff(&self, profile_id: &str, now: std::time::Instant) -> bool {
+        let Some(rec) = self.failures.get(profile_id) else {
+            return false;
+        };
+        if rec.auth_failed {
+            return true;
+        }
+        rec.next_retry_at.is_some_and(|due| now < due)
+    }
+
     /// Count a failed replay of `p`. Returns the event to record when this
-    /// failure completes a run of `FAILING_AFTER`: once per run, not on every
-    /// tick after it.
+    /// failure completes a run of `FAILING_AFTER` (or immediately on a
+    /// definitive authentication failure, which also halts further retries
+    /// until fresh credentials arrive).
     fn replay_failed(&mut self, p: &WatchedProfile, error: &str) -> Option<Event> {
-        // Only an armed Always-on entry is a promise we are failing to keep.
-        // An unarmed one cannot replay yet and the GUI already says so; a
-        // RouteGuard entry belongs to a manual connection.
+        self.replay_failed_at(p, error, std::time::Instant::now())
+    }
+
+    fn replay_failed_at(
+        &mut self,
+        p: &WatchedProfile,
+        error: &str,
+        now: std::time::Instant,
+    ) -> Option<Event> {
         if p.mode != WatchMode::AlwaysOn || !p.is_armed() {
             return None;
         }
-        let run = self.failures.entry(p.profile_id.clone()).or_insert(0);
-        *run = run.saturating_add(1);
-        let attempts = *run;
+        let rec = self.failures.entry(p.profile_id.clone()).or_default();
+        let was_auth_failed = rec.auth_failed;
+        rec.attempts = rec.attempts.saturating_add(1);
+        let attempts = rec.attempts;
+        if is_auth_failure(error) {
+            rec.auth_failed = true;
+            rec.next_retry_at = None;
+            if !was_auth_failed && attempts < FAILING_AFTER {
+                return Some(Event::VpnReconnectFailing {
+                    profile_id: p.profile_id.clone(),
+                    backend: p.backend.clone(),
+                    attempts,
+                    error: error.to_owned(),
+                });
+            }
+        } else {
+            rec.next_retry_at = Some(now + backoff_duration(attempts));
+        }
         (attempts == FAILING_AFTER).then(|| Event::VpnReconnectFailing {
             profile_id: p.profile_id.clone(),
             backend: p.backend.clone(),
@@ -242,8 +314,8 @@ pub async fn spawn_watchdog(
             let (mut map, had_legacy_secrets) = match fs::read_to_string(STATE_PATH) {
                 Ok(s) => {
                     let had_legacy = s.contains("last_connect_args");
-                    let parsed =
-                        serde_json::from_str::<HashMap<String, WatchedProfile>>(&s).unwrap_or_default();
+                    let parsed = serde_json::from_str::<HashMap<String, WatchedProfile>>(&s)
+                        .unwrap_or_default();
                     (parsed, had_legacy)
                 }
                 Err(_) => (HashMap::new(), false),
@@ -380,6 +452,8 @@ pub async fn refresh_args(
             mode: existing_mode,
         },
     );
+    // Fresh credentials re-arm any halted auth-failure or backoff window.
+    g.failures.remove(profile_id);
     persist(&g.watched)?;
     Ok(())
 }
@@ -434,9 +508,7 @@ pub async fn unguard_routes(profile_id: &str) -> Result<()> {
 
 /// Only `WatchMode::AlwaysOn` entries are persisted to disk. `RouteGuard`
 /// entries belong to transient manual sessions and are never written out.
-fn persistable_entries(
-    map: &HashMap<String, WatchedProfile>,
-) -> HashMap<&String, &WatchedProfile> {
+fn persistable_entries(map: &HashMap<String, WatchedProfile>) -> HashMap<&String, &WatchedProfile> {
     map.iter()
         .filter(|(_, w)| w.mode == WatchMode::AlwaysOn)
         .collect()
@@ -522,8 +594,24 @@ async fn check_and_reconnect(
     // itself to still be up before replaying. If the SA is genuinely down we do
     // NOTHING — a manually-connected profile stays down until the user
     // reconnects, unlike Always-on which resurrects it here.
+    // Re-verify membership, armed state, and backoff/auth-halt under the lock
+    // right before replay so disabling a profile while an earlier entry in the
+    // tick was connecting never replays a disenrolled profile (`P2-17`).
+    let p = {
+        let g = state.lock().await;
+        let Some(current) = g.watched.get(&p.profile_id).cloned() else {
+            return;
+        };
+        if !current.is_armed()
+            || g.should_skip_for_backoff(&current.profile_id, std::time::Instant::now())
+        {
+            return;
+        }
+        current
+    };
+
     if p.mode == WatchMode::RouteGuard {
-        let sa_up = p.backend == "ikev2" && sw_sa_established(p, sw.clone()).await;
+        let sa_up = p.backend == "ikev2" && sw_sa_established(&p, sw.clone()).await;
         if !sa_up {
             // SA is gone: prune the transient RouteGuard entry from memory so
             // its credentials do not linger after the tunnel has closed.
@@ -552,9 +640,9 @@ async fn check_and_reconnect(
         );
     }
     let result = match p.backend.as_str() {
-        "wireguard" => replay_wg(p, wg).await,
-        "openvpn" => replay_ov(p, ov).await,
-        "ikev2" => replay_sw(p, sw).await,
+        "wireguard" => replay_wg(&p, wg).await,
+        "openvpn" => replay_ov(&p, ov).await,
+        "ikev2" => replay_sw(&p, sw).await,
         other => {
             tracing::warn!(backend = %other, "unknown backend in watch list");
             return;
@@ -575,13 +663,32 @@ async fn check_and_reconnect(
             });
         }
         Err(e) => {
-            tracing::warn!(
-                profile_id = %p.profile_id,
-                backend = %p.backend,
-                error = %e,
-                "auto-reconnect failed; will retry next cycle"
-            );
-            let failing = state.lock().await.replay_failed(p, &format!("{e:#}"));
+            let err_str = format!("{e:#}");
+            let mut g = state.lock().await;
+            if !g.watched.contains_key(&p.profile_id) {
+                return;
+            }
+            let failing = g.replay_failed(&p, &err_str);
+            let halted = g
+                .failures
+                .get(&p.profile_id)
+                .is_some_and(|rec| rec.auth_failed);
+            drop(g);
+            if halted {
+                tracing::error!(
+                    profile_id = %p.profile_id,
+                    backend = %p.backend,
+                    error = %e,
+                    "auto-reconnect halted after authentication failure to prevent account lockout"
+                );
+            } else {
+                tracing::warn!(
+                    profile_id = %p.profile_id,
+                    backend = %p.backend,
+                    error = %e,
+                    "auto-reconnect failed; backing off before next retry"
+                );
+            }
             if let Some(event) = failing {
                 events::record(event);
             }
@@ -606,7 +713,11 @@ async fn replay_wg(p: &WatchedProfile, wg: Arc<Mutex<WireGuard>>) -> Result<()> 
     let args: crate::wireguard::WgConnectArgs =
         serde_json::from_value(p.last_connect_args.clone()).context("decode wg args")?;
     let mut g = wg.lock().await;
-    g.connect(&args).await.map(|_| ())
+    let res = g.connect(&args).await?;
+    if !res.success {
+        anyhow::bail!("{}", res.message);
+    }
+    Ok(())
 }
 
 async fn ov_connected(p: &WatchedProfile, ov: Arc<Mutex<OpenVpn>>) -> bool {
@@ -624,7 +735,11 @@ async fn replay_ov(p: &WatchedProfile, ov: Arc<Mutex<OpenVpn>>) -> Result<()> {
     let args: crate::openvpn::OvpnConnectArgs =
         serde_json::from_value(p.last_connect_args.clone()).context("decode ovpn args")?;
     let mut g = ov.lock().await;
-    g.connect(&args).await.map(|_| ())
+    let res = g.connect(&args).await?;
+    if !res.success {
+        anyhow::bail!("{}", res.message);
+    }
+    Ok(())
 }
 
 async fn sw_connected(p: &WatchedProfile, sw: Arc<Mutex<Strongswan>>) -> bool {
@@ -682,7 +797,11 @@ async fn replay_sw(p: &WatchedProfile, sw: Arc<Mutex<Strongswan>>) -> Result<()>
     let args: crate::strongswan::ConnectArgs =
         serde_json::from_value(p.last_connect_args.clone()).context("decode ikev2 args")?;
     let mut g = sw.lock().await;
-    g.connect(&args).await.map(|_| ())
+    let res = g.connect(&args).await?;
+    if !res.ok {
+        anyhow::bail!("{}", res.message);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -842,7 +961,9 @@ mod tests {
         let uuid = "26b4fcc6-097a-41e7-932e-9a6d2a4663e5";
 
         // Unarmed placeholders from the GUI before first manual connect are allowed.
-        assert!(validate_enrollment(uuid, "ikev2", &serde_json::json!({ "profile_id": uuid })).is_ok());
+        assert!(
+            validate_enrollment(uuid, "ikev2", &serde_json::json!({ "profile_id": uuid })).is_ok()
+        );
         assert!(validate_enrollment(uuid, "ikev2", &serde_json::json!({})).is_ok());
         assert!(validate_enrollment(uuid, "openvpn", &serde_json::Value::Null).is_ok());
 
@@ -928,5 +1049,28 @@ mod tests {
         assert_eq!(wp.mode, WatchMode::AlwaysOn);
         assert!(!wp.is_armed());
         assert_eq!(wp.last_connect_args, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn exponential_backoff_caps_at_five_minutes_and_auth_failure_halts_immediately() {
+        assert_eq!(backoff_duration(1), Duration::from_secs(30));
+        assert_eq!(backoff_duration(2), Duration::from_secs(60));
+        assert_eq!(backoff_duration(3), Duration::from_secs(120));
+        assert_eq!(backoff_duration(4), Duration::from_secs(240));
+        assert_eq!(backoff_duration(5), Duration::from_secs(300));
+        assert_eq!(backoff_duration(99), Duration::from_secs(300));
+
+        let mut state = State::default();
+        let p = watched(WatchMode::AlwaysOn, armed_args());
+        let t0 = std::time::Instant::now();
+
+        assert_eq!(state.replay_failed_at(&p, "network unreachable", t0), None);
+        assert!(state.should_skip_for_backoff("p1", t0 + Duration::from_secs(29)));
+        assert!(!state.should_skip_for_backoff("p1", t0 + Duration::from_secs(31)));
+
+        let mut auth_state = State::default();
+        let ev = auth_state.replay_failed_at(&p, "EAP authentication failed: AUTH_FAILED", t0);
+        assert_eq!(attempts(ev), Some(1));
+        assert!(auth_state.should_skip_for_backoff("p1", t0 + Duration::from_secs(3600)));
     }
 }

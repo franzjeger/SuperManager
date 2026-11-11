@@ -37,6 +37,7 @@ pub fn spawn() -> anyhow::Result<()> {
 }
 
 fn restore_missing() {
+    let _guard = crate::tailscale::lock_tailscale_ops();
     let Some((prefs, status)) = crate::tailscale::prefs_and_status() else {
         return;
     };

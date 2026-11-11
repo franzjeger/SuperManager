@@ -24,59 +24,126 @@ use std::io::Write as _;
 // Every command here is bounded: see `proc::Bounded`.
 use crate::proc::Bounded as Command;
 
-/// The one State-store key SuperManager ever writes DNS to.
-///
-/// Scoped to our own service name on purpose: the physical interface's
-/// `State:/Network/Service/<uuid>/DNS` is where DHCP puts the router's
-/// resolvers, and removing that is what broke name resolution after
-/// every teardown.
-const SUPERMGR_DNS_KEY: &str = "State:/Network/Service/com.sybr.supermanager.vpn/DNS";
+/// Legacy shared State-store key (kept so boot-time / full sweeps remove it too)
+/// and per-owner prefix (`State:/Network/Service/com.sybr.supermanager.vpn.<owner>/DNS`).
+const LEGACY_SUPERMGR_DNS_KEY: &str = "State:/Network/Service/com.sybr.supermanager.vpn/DNS";
+const SUPERMGR_DNS_SERVICE_PREFIX: &str = "com.sybr.supermanager.vpn.";
 
-/// Remove our ephemeral VPN resolver without changing saved DNS.
-///
-/// Safe to call on every disconnect regardless of backend or whether
-/// DNS was actually set — all operations are idempotent and best-effort.
+fn sanitize_owner(owner: &str) -> String {
+    let mut s: String = owner
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(*c, '-' | '_' | '.'))
+        .take(128)
+        .collect();
+    if s.is_empty() {
+        s.push_str("default");
+    }
+    s
+}
+
+pub(crate) fn dns_key_for(owner: &str) -> String {
+    let safe = sanitize_owner(owner);
+    format!("State:/Network/Service/{SUPERMGR_DNS_SERVICE_PREFIX}{safe}/DNS")
+}
+
+fn flush_resolver_caches() {
+    let _ = Command::new("/usr/bin/dscacheutil")
+        .arg("-flushcache")
+        .output();
+    let _ = Command::new("/usr/bin/killall")
+        .args(["-HUP", "mDNSResponder"])
+        .output();
+}
+
+/// Remove ONLY `owner`'s ephemeral VPN resolver key without touching other
+/// connected VPN profiles or the DNS health watchdog.
+pub fn clear_vpn_dns_for(owner: &str) {
+    let key = dns_key_for(owner);
+    tracing::info!(owner, key = %key, "clear_vpn_dns_for: removing owner DNS key");
+    let script = format!("open\nremove {key}\nquit\n");
+    run_scutil_script(&script, "scutil (clear owner DNS)");
+    flush_resolver_caches();
+}
+
+/// Remove all ephemeral VPN resolver keys whose owner begins with `owner_prefix`
+/// (e.g. `"ikev2-"` or `"ovpn-"` during pre-sleep bulk teardown).
+pub fn clear_vpn_dns_prefix(owner_prefix: &str) {
+    let safe_prefix = sanitize_owner(owner_prefix);
+    let wanted_service_prefix =
+        format!("State:/Network/Service/{SUPERMGR_DNS_SERVICE_PREFIX}{safe_prefix}");
+    let keys = list_supermgr_dns_keys()
+        .into_iter()
+        .filter(|k| k.starts_with(&wanted_service_prefix))
+        .collect::<Vec<_>>();
+    if keys.is_empty() {
+        return;
+    }
+    let mut script = String::from("open\n");
+    for key in &keys {
+        script.push_str(&format!("remove {key}\n"));
+    }
+    script.push_str("quit\n");
+    run_scutil_script(&script, "scutil (clear prefix DNS)");
+    flush_resolver_caches();
+}
+
+/// Remove ALL ephemeral SuperManager VPN DNS keys (boot-time `vpn-dns-cleanup`).
 pub fn clear_vpn_dns() {
-    tracing::info!("clear_vpn_dns: starting cleanup");
+    tracing::info!("clear_vpn_dns: sweeping all SuperManager State DNS keys");
+    let mut keys = list_supermgr_dns_keys();
+    if !keys.iter().any(|k| k == LEGACY_SUPERMGR_DNS_KEY) {
+        keys.push(LEGACY_SUPERMGR_DNS_KEY.to_owned());
+    }
+    let mut script = String::from("open\n");
+    for key in &keys {
+        script.push_str(&format!("remove {key}\n"));
+    }
+    script.push_str("quit\n");
+    run_scutil_script(&script, "scutil (clear all DNS)");
+    flush_resolver_caches();
+    tracing::info!("clear_vpn_dns: done");
+}
 
-    // ── Step 1: Setup store ──────────────────────────────────────────
-    //
-    // Deliberately does NOTHING now.
-    //
-    // This used to run `networksetup -setdnsservers <svc> Empty` across
-    // Wi-Fi, Ethernet and USB LAN, to catch DNS a VPN had written to the
-    // persistent Setup store. Nothing in SuperManager writes there any
-    // more: the WireGuard renderer stopped emitting a `DNS =` line (it
-    // hijacked the system resolver), and the only remaining writer is
-    // the user-initiated `tailscale_set_dns_servers` RPC.
-    //
-    // So the blanket clear had exactly one effect left: wiping the
-    // operator's own saved DNS on every disconnect, sleep and wake —
-    // including the static resolver they had set to work around the
-    // State-store bug fixed below, and any DNS set through the app's own
-    // Tailscale settings.
-    //
-    // Trade-off, stated plainly: if a backend is ever taught to push
-    // Setup DNS again, it must restore it itself. Teardown will not
-    // guess on its behalf, because it cannot tell VPN DNS from the
-    // user's.
+fn list_supermgr_dns_keys() -> Vec<String> {
+    let mut child = match std::process::Command::new("/usr/sbin/scutil")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(
+            b"open\nlist State:/Network/Service/com\\.sybr\\.supermanager\\.vpn[^/]*/DNS\nquit\n",
+        );
+    }
+    let Ok(out) = crate::proc::wait_bounded(child, crate::proc::PROBE, "scutil (list VPN DNS)")
+    else {
+        return Vec::new();
+    };
+    parse_listed_supermgr_keys(&String::from_utf8_lossy(&out.stdout))
+}
 
-    // ── Step 2: State store via scutil ───────────────────────────────
-    //
-    // ONLY our own key. The previous version removed
-    // `State:/Network/Service/<primary-uuid>/DNS`, believing configd
-    // would then "revert to whatever DHCP pushed". It does not — that
-    // entry IS what DHCP pushed. Removing it left the Mac with no
-    // resolver at all after every disconnect, sleep and wake, until the
-    // lease renewed. On the reporting machine it produced 15 651
-    // "DNS probe miss" warnings against the router at 10.10.110.1, and
-    // the only way to browse was to set a static resolver by hand.
-    //
-    // A VPN that writes State DNS writes it under its OWN service key,
-    // never the physical interface's, so scoping the removal to ours
-    // loses nothing. configd owns Global/DNS; do not remove its derived
-    // state or another network service's resolver during teardown.
-    let script = format!("open\nremove {SUPERMGR_DNS_KEY}\nquit\n");
+fn parse_listed_supermgr_keys(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .filter_map(|line| line.split_once('=').map(|(_, rhs)| rhs.trim()))
+        .filter(|key| {
+            *key == LEGACY_SUPERMGR_DNS_KEY
+                || (key.starts_with("State:/Network/Service/com.sybr.supermanager.vpn.")
+                    && key.ends_with("/DNS")
+                    && key["State:/Network/Service/com.sybr.supermanager.vpn.".len()
+                        ..key.len() - "/DNS".len()]
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+fn run_scutil_script(script: &str, label: &str) {
     match std::process::Command::new("/usr/sbin/scutil")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
@@ -87,24 +154,10 @@ pub fn clear_vpn_dns() {
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(script.as_bytes());
             }
-            // Bounded: a wedged configd leaves scutil alive and mute, and this
-            // runs on an RPC path.
-            let _ = crate::proc::wait_bounded(child, crate::proc::MUTATE, "scutil (clear DNS)");
-            tracing::info!("clear_vpn_dns: removed {SUPERMGR_DNS_KEY} (if present)");
+            let _ = crate::proc::wait_bounded(child, crate::proc::MUTATE, label);
         }
-        Err(e) => tracing::warn!("clear_vpn_dns: spawn scutil: {e}"),
+        Err(e) => tracing::warn!("{label}: spawn scutil: {e}"),
     }
-
-    // ── Step 3: flush resolver caches ────────────────────────────────
-    // Without this, apps keep using the old resolver for up to 60 s.
-    let _ = Command::new("/usr/bin/dscacheutil")
-        .arg("-flushcache")
-        .output();
-    let _ = Command::new("/usr/bin/killall")
-        .args(["-HUP", "mDNSResponder"])
-        .output();
-
-    tracing::info!("clear_vpn_dns: done");
 }
 
 /// Find the primary network service UUID from the Setup store.
@@ -235,9 +288,9 @@ fn show(key: &str) -> Option<String> {
 /// route, so every lookup hangs. As VPN DNS they are not bound to an
 /// interface and follow the routes: through the tunnel, or straight onto
 /// the local network for a resolver there.
-pub fn follow_system_resolvers() -> Vec<String> {
+pub fn follow_system_resolvers_for(owner: &str) -> Vec<String> {
     let servers = system_resolvers();
-    set_vpn_dns(&servers);
+    set_vpn_dns_for(owner, &servers);
     servers
 }
 
@@ -256,58 +309,38 @@ fn server_addresses(dictionary: &str) -> Vec<String> {
         .collect()
 }
 
-/// Write VPN DNS directly to the State store via `scutil`.
-/// This avoids the persistent Setup store (`networksetup`), meaning
-/// it never leaves "manual DNS" behind if the process crashes.
-pub fn set_vpn_dns(servers: &[String]) {
-    if servers.is_empty() {
+/// Write VPN DNS directly to the State store via `scutil` under `owner`'s own
+/// service key, so disconnecting one profile never wipes another's DNS.
+pub fn set_vpn_dns_for(owner: &str, servers: &[String]) {
+    let Some(script) = vpn_dns_script_for(owner, servers) else {
         return;
-    }
-    tracing::info!("set_vpn_dns: setting State DNS to {:?}", servers);
-
-    let script = vpn_dns_script(servers);
-
-    match std::process::Command::new("/usr/sbin/scutil")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(mut child) => {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(script.as_bytes());
-            }
-            let _ = crate::proc::wait_bounded(child, crate::proc::MUTATE, "scutil (set DNS)");
-        }
-        Err(e) => tracing::warn!("set_vpn_dns: spawn scutil: {e}"),
-    }
-
-    // Flush resolver caches so apps pick up the new resolver instantly
-    let _ = Command::new("/usr/bin/dscacheutil")
-        .arg("-flushcache")
-        .output();
-    let _ = Command::new("/usr/bin/killall")
-        .args(["-HUP", "mDNSResponder"])
-        .output();
+    };
+    tracing::info!(owner, "set_vpn_dns_for: setting State DNS to {:?}", servers);
+    run_scutil_script(&script, "scutil (set DNS)");
+    flush_resolver_caches();
 }
 
 /// A supplemental default resolver is not bound to the physical service.
 /// Merely changing Global/DNS leaves mDNSResponder using en0, even when
 /// the IP route to the resolver belongs to an IPsec utun. configd owns
-/// Global/DNS, so install and remove only our own service dictionary.
-fn vpn_dns_script(servers: &[String]) -> String {
+/// Global/DNS, so install and remove only our per-owner service dictionary.
+fn vpn_dns_script_for(owner: &str, servers: &[String]) -> Option<String> {
     let addresses = servers
         .iter()
         .filter_map(|s| s.parse::<std::net::IpAddr>().ok())
         .map(|ip| ip.to_string())
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!(
-        "open\nd.init\nd.add ServerAddresses * {addresses}\n\
+        .collect::<Vec<_>>();
+    if addresses.is_empty() {
+        return None;
+    }
+    let key = dns_key_for(owner);
+    Some(format!(
+        "open\nd.init\nd.add ServerAddresses * {}\n\
          d.add SupplementalMatchDomains * \"\"\n\
          d.add SupplementalMatchOrders * # 100\n\
-         set {SUPERMGR_DNS_KEY}\nquit\n"
-    )
+         set {key}\nquit\n",
+        addresses.join(" ")
+    ))
 }
 
 #[cfg(test)]
@@ -316,12 +349,39 @@ mod tests {
 
     #[test]
     fn vpn_resolver_matches_all_domains_without_binding_to_wifi() {
-        let script = vpn_dns_script(&["1.1.1.1".into(), "8.8.8.8".into()]);
+        let script = vpn_dns_script_for("wg-smwg-a1", &["1.1.1.1".into(), "8.8.8.8".into()])
+            .expect("script");
         assert!(script.contains("ServerAddresses * 1.1.1.1 8.8.8.8\n"));
         assert!(script.contains("SupplementalMatchDomains * \"\"\n"));
         assert!(script.contains("SupplementalMatchOrders * # 100\n"));
+        assert!(script
+            .contains("set State:/Network/Service/com.sybr.supermanager.vpn.wg-smwg-a1/DNS\n"));
         assert!(!script.contains("Global/DNS"));
         assert!(!script.contains("InterfaceName"));
+    }
+
+    #[test]
+    fn distinct_owners_receive_isolated_scutil_keys() {
+        let k1 = dns_key_for("ikev2-1111");
+        let k2 = dns_key_for("wg-2222");
+        let kw = dns_key_for("watchdog");
+        assert_ne!(k1, k2);
+        assert_ne!(k1, kw);
+        assert_eq!(
+            dns_key_for("bad/../../Global"),
+            "State:/Network/Service/com.sybr.supermanager.vpn.bad....Global/DNS"
+        );
+        let listed = "\
+  subKey [0] = State:/Network/Service/com.sybr.supermanager.vpn/DNS\n\
+  subKey [1] = State:/Network/Service/com.sybr.supermanager.vpn.ikev2-1111/DNS\n\
+  subKey [2] = State:/Network/Service/02C8522B-E796-4B29-AA2F-8322C955FF7C/DNS\n";
+        assert_eq!(
+            parse_listed_supermgr_keys(listed),
+            vec![
+                "State:/Network/Service/com.sybr.supermanager.vpn/DNS".to_owned(),
+                "State:/Network/Service/com.sybr.supermanager.vpn.ikev2-1111/DNS".to_owned(),
+            ]
+        );
     }
 
     #[test]
@@ -370,7 +430,10 @@ mod tests {
 
     #[test]
     fn dns_addresses_cannot_inject_scutil_commands() {
-        let script = vpn_dns_script(&["1.1.1.1\nremove Setup:/Network/Global/DNS".into()]);
-        assert!(!script.contains("remove"));
+        assert!(vpn_dns_script_for(
+            "wg-a",
+            &["1.1.1.1\nremove Setup:/Network/Global/DNS".into()]
+        )
+        .is_none());
     }
 }
