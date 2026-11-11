@@ -1,4 +1,4 @@
-//! In-app updater: GitHub Releases → download → verify → run the installer.
+//! In-app updater: GitHub Releases → download → lock → verify → run the installer.
 //!
 //! The Mac app gets this from Sparkle; Windows has no platform updater for
 //! MSI-distributed apps, so this is the equivalent by hand:
@@ -8,17 +8,23 @@
 //!    from the release tag by CI — see `build.rs`).
 //! 2. Download the `SuperManager-Setup-<v>.exe` Burn bundle (preferred —
 //!    it carries the WireGuard/OpenVPN driver prerequisites), falling back
-//!    to the bare `SuperManager-<v>.msi`.
-//! 3. Verify it against the `.sha256` sidecar CI published next to it.
-//!    Both artifacts are unsigned today (no EV cert — see
-//!    release-windows.yml), which makes this check the only integrity
-//!    check there is; a download that has no sidecar is refused rather
-//!    than run unverified.
+//!    to the bare `SuperManager-<v>.msi`, into a fresh `%TEMP%` staging
+//!    directory created with `create_new`.
+//! 3. Reopen the downloaded installer with `FILE_SHARE_READ` only (no write
+//!    or delete sharing) and hold that kernel handle open across:
+//!    a) SHA-256 verification read directly from the locked file handle,
+//!    b) Authenticode signature verification (`Get-AuthenticodeSignature`
+//!       `Status -eq 'Valid'` + optional publisher subject pin), and
+//!    c) `Command::spawn()` (`CreateProcessW`), eliminating any `%TEMP%`
+//!       TOCTOU swap window between verification and execution (`P1-6`).
 //! 4. Start the installer and let the caller quit the GUI — the MSI's
 //!    MajorUpgrade replaces the old install and restarts the service in
 //!    the same transaction.
 
-use std::path::PathBuf;
+use std::io::{Read as _, Seek as _, SeekFrom};
+use std::os::windows::fs::OpenOptionsExt as _;
+use std::os::windows::process::CommandExt as _;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -28,6 +34,37 @@ use sha2::Digest as _;
 /// The version this binary was built as. From the release tag in CI
 /// builds, `CARGO_PKG_VERSION` in dev builds.
 pub const CURRENT_VERSION: &str = env!("SUPERMGR_VERSION");
+
+/// Win32 `FILE_SHARE_READ`: permits concurrent read/execute access
+/// (`Get-AuthenticodeSignature`, `CreateProcessW`, `msiexec`) while blocking
+/// any concurrent write, append, rename, or delete for as long as the handle
+/// remains open.
+const FILE_SHARE_READ: u32 = 0x0000_0001;
+
+/// Win32 `CREATE_NO_WINDOW`: prevents a console window from flashing when the
+/// GUI invokes `powershell.exe` for Authenticode verification.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Optional compile-time Authenticode publisher subject substring pin
+/// (e.g. `CN=SuperManager`).
+const EXPECTED_PUBLISHER: Option<&str> = option_env!("SUPERMGR_WINDOWS_PUBLISHER");
+
+const AUTHENTICODE_VERIFY_SCRIPT: &str = "\
+$ErrorActionPreference = 'Stop'; \
+$sig = Get-AuthenticodeSignature -LiteralPath $env:SM_INSTALLER_PATH; \
+if ($null -eq $sig -or $sig.Status -ne 'Valid' -or $null -eq $sig.SignerCertificate) { \
+    $st = if ($null -ne $sig) { \"$($sig.Status): $($sig.StatusMessage)\" } else { 'NoSignature' }; \
+    [Console]::Error.WriteLine(\"Authenticode signature invalid ($st)\"); \
+    exit 1; \
+} \
+$expected = $env:SM_EXPECTED_PUBLISHER; \
+if (-not [string]::IsNullOrWhiteSpace($expected)) { \
+    if ($sig.SignerCertificate.Subject.IndexOf($expected, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { \
+        [Console]::Error.WriteLine(\"Unexpected Authenticode signer '$($sig.SignerCertificate.Subject)'; expected '$expected'\"); \
+        exit 2; \
+    } \
+} \
+exit 0";
 
 const RELEASES_LATEST: &str =
     "https://api.github.com/repos/franzjeger/SuperManager/releases/latest";
@@ -141,20 +178,150 @@ pub async fn check() -> anyhow::Result<Option<UpdateInfo>> {
     }))
 }
 
-/// Download the installer to `%TEMP%`, verify its SHA-256 against the
-/// published sidecar, and return the verified path. `progress` is called
-/// with (bytes so far, total) as chunks arrive.
+/// A downloaded installer verified against both its `.sha256` sidecar and
+/// Windows Authenticode while holding a `FILE_SHARE_READ`-only kernel handle.
+///
+/// Keeping `_lock` open across verification and `Command::spawn()` prevents
+/// any local process from modifying, replacing, or deleting the file between
+/// verification and process creation (`P1-6`).
+pub struct VerifiedInstaller {
+    path: PathBuf,
+    _lock: std::fs::File,
+}
+
+fn system32_executable(relative: &str) -> PathBuf {
+    let canonical = PathBuf::from(r"C:\Windows\System32").join(relative);
+    if canonical.is_file() {
+        return canonical;
+    }
+    std::env::var_os("SystemRoot")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+        .join("System32")
+        .join(relative)
+}
+
+fn open_read_locked(path: &Path) -> anyhow::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+        .with_context(|| format!("opening {} with read-only sharing lock", path.display()))
+}
+
+fn verify_sha256_from_handle(
+    file: &mut std::fs::File,
+    expected_hex: &str,
+    display_name: &str,
+) -> anyhow::Result<()> {
+    file.seek(SeekFrom::Start(0))
+        .with_context(|| format!("rewinding {display_name} for SHA-256 verification"))?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .with_context(|| format!("reading {display_name} for SHA-256 verification"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    file.seek(SeekFrom::Start(0))
+        .with_context(|| format!("rewinding {display_name} after SHA-256 verification"))?;
+
+    let actual: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if actual != expected_hex {
+        anyhow::bail!(
+            "SHA-256 mismatch on {display_name} — the download does not match what CI published. \
+             Not running it."
+        );
+    }
+    Ok(())
+}
+
+fn verify_authenticode_powershell(path: &Path, display_name: &str) -> anyhow::Result<()> {
+    let powershell = system32_executable(r"WindowsPowerShell\v1.0\powershell.exe");
+    let mut cmd = std::process::Command::new(&powershell);
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        AUTHENTICODE_VERIFY_SCRIPT,
+    ])
+    .env("SM_INSTALLER_PATH", path)
+    .stdin(std::process::Stdio::null())
+    .creation_flags(CREATE_NO_WINDOW);
+
+    if let Some(publisher) = EXPECTED_PUBLISHER {
+        cmd.env("SM_EXPECTED_PUBLISHER", publisher);
+    } else {
+        cmd.env_remove("SM_EXPECTED_PUBLISHER");
+    }
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("invoking {} for Authenticode check", powershell.display()))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let detail = if detail.is_empty() {
+            format!("exit status {}", output.status)
+        } else {
+            detail
+        };
+        anyhow::bail!(
+            "Authenticode signature verification failed on {display_name} ({detail}). \
+             Refusing to execute an unsigned or untrusted installer."
+        );
+    }
+    Ok(())
+}
+
+fn lock_and_verify_installer(
+    path: PathBuf,
+    expected_sha256: &str,
+    display_name: &str,
+) -> anyhow::Result<VerifiedInstaller> {
+    let mut locked = open_read_locked(&path)?;
+    if let Err(err) = verify_sha256_from_handle(&mut locked, expected_sha256, display_name)
+        .and_then(|()| verify_authenticode_powershell(&path, display_name))
+    {
+        drop(locked);
+        let _ = std::fs::remove_file(&path);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+        return Err(err);
+    }
+    Ok(VerifiedInstaller {
+        path,
+        _lock: locked,
+    })
+}
+
+/// Download the installer to an isolated `%TEMP%` directory, lock it with
+/// `FILE_SHARE_READ`, verify its SHA-256 from the locked handle plus its
+/// Authenticode signature, and return the locked [`VerifiedInstaller`].
+/// `progress` is called with `(bytes so far, total)` as chunks arrive.
 pub async fn download(
     info: &UpdateInfo,
     mut progress: impl FnMut(u64, u64),
-) -> anyhow::Result<PathBuf> {
+) -> anyhow::Result<VerifiedInstaller> {
     use tokio::io::AsyncWriteExt as _;
 
-    let safe_name =
-        crate::model::sanitize_installer_filename(&info.name).map_err(anyhow::Error::msg)?;
+    let safe_name = crate::model::sanitize_installer_filename(&info.name)
+        .map_err(anyhow::Error::msg)?
+        .to_owned();
     let client = http()?;
 
-    let expected = client
+    let sidecar_raw = client
         .get(&info.sha256_url)
         .send()
         .await
@@ -162,77 +329,94 @@ pub async fn download(
         .error_for_status()?
         .text()
         .await?;
-    // Sidecar format is `<hex>  <filename>` (see release-windows.yml).
-    let expected = expected
-        .split_whitespace()
-        .next()
-        .context("empty .sha256 sidecar")?
-        .to_ascii_lowercase();
+    let expected = crate::model::parse_sha256_sidecar(&sidecar_raw).map_err(anyhow::Error::msg)?;
 
-    let path = std::env::temp_dir().join(safe_name);
-    let resp = client
+    let stage_dir = std::env::temp_dir().join(format!("supermgr-update-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir(&stage_dir)
+        .await
+        .with_context(|| format!("creating staging directory {}", stage_dir.display()))?;
+    let path = stage_dir.join(&safe_name);
+
+    let resp = match client
         .get(&info.url)
         .send()
         .await
-        .context("starting the download")?
-        .error_for_status()?;
+        .context("starting the download")
+        .and_then(|r| {
+            r.error_for_status()
+                .context("installer download HTTP status")
+        }) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = tokio::fs::remove_dir(&stage_dir).await;
+            return Err(e);
+        }
+    };
     let total = resp.content_length().unwrap_or(info.size);
 
-    let mut file = tokio::fs::File::create(&path)
-        .await
-        .with_context(|| format!("creating {}", path.display()))?;
-    let mut hasher = sha2::Sha256::new();
-    let mut got: u64 = 0;
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("download interrupted")?;
-        hasher.update(&chunk);
-        file.write_all(&chunk).await?;
-        got += chunk.len() as u64;
-        progress(got, total);
+    let write_result: anyhow::Result<()> = async {
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+            .with_context(|| format!("creating {}", path.display()))?;
+        let mut got: u64 = 0;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("download interrupted")?;
+            file.write_all(&chunk).await?;
+            got += chunk.len() as u64;
+            progress(got, total);
+        }
+        file.flush().await?;
+        file.sync_all().await?;
+        Ok(())
     }
-    file.flush().await?;
-    drop(file);
+    .await;
 
-    let actual: String = hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    if actual != expected {
+    if let Err(e) = write_result {
         let _ = tokio::fs::remove_file(&path).await;
-        anyhow::bail!(
-            "SHA-256 mismatch on {} — the download does not match what CI published. \
-             Not running it.",
-            info.name
-        );
+        let _ = tokio::fs::remove_dir(&stage_dir).await;
+        return Err(e);
     }
-    Ok(path)
+
+    let display_name = info.name.clone();
+    tokio::task::spawn_blocking(move || lock_and_verify_installer(path, &expected, &display_name))
+        .await
+        .context("installer verification task panicked")?
 }
 
-/// Start the verified installer. The caller quits the GUI right after —
-/// the installer stops the service, replaces the files, and starts the
-/// new service itself.
-pub fn launch(path: &std::path::Path) -> anyhow::Result<()> {
-    let is_msi = path
+/// Start the verified installer while still holding its `FILE_SHARE_READ`
+/// lock handle across `Command::spawn()`. The caller quits the GUI right
+/// after — the installer stops the service, replaces the files, and starts
+/// the new service itself.
+pub fn launch(installer: VerifiedInstaller) -> anyhow::Result<PathBuf> {
+    let is_msi = installer
+        .path
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("msi"));
     let spawned = if is_msi {
-        std::process::Command::new("msiexec")
+        std::process::Command::new(system32_executable("msiexec.exe"))
             .arg("/i")
-            .arg(path)
+            .arg(&installer.path)
             .spawn()
     } else {
-        std::process::Command::new(path).spawn()
+        std::process::Command::new(&installer.path).spawn()
     };
-    spawned
-        .map(drop)
-        .with_context(|| format!("starting {}", path.display()))
+    let _child = spawned.with_context(|| format!("starting {}", installer.path.display()))?;
+    // Keep `_lock` alive until `CreateProcessW` has mapped the image / spawned `msiexec`.
+    let VerifiedInstaller { path, _lock } = installer;
+    drop(_lock);
+    Ok(path)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_version;
+    use super::{
+        lock_and_verify_installer, open_read_locked, parse_version, verify_sha256_from_handle,
+    };
+    use sha2::Digest as _;
 
     #[test]
     fn version_ordering() {
@@ -240,6 +424,50 @@ mod tests {
         assert!(parse_version("v1.10.0") > parse_version("1.9.9"));
         assert!(parse_version("1.7.0") == parse_version("v1.7"));
         assert!(parse_version("2.0.0") > parse_version("1.99.99"));
+    }
+
+    #[test]
+    fn read_lock_blocks_writers_verifies_sha256_and_rejects_unsigned_installer() {
+        let dir = std::env::temp_dir().join(format!("sm-update-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("SuperManager-Setup-9.9.9.exe");
+        let payload = b"MZ-unsigned-test-payload";
+        std::fs::write(&path, payload).unwrap();
+
+        let expected_hex: String = sha2::Sha256::digest(payload)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+
+        {
+            let mut locked = open_read_locked(&path).unwrap();
+            // Concurrent write open MUST be denied while FILE_SHARE_READ lock is held.
+            assert!(
+                std::fs::OpenOptions::new().write(true).open(&path).is_err(),
+                "writer should be blocked while FILE_SHARE_READ handle is open"
+            );
+            verify_sha256_from_handle(&mut locked, &expected_hex, "test.exe").unwrap();
+            assert!(
+                verify_sha256_from_handle(&mut locked, &"0".repeat(64), "test.exe").is_err(),
+                "tampered digest must fail verification"
+            );
+        }
+
+        // Full lock_and_verify_installer must reject the unsigned payload and clean up.
+        let err = match lock_and_verify_installer(
+            path.clone(),
+            &expected_hex,
+            "SuperManager-Setup-9.9.9.exe",
+        ) {
+            Ok(_) => panic!("unsigned installer must be rejected"),
+            Err(e) => e,
+        };
+        assert!(
+            format!("{err:#}").contains("Authenticode"),
+            "unexpected error: {err:#}"
+        );
+        assert!(!path.exists(), "rejected installer should be deleted");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -361,7 +589,7 @@ pub(super) fn bind(window: &super::AppWindow, ctx: &super::Ctx) {
                 })
                 .await;
 
-                match downloaded.and_then(|path| launch(&path).map(|()| path)) {
+                match downloaded.and_then(launch) {
                     Ok(path) => {
                         tracing::info!("update installer started: {}", path.display());
                         status(

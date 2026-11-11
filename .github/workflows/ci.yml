@@ -221,6 +221,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.99.1
         with:
           toolchain: "1.99.1"
+          components: rustfmt, clippy
       # Vendor pins first: it is seconds of curl, and it is the check most
       # likely to fail for reasons that have nothing to do with the commit
       # under test.
@@ -253,6 +254,16 @@ jobs:
       # fails before anything compiles.
       - name: Cargo.lock is in sync with the manifests
         run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Audit Cargo supply chain (advisories, bans, licenses)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --all-features --locked
+          command-arguments: advisories bans licenses
 
       # tcpdump is a runtime dependency of the engine's traffic-sniff
       # analysis, and its tests shell out to it. Installed explicitly rather
@@ -302,6 +313,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.99.1
         with:
           toolchain: "1.99.1"
+          components: rustfmt, clippy
 
       # The macOS installer, on macOS, under the interpreter it will actually
       # meet: Apple ships /bin/bash 3.2 and has since 2007, while the `shell`
@@ -364,11 +376,16 @@ jobs:
             -p supermgr-engine \
             -p supermgr-mcp \
             -p supermgrd-mac \
-            -p supermanager-helper \
             -- -D warnings \
                -A clippy::pedantic \
                -A clippy::style \
                -A clippy::complexity
+
+      - name: Clippy (supermanager-helper — strict, no suppressions)
+        run: |
+          cargo clippy --locked --all-targets \
+            -p supermanager-helper \
+            -- -D warnings
 
       - name: Tests (Mac crates)
         run: |
@@ -432,6 +449,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.99.1
         with:
           toolchain: "1.99.1"
+          components: rustfmt, clippy
 
       - name: Build (Windows crates)
         run: |

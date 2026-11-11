@@ -82,6 +82,101 @@ pub(crate) fn validate_azure_ovpn_inputs(cfg: &AzureVpnConfig) -> Result<(), Str
     Ok(())
 }
 
+/// Format a filesystem path for an OpenVPN `.ovpn` directive (`auth-user-pass`,
+/// `tls-auth`, etc.) without raw backslashes.
+///
+/// OpenVPN's `parse_line()` treats `\` as an escape character even inside
+/// double-quoted strings, so an unescaped `C:\ProgramData\...` path mangles
+/// `\P`, `\a`, `\t`, etc. Forward slashes (`C:/ProgramData/...`) are natively
+/// supported by OpenVPN on Windows and avoid backslash-escape parsing entirely.
+pub(crate) fn ovpn_quote_path(path: &std::path::Path) -> Result<String, String> {
+    let raw = path
+        .to_str()
+        .ok_or_else(|| "OpenVPN runtime file path is not valid UTF-8".to_owned())?;
+    if raw.is_empty() {
+        return Err("OpenVPN runtime file path must not be empty".into());
+    }
+    if raw
+        .chars()
+        .any(|c| c == '\0' || c == '\r' || c == '\n' || c == '"' || c.is_control())
+    {
+        return Err(
+            "OpenVPN runtime file path contains invalid control or quote characters".into(),
+        );
+    }
+    let stripped = raw.strip_prefix(r"\\?\").unwrap_or(raw);
+    let normalized = stripped.replace('\\', "/");
+    Ok(format!("\"{normalized}\""))
+}
+
+/// Assemble the `.ovpn` text from a validated Azure VPN profile config and
+/// runtime credential/key paths.
+pub(crate) fn render_azure_ovpn_config(
+    cfg: &AzureVpnConfig,
+    key_path: &std::path::Path,
+    auth_path: &std::path::Path,
+    full_tunnel: bool,
+) -> Result<String, String> {
+    validate_azure_ovpn_inputs(cfg)?;
+    let quoted_auth = ovpn_quote_path(auth_path)?;
+    let quoted_key = ovpn_quote_path(key_path)?;
+
+    let mut s = format!(
+        "client\n\
+         dev tun\n\
+         proto tcp\n\
+         remote {fqdn} 443\n\
+         resolv-retry infinite\n\
+         nobind\n\
+         persist-tun\n\
+         remote-cert-tls server\n\
+         auth SHA256\n\
+         cipher AES-256-GCM\n\
+         data-ciphers AES-256-GCM\n\
+         disable-dco\n\
+         verb 3\n\
+         suppress-timestamps\n\
+         <ca>\n",
+        fqdn = cfg.gateway_fqdn,
+    );
+    s.push_str(&cfg.ca_cert_pem);
+    if !cfg.ca_cert_pem.ends_with('\n') {
+        s.push('\n');
+    }
+    s.push_str("</ca>\n");
+
+    s.push_str(&format!("auth-user-pass {quoted_auth}\n"));
+    s.push_str(&format!("tls-auth {quoted_key} 1\n"));
+
+    if full_tunnel {
+        s.push_str("redirect-gateway def1\n");
+    } else {
+        for route in &cfg.routes {
+            match route {
+                ipnet::IpNet::V4(n) => {
+                    s.push_str(&format!("route {} {}\n", n.network(), n.netmask()));
+                }
+                ipnet::IpNet::V6(n) => {
+                    s.push_str(&format!("route-ipv6 {}/{}\n", n.network(), n.prefix_len()));
+                }
+            }
+        }
+    }
+
+    if !cfg.dns_servers.is_empty() {
+        s.push_str("dhcp-option DNS ");
+        s.push_str(
+            &cfg.dns_servers
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        s.push('\n');
+    }
+    Ok(s)
+}
+
 /// Deterministic Credential Manager label for a host's SSH password.
 pub(crate) fn host_password_label(host_id: &str) -> String {
     format!("supermgr/host/{host_id}/password")
@@ -452,6 +547,56 @@ mod tests {
         let mut bad_ca = base;
         bad_ca.ca_cert_pem = "MIIB\n</Ca>\nup C:\\evil.exe\n<ca>\n".into();
         assert!(validate_azure_ovpn_inputs(&bad_ca).is_err());
+    }
+
+    #[test]
+    fn azure_ovpn_quotes_windows_programdata_paths_without_raw_backslashes() {
+        let cfg = AzureVpnConfig {
+            gateway_fqdn: "azuregateway-1.vpn.azure.com".into(),
+            tenant_id: "11111111-2222-3333-4444-555555555555".into(),
+            client_id: "41b23e61-6c1e-4545-b367-cd054e0ed4b4".into(),
+            server_secret_hex: "00".repeat(32),
+            ca_cert_pem: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n".into(),
+            dns_servers: Vec::new(),
+            routes: Vec::new(),
+        };
+
+        let key_path = std::path::Path::new(
+            r"C:\ProgramData\SuperManager\azure\01234567-89ab-cdef-0123-456789abcdef\tls-auth.key",
+        );
+        let auth_path =
+            std::path::Path::new(r"\\?\C:\ProgramData\SuperManager\azure\with spaces\auth.txt");
+
+        assert_eq!(
+            ovpn_quote_path(key_path).unwrap(),
+            r#""C:/ProgramData/SuperManager/azure/01234567-89ab-cdef-0123-456789abcdef/tls-auth.key""#
+        );
+        assert_eq!(
+            ovpn_quote_path(auth_path).unwrap(),
+            r#""C:/ProgramData/SuperManager/azure/with spaces/auth.txt""#
+        );
+
+        let ovpn = render_azure_ovpn_config(&cfg, key_path, auth_path, false).unwrap();
+        assert!(
+            !ovpn.contains('\\'),
+            "rendered .ovpn must contain no raw backslashes:\n{ovpn}"
+        );
+        assert!(ovpn.contains(
+            "auth-user-pass \"C:/ProgramData/SuperManager/azure/with spaces/auth.txt\"\n"
+        ));
+        assert!(ovpn.contains(
+            "tls-auth \"C:/ProgramData/SuperManager/azure/01234567-89ab-cdef-0123-456789abcdef/tls-auth.key\" 1\n"
+        ));
+
+        // Reject directive breakout via quotes or newlines in path strings.
+        assert!(
+            ovpn_quote_path(std::path::Path::new("C:\\ProgramData\\bad\"quote\\a.txt")).is_err()
+        );
+        assert!(ovpn_quote_path(std::path::Path::new(
+            "C:\\ProgramData\\bad\nscript-security 2"
+        ))
+        .is_err());
+        assert!(ovpn_quote_path(std::path::Path::new("")).is_err());
     }
 
     #[test]

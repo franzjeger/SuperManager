@@ -1,0 +1,66 @@
+# Supply-chain policy for the SuperManager workspace (P1-9).
+# Enforced in CI via `EmbarkStudios/cargo-deny-action@v2`
+# (`cargo-deny --all-features --locked check advisories bans licenses`).
+
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-pc-windows-msvc" },
+]
+all-features = true
+
+[advisories]
+yanked = "warn"
+unmaintained = "workspace"
+unsound = "workspace"
+unused-ignored-advisory = "warn"
+ignore = [
+    # `rsa`, `crypto-bigint`, and `ctutils` are pinned transitively by `russh` / `ssh-key`.
+    { id = "RUSTSEC-2023-0071", reason = "Transitive via russh/ssh-key; no stable upstream rsa release without Marvin side-channel advisory yet" },
+    { id = "RUSTSEC-2026-0385", reason = "Transitive ctutils via russh/ssh-key; awaiting upstream semver bump" },
+    { id = "RUSTSEC-2026-0387", reason = "Transitive crypto-bigint via russh/ssh-key; awaiting upstream semver bump" },
+    # Build-only `slint-build` dependency; `Options::ENABLE_WIKILINKS` is never enabled.
+    { id = "RUSTSEC-2026-0414", reason = "Build-only transitive pulldown-cmark in slint-build; ENABLE_WIKILINKS is off" },
+    { id = "RUSTSEC-2026-0433", reason = "Build-only transitive pulldown-cmark in slint-build; ENABLE_WIKILINKS is off" },
+    # Workspace never constructs `tokio::io::unix::AsyncFd` from unowned raw file descriptors.
+    { id = "RUSTSEC-2026-0386", reason = "Workspace does not pass unowned RawFds to tokio::io::unix::AsyncFd::new" },
+    # `supermgr-win` never calls `ZipArchive::extract` or `ZipStreamReader::extract`;
+    # it only streams `AzureVPN/azurevpnconfig.xml` in memory with a bounded reader.
+    { id = "RUSTSEC-2026-0367", reason = "ZipArchive::extract is never called; supermgr-win reads bounded XML in memory only" },
+    { id = "RUSTSEC-2026-0368", reason = "ZipArchive::extract is never called; supermgr-win reads bounded XML in memory only" },
+    { id = "RUSTSEC-2026-0369", reason = "ZipArchive::extract is never called; supermgr-win reads bounded XML in memory only" },
+    { id = "RUSTSEC-2026-0429", reason = "ZipArchive::extract is never called; supermgr-win reads bounded XML in memory only" },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+[licenses]
+include-dev = false
+include-build = true
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "GPL-3.0-only",
+    "GPL-3.0-or-later",
+    "ISC",
+    "LGPL-2.1-or-later",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "OpenSSL",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Unlicense",
+    "Zlib",
+]

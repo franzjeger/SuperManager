@@ -678,12 +678,9 @@ pub async fn sophos_xml_api(
         inner = inner_xml,
     );
 
-    let url = supermgr_core::sanitize::build_https_api_url(
-        hostname,
-        port,
-        "/webconsole/APIController",
-    )
-    .map_err(RpcError::Protocol)?;
+    let url =
+        supermgr_core::sanitize::build_https_api_url(hostname, port, "/webconsole/APIController")
+            .map_err(RpcError::Protocol)?;
     info!("sophos_xml_api -> {url}");
     let client = http_client(API_TIMEOUT_SHORT, false, verify_tls)?;
     let password_clone = creds.password.clone();

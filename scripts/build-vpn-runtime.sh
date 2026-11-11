@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Assemble the WireGuard and Azure/OpenVPN 3 runtime for the root helper.
+# Assemble the WireGuard, Tailscale, IKEv2/strongSwan, and Azure/OpenVPN 3
+# runtime from pinned, SHA-256-verified upstream source archives.
 #
 #   scripts/build-vpn-runtime.sh OUT_DIR
 #
@@ -8,27 +9,28 @@
 # into /Library/PrivilegedHelperTools/SuperManagerVPN
 # (supermanager-helper/src/vpn_runtime.rs). Puts into OUT_DIR:
 #
-#   bash          GNU bash 5.3 with its official patches, built here from
-#                 pinned source without readline, history or gettext, so
-#                 it loads system libraries only. wg-quick needs bash 4 or
-#                 later; macOS ships 3.2, and Homebrew's loads libraries
-#                 from Homebrew.
-#   wg            pinned wireguard-tools, compiled for macOS 14.0
-#   wg-quick      the same source's darwin.bash, with the existing Homebrew
-#                 configuration search path; exact helper-pinned digest
-#   wireguard-go  from Homebrew's wireguard-go
-#   openvpn3      pinned ovpncli with file-based credentials, built with
-#                 static dependencies by build-openvpn3-runtime.sh
-#   licenses/     their licenses, and where their source is
+#   bash                     GNU bash 5.3 with its official patches, built from
+#                            pinned source without readline, history or gettext,
+#                            so it loads system libraries only.
+#   wg                       pinned wireguard-tools, compiled for macOS 14.0
+#   wg-quick                 the same source's darwin.bash, adapted with the
+#                            helper-pinned digest
+#   wireguard-go             pinned wireguard-go, built with `go build -trimpath`
+#   tailscale, tailscaled    pinned Tailscale CLI + daemon, built with
+#                            `go build -trimpath`
+#   openvpn3                 pinned ovpncli with file-based credentials, built
+#                            with static dependencies by build-openvpn3-runtime.sh
+#   charon, swanctl          pinned monolithic strongSwan 6.0.7 + static OpenSSL
+#   licenses/                per-component license files and SOURCES manifest
+#   THIRD_PARTY_LICENSES.txt consolidated notice & license texts (GPL/BSD/MIT)
 #
-# The helper checks bash, wg, wireguard-go and openvpn3 by the signature the caller
-# gives them; nothing is signed here. wg-quick is a script, so the helper
-# checks it by content instead, against supermanager-helper/src/wg-quick.sha256,
-# and this refuses to bundle any other. Review changes to wg-quick and update
-# its source adaptation and helper pin together when updating wireguard-tools.
+# The helper checks Mach-O binaries by the Developer ID signature and bundle
+# identifier applied during signing; nothing is signed here. wg-quick is a
+# script checked by content against supermanager-helper/src/wg-quick.sha256.
 #
-# Exits 2 and writes nothing when Homebrew's wireguard-go is not installed:
-# the caller decides whether that is fatal.
+# Exits 2 and writes nothing when the Go toolchain is not installed:
+# local Debug builds can skip optional runtime bundling, while release builds
+# invoke this script directly and require exit 0.
 
 set -euo pipefail
 
@@ -62,6 +64,19 @@ BASH_PATCHES=(
 BASH_CONFIGURE=(--without-bash-malloc --disable-nls --disable-readline
                 --disable-history --without-curses)
 
+# Pinned WireGuard userspace Go implementation (MIT).
+WG_GO_VERSION=0.0.20250522
+WG_GO_REVISION=f333402bd9cbe0f3eeb02507bd14e23d7d639280
+WG_GO_SHA256=4483dde7778ad264f3822b0a436c733ac82404e4d0265df3b603352111490987
+WG_GO_URL="https://codeload.github.com/WireGuard/wireguard-go/tar.gz/$WG_GO_REVISION"
+
+# Pinned Tailscale CLI & daemon (BSD-3-Clause).
+TAILSCALE_VERSION=1.104.5
+TAILSCALE_REVISION=73a48057aaf5f60e4f770b398e9b7af576b01dbe
+TAILSCALE_SHORT_HASH=73a48057a
+TAILSCALE_SHA256=f3b88e5ce851cabe097725de7deaa19528353061efd0d122b972a0d94cd2f5cd
+TAILSCALE_URL="https://codeload.github.com/tailscale/tailscale/tar.gz/$TAILSCALE_REVISION"
+
 out="${1:?usage: build-vpn-runtime.sh OUT_DIR}"
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cache="$repo/target/vpn-runtime"
@@ -78,28 +93,88 @@ fetch() {
     fi
     curl -fsSL --proto '=https' --tlsv1.2 -o "$file.part" "$url"
     if ! echo "$sha256  $file.part" | shasum -a 256 -c - >/dev/null 2>&1; then
+        rm -f "$file.part"
         echo "error: $url does not match its pinned SHA-256" >&2
         exit 1
     fi
     mv "$file.part" "$file"
 }
 
-brew_bin() {
-    local name="$1" dir
-    for dir in /opt/homebrew/bin /usr/local/bin; do
-        if [ -x "$dir/$name" ]; then
-            printf '%s\n' "$dir/$name"
-            return 0
-        fi
-    done
-    return 1
+assert_system_dylibs_only() {
+    local binary="$1"
+    if otool -L "$binary" | tail -n +2 | grep -vE '^[[:space:]]+/(usr/lib|System/Library)/' >&2; then
+        echo "error: $(basename "$binary") loads libraries outside /usr/lib and /System/Library" >&2
+        exit 1
+    fi
 }
 
-if ! wireguard_go="$(brew_bin wireguard-go)"; then
-    echo "note: Homebrew's wireguard-go is not installed; no VPN runtime." >&2
+if ! command -v go >/dev/null 2>&1; then
+    echo "note: Go toolchain is not installed; no VPN runtime." >&2
     exit 2
 fi
-go_keg="$(dirname "$(dirname "$(realpath "$wireguard_go")")")"
+
+sdk_path="$(xcrun --show-sdk-path)"
+clang_ver="$(xcrun clang --version)"
+go_ver="$(go version)"
+arch="$(uname -m)"
+ncpu="$(sysctl -n hw.ncpu)"
+
+# Build wireguard-go deterministically from pinned upstream archive.
+wg_go_source="$cache/wireguard-go-$WG_GO_REVISION"
+wg_go_stamp="$WG_GO_SHA256 $arch $go_ver $sdk_path macOS14.0"
+if [ ! -x "$wg_go_source/wireguard-go" ] || [ "$(cat "$wg_go_source/.stamp" 2>/dev/null)" != "$wg_go_stamp" ]; then
+    mkdir -p "$cache"
+    fetch "$WG_GO_URL" "$WG_GO_SHA256" "$cache/wireguard-go-$WG_GO_REVISION.tar.gz"
+    rm -rf "$wg_go_source"
+    mkdir -p "$wg_go_source"
+    tar -xzf "$cache/wireguard-go-$WG_GO_REVISION.tar.gz" -C "$wg_go_source" --strip-components 1
+    (
+        cd "$wg_go_source"
+        env CC=/usr/bin/clang \
+            SDKROOT="$sdk_path" \
+            CGO_ENABLED=1 \
+            MACOSX_DEPLOYMENT_TARGET=14.0 \
+            CGO_CFLAGS="-mmacosx-version-min=14.0" \
+            CGO_LDFLAGS="-mmacosx-version-min=14.0" \
+            go build -trimpath -ldflags="-s -w" -o "$wg_go_source/wireguard-go" . \
+            >"$wg_go_source/build.log" 2>&1 || { tail -60 "$wg_go_source/build.log" >&2; exit 1; }
+    )
+    printf '%s\n' "$wg_go_stamp" >"$wg_go_source/.stamp"
+fi
+
+# Build tailscale and tailscaled deterministically from pinned upstream archive.
+ts_source="$cache/tailscale-$TAILSCALE_REVISION"
+ts_ldflags="-s -w -X tailscale.com/version.longStamp=${TAILSCALE_VERSION}-t${TAILSCALE_SHORT_HASH} -X tailscale.com/version.shortStamp=${TAILSCALE_VERSION} -X tailscale.com/version.gitCommitStamp=${TAILSCALE_REVISION}"
+ts_stamp="$TAILSCALE_SHA256 $ts_ldflags $arch $go_ver $sdk_path macOS14.0"
+if [ ! -x "$ts_source/tailscale" ] || [ ! -x "$ts_source/tailscaled" ] || [ "$(cat "$ts_source/.stamp" 2>/dev/null)" != "$ts_stamp" ]; then
+    mkdir -p "$cache"
+    fetch "$TAILSCALE_URL" "$TAILSCALE_SHA256" "$cache/tailscale-$TAILSCALE_REVISION.tar.gz"
+    rm -rf "$ts_source"
+    mkdir -p "$ts_source"
+    tar -xzf "$cache/tailscale-$TAILSCALE_REVISION.tar.gz" -C "$ts_source" --strip-components 1
+    (
+        cd "$ts_source"
+        for ts_cmd in tailscale tailscaled; do
+            env CC=/usr/bin/clang \
+                SDKROOT="$sdk_path" \
+                CGO_ENABLED=1 \
+                MACOSX_DEPLOYMENT_TARGET=14.0 \
+                CGO_CFLAGS="-mmacosx-version-min=14.0" \
+                CGO_LDFLAGS="-mmacosx-version-min=14.0" \
+                go build -trimpath -ldflags="$ts_ldflags" -o "$ts_source/$ts_cmd" "./cmd/$ts_cmd" \
+                >"$ts_source/build-$ts_cmd.log" 2>&1 || { tail -60 "$ts_source/build-$ts_cmd.log" >&2; exit 1; }
+        done
+    )
+    printf '%s\n' "$ts_stamp" >"$ts_source/.stamp"
+fi
+ts_ver_out="$("$ts_source/tailscale" version 2>&1 || true)"
+case "$ts_ver_out" in
+    *"$TAILSCALE_VERSION"*) ;;
+    *)
+        echo "error: built tailscale did not report expected version $TAILSCALE_VERSION: $ts_ver_out" >&2
+        exit 1
+        ;;
+esac
 
 # Homebrew's wg can be built for a newer OS than the app supports. Build the
 # small C client from source instead, keeping the exact reviewed script pin.
@@ -107,17 +182,17 @@ WG_REVISION=49ce333da02056ae7b22ee2aeb6afe8aaed79b19
 WG_SHA256=2b901ba5c3957b7bb310e1c6b7ced1cc3fc9c8f6d58d59bcbdbeebd053232ef0
 WG_URL="https://codeload.github.com/WireGuard/wireguard-tools/tar.gz/$WG_REVISION"
 wg_source="$cache/wireguard-tools-$WG_REVISION"
-wg_stamp="$WG_SHA256 $(uname -m) $(xcrun --show-sdk-path) $(xcrun clang --version) macOS14.0"
+wg_stamp="$WG_SHA256 $arch $sdk_path $clang_ver macOS14.0"
 if [ ! -x "$wg_source/src/wg" ] || [ "$(cat "$wg_source/.stamp" 2>/dev/null)" != "$wg_stamp" ]; then
     mkdir -p "$cache"
     fetch "$WG_URL" "$WG_SHA256" "$cache/wireguard-tools-$WG_REVISION.tar.gz"
     rm -rf "$wg_source"
     mkdir -p "$wg_source"
     tar -xzf "$cache/wireguard-tools-$WG_REVISION.tar.gz" -C "$wg_source" --strip-components 1
-    env CC="$(xcrun --find clang)" SDKROOT="$(xcrun --show-sdk-path)" \
+    env CC="$(xcrun --find clang)" SDKROOT="$sdk_path" \
         MACOSX_DEPLOYMENT_TARGET=14.0 CFLAGS="-O2 -mmacosx-version-min=14.0" \
         LDFLAGS="-mmacosx-version-min=14.0" \
-        make -C "$wg_source/src" -j"$(sysctl -n hw.ncpu)" wg \
+        make -C "$wg_source/src" -j"$ncpu" wg \
         >"$wg_source/make.log" 2>&1 || { tail -60 "$wg_source/make.log" >&2; exit 1; }
     printf '%s\n' "$wg_stamp" >"$wg_source/.stamp"
 fi
@@ -132,14 +207,14 @@ if [ "$(shasum -a 256 <"$wg_source/wg-quick" | cut -d' ' -f1)" != "$pinned" ]; t
     exit 1
 fi
 python3 "$repo/contrib/openvpn3/check_deployment.py" --maximum 14.0 \
-    "$wg_source/src/wg" "$wireguard_go"
-if otool -L "$wg_source/src/wg" | tail -n +2 | grep -vE '^[[:space:]]+/(usr/lib|System/Library)/' >&2; then
-    echo "error: wg loads libraries outside the system" >&2
-    exit 1
-fi
+    "$wg_source/src/wg" "$wg_go_source/wireguard-go" "$ts_source/tailscale" "$ts_source/tailscaled"
+assert_system_dylibs_only "$wg_source/src/wg"
+assert_system_dylibs_only "$wg_go_source/wireguard-go"
+assert_system_dylibs_only "$ts_source/tailscale"
+assert_system_dylibs_only "$ts_source/tailscaled"
 
 # bash, built once per source and configuration, then reused.
-stamp="$BASH_SHA256 ${BASH_PATCHES[*]} ${BASH_CONFIGURE[*]} macOS14.0 $(uname -m) $(xcrun --show-sdk-path) $(xcrun clang --version)"
+stamp="$BASH_SHA256 ${BASH_PATCHES[*]} ${BASH_CONFIGURE[*]} macOS14.0 $arch $sdk_path $clang_ver"
 built="$cache/bash-build"
 if [ ! -x "$built/bash" ] || [ "$(cat "$built/.stamp" 2>/dev/null)" != "$stamp" ]; then
     mkdir -p "$cache"
@@ -156,45 +231,48 @@ if [ ! -x "$built/bash" ] || [ "$(cat "$built/.stamp" 2>/dev/null)" != "$stamp" 
         cd "$built"
         ./configure "${BASH_CONFIGURE[@]}" CFLAGS="-O2 -mmacosx-version-min=14.0" >configure.log 2>&1 \
             || { tail -40 configure.log >&2; exit 1; }
-        make -j"$(sysctl -n hw.ncpu)" bash >make.log 2>&1 \
+        make -j"$ncpu" bash >make.log 2>&1 \
             || { tail -40 make.log >&2; exit 1; }
     )
     printf '%s\n' "$stamp" >"$built/.stamp"
 fi
 
 # A root helper must not load libraries from a prefix the user can write.
-if otool -L "$built/bash" | tail -n +2 | grep -vE '^[[:space:]]+/(usr/lib|System/Library)/' >&2; then
-    echo "error: the built bash loads the libraries above from outside the system" >&2
-    exit 1
-fi
+assert_system_dylibs_only "$built/bash"
 python3 "$repo/contrib/openvpn3/check_deployment.py" --maximum 14.0 "$built/bash"
 
 mkdir -p "$out/licenses"
 install -m 0755 "$built/bash" "$out/bash"
 install -m 0755 "$wg_source/src/wg" "$out/wg"
 install -m 0755 "$wg_source/wg-quick" "$out/wg-quick"
-install -m 0755 "$go_keg/bin/wireguard-go" "$out/wireguard-go"
+install -m 0755 "$wg_go_source/wireguard-go" "$out/wireguard-go"
+install -m 0755 "$ts_source/tailscale" "$out/tailscale"
+install -m 0755 "$ts_source/tailscaled" "$out/tailscaled"
 
 install -m 0644 "$built/COPYING" "$out/licenses/bash.COPYING"
 install -m 0644 "$wg_source/COPYING" "$out/licenses/wireguard-tools.COPYING"
-install -m 0644 "$go_keg/LICENSE" "$out/licenses/wireguard-go.LICENSE"
+install -m 0644 "$wg_go_source/LICENSE" "$out/licenses/wireguard-go.LICENSE"
+install -m 0644 "$ts_source/LICENSE" "$out/licenses/tailscale.LICENSE"
 cat >"$out/licenses/SOURCES" <<EOF
 The programs in vpn-runtime, and where their source is:
 
 bash          GNU bash 5.3 with its official patches up to $(printf 'bash53-%03d' "${#BASH_PATCHES[@]}"):
-                $BASH_URL
+                $BASH_URL (SHA-256: $BASH_SHA256)
                 $BASH_PATCH_URL
               built by scripts/build-vpn-runtime.sh in
-              https://github.com/franzjeger/SuperManager, which pins their
-              SHA-256 digests and the options bash is configured with
+              https://github.com/franzjeger/SuperManager
 wg, wg-quick  wireguard-tools v1.0.20260223, commit $WG_REVISION:
-              $WG_URL
-              archive SHA-256: $WG_SHA256
-              wg built for macOS 14.0; wg-quick includes the existing
-              /opt/homebrew/etc/wireguard search path and matches the helper pin
+                $WG_URL (SHA-256: $WG_SHA256)
+              wg built for macOS 14.0; wg-quick matches the helper SHA-256 pin
               https://git.zx2c4.com/wireguard-tools
-wireguard-go  wireguard-go $(basename "$go_keg"), as Homebrew builds it:
+wireguard-go  wireguard-go $WG_GO_VERSION, commit $WG_GO_REVISION:
+                $WG_GO_URL (SHA-256: $WG_GO_SHA256)
+              built from pinned source with go build -trimpath
               https://git.zx2c4.com/wireguard-go
+tailscale,    Tailscale v$TAILSCALE_VERSION, commit $TAILSCALE_REVISION:
+tailscaled      $TAILSCALE_URL (SHA-256: $TAILSCALE_SHA256)
+              built from pinned source with go build -trimpath
+              https://github.com/tailscale/tailscale
 EOF
 
 # Azure VPN must have a protected OpenVPN 3 as well. Keeping this in the
@@ -226,7 +304,7 @@ ss_options=(--prefix="$prefix" --sysconfdir="$prefix/etc" --with-piddir=/var/run
     --enable-updown --enable-eap-identity --enable-eap-mschapv2
     --enable-eap-md5 --enable-eap-gtc --enable-eap-peap
     --enable-xauth-generic --enable-md4 --enable-des)
-ss_stamp="$ss_sha ${ss_options[*]} HAVE_QSORT_R_BSD macOS14.0 $(uname -m) $(shasum -a 256 "$ssl/lib/libcrypto.a")"
+ss_stamp="$ss_sha ${ss_options[*]} HAVE_QSORT_R_BSD macOS14.0 $arch $(shasum -a 256 "$ssl/lib/libcrypto.a")"
 if [ ! -x "$ss/src/swanctl/swanctl" ] || [ "$(cat "$ss/.stamp" 2>/dev/null)" != "$ss_stamp" ]; then
     fetch "$ss_url" "$ss_sha" "$cache/strongswan.tar.bz2"
     rm -rf "$ss"
@@ -245,7 +323,7 @@ if [ ! -x "$ss/src/swanctl/swanctl" ] || [ "$(cat "$ss/.stamp" 2>/dev/null)" != 
             echo "error: strongSwan did not select BSD qsort_r on macOS" >&2
             exit 1
         fi
-        make -j"$(sysctl -n hw.ncpu)" >make.log 2>&1 \
+        make -j"$ncpu" >make.log 2>&1 \
             || { tail -40 make.log >&2; exit 1; }
     )
     printf '%s\n' "$ss_stamp" >"$ss/.stamp"
@@ -258,12 +336,68 @@ STRONGSWAN_CONF="$ss_smoke_conf" "$ss/src/charon/charon" --version >/dev/null
 rm -f "$ss_smoke_conf"
 for entry in charon swanctl; do
     binary="$ss/src/$entry/$entry"
-    if otool -L "$binary" | tail -n +2 | grep -vE '^[[:space:]]+/(usr/lib|System/Library)/' >&2; then
-        echo "error: $entry loads non-system libraries" >&2
-        exit 1
-    fi
+    assert_system_dylibs_only "$binary"
     install -m 0755 "$binary" "$out/$entry"
 done
 install -m 0644 "$ss/COPYING" "$out/licenses/strongswan.COPYING"
 printf '\nstrongSwan 6.0.7: %s (SHA-256 %s); static OpenSSL: %s\n' \
     "$ss_url" "$ss_sha" "$ss_stamp" >>"$out/licenses/SOURCES"
+
+# Consolidated third-party license bundle covering all GPL/AGPL/BSD/MIT
+# runtime executables shipped inside the application bundle (P1-7).
+{
+    cat <<EOF
+================================================================================
+SuperManager Bundled VPN & Mesh Runtime — Third-Party Licenses & Source Notice
+================================================================================
+
+All third-party executables in this runtime directory are built reproducibly
+from pinned, SHA-256-verified upstream source archives by:
+  https://github.com/franzjeger/SuperManager (scripts/build-vpn-runtime.sh
+  and scripts/build-openvpn3-runtime.sh)
+
+Component Summary:
+  1. bash (GNU Bash 5.3 + patches 001..$(printf '%03d' "${#BASH_PATCHES[@]}"))
+     License: GPL-3.0-or-later
+     Source:  $BASH_URL
+     SHA-256: $BASH_SHA256
+
+  2. wg, wg-quick (wireguard-tools commit $WG_REVISION)
+     License: GPL-2.0-only
+     Source:  $WG_URL
+     SHA-256: $WG_SHA256
+
+  3. wireguard-go ($WG_GO_VERSION, commit $WG_GO_REVISION)
+     License: MIT
+     Source:  $WG_GO_URL
+     SHA-256: $WG_GO_SHA256
+
+  4. tailscale, tailscaled (v$TAILSCALE_VERSION, commit $TAILSCALE_REVISION)
+     License: BSD-3-Clause
+     Source:  $TAILSCALE_URL
+     SHA-256: $TAILSCALE_SHA256
+
+  5. openvpn3 (OpenVPN 3 Client Library + statically linked OpenSSL, mbedTLS,
+     Asio, fmt, jsoncpp, lz4 — see licenses/openvpn3* below)
+     License: AGPL-3.0-only (with OpenSSL Exception) / Apache-2.0 / BSL-1.0 /
+              MIT / BSD-2-Clause
+
+  6. charon, swanctl (strongSwan 6.0.7 + statically linked OpenSSL)
+     License: GPL-2.0-or-later
+     Source:  $ss_url
+     SHA-256: $ss_sha
+
+Corresponding build scripts, patches, and exact compiler/configure flags used
+to produce these binaries are published in the SuperManager source repository
+at https://github.com/franzjeger/SuperManager.
+EOF
+    for lic_file in "$out"/licenses/*; do
+        [ -f "$lic_file" ] || continue
+        printf '\n================================================================================\n'
+        printf 'FILE: licenses/%s\n' "$(basename "$lic_file")"
+        printf '================================================================================\n\n'
+        cat "$lic_file"
+        printf '\n'
+    done
+} >"$out/THIRD_PARTY_LICENSES.txt"
+chmod 0644 "$out/THIRD_PARTY_LICENSES.txt"

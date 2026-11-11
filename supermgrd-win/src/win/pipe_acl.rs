@@ -114,7 +114,10 @@ struct RevertGuard;
 impl Drop for RevertGuard {
     fn drop(&mut self) {
         let ok = unsafe { RevertToSelf() };
-        assert!(ok != 0, "RevertToSelf failed after named-pipe impersonation");
+        assert!(
+            ok != 0,
+            "RevertToSelf failed after named-pipe impersonation"
+        );
     }
 }
 
