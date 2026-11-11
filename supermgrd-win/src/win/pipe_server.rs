@@ -1,36 +1,16 @@
 //! Named-pipe server.
 //!
-//! Listens on `\\.\pipe\supermgrd`, accepts each instance, and dispatches
-//! incoming JSON-RPC frames against [`crate::dispatch`].
-//!
-//! # Concurrency model
-//!
-//! `ServerOptions::create` creates the first pipe instance; we immediately
-//! create a *replacement* instance before calling `connect()` on the
-//! current one, so that the moment a client opens the pipe a fresh
-//! instance is already in place for the next caller. This mirrors the
-//! Win32 idiomatic "always have one listening" pattern and lets multiple
-//! GUIs/MCP servers connect concurrently.
-//!
-//! # Security
-//!
-//! Every pipe instance is created with [`PipeSecurity::restrictive`], which
-//! attaches a protected DACL (`D:P`) and Medium Mandatory Integrity Label:
-//!
-//! - `NT AUTHORITY\SYSTEM` (`SY`) — full control
-//! - `BUILTIN\Administrators` (`BA`) — full control
-//! - `NT AUTHORITY\INTERACTIVE` (`IU`) — read + write data only (no `WRITE_DAC` / `WRITE_OWNER`, excluding non-interactive services and network logons)
-//! - Mandatory Label Medium (`S:(ML;;NW;;;ME)`) — `No-Write-Up`, blocking Low/Untrusted-integrity sandboxed processes
-//!
-//! Frame reads are bounded *before* buffering in memory so a connected client
-//! cannot exhaust `LocalSystem` memory with a newline-less stream.
+//! Listens on `\\.\pipe\supermgrd`, accepts each instance, verifies the
+//! caller's security token, and dispatches incoming JSON-RPC frames against
+//! [`crate::dispatch`].
 
-use std::sync::Arc;
+use std::{os::windows::io::AsRawHandle as _, sync::Arc, time::Duration};
 
 use tokio::{
     io::{AsyncWriteExt as _, BufReader},
     net::windows::named_pipe::{NamedPipeServer, ServerOptions},
-    sync::Notify,
+    sync::{Notify, Semaphore},
+    time::{sleep, timeout},
 };
 use tracing::{debug, warn};
 
@@ -38,22 +18,19 @@ use supermgr_core::protocol::{
     PipeRequest, PipeResponse, RpcError, MAX_FRAME_BYTES, PIPE_NAME, PROTOCOL_VERSION,
 };
 
-use super::{daemon::DaemonState, dispatch, pipe_acl::PipeSecurity};
+use super::{
+    daemon::DaemonState,
+    dispatch,
+    pipe_acl::{caller_auth_from_pipe, CallerAuth, PipeSecurity},
+};
 use crate::rpc_args::{read_bounded_line, BoundedLine};
 
-/// Max number of concurrent pipe instances we will keep allocated. Each
-/// connected client consumes one instance; idle instances are cheap.
-/// `usize` because that's what `ServerOptions::max_instances` accepts.
+/// Max number of pipe instances allocated simultaneously (1 listener + 31 active clients).
 const MAX_INSTANCES: usize = 32;
 
-/// Create a fresh listening pipe instance with the restrictive ACL.
-///
-/// Tokio's safe `create()` uses the default DACL — which is too lax in
-/// console mode and too strict in service mode. The SDDL-driven security
-/// descriptor in [`PipeSecurity`] handles both correctly. The function
-/// itself is unsafe because the underlying Win32 entry point dereferences
-/// the SECURITY_ATTRIBUTES pointer; our `PipeSecurity` upholds its
-/// validity-for-the-pointer-lifetime contract.
+/// Idle read timeout per client connection so stalled callers release their pipe slot.
+const IDLE_READ_TIMEOUT: Duration = Duration::from_secs(300);
+
 fn create_listener(first: bool) -> std::io::Result<(NamedPipeServer, PipeSecurity)> {
     let mut security = PipeSecurity::restrictive()?;
     let mut options = ServerOptions::new();
@@ -63,23 +40,47 @@ fn create_listener(first: bool) -> std::io::Result<(NamedPipeServer, PipeSecurit
     if first {
         options.first_pipe_instance(true);
     }
-    // SAFETY: `security` outlives the call; `attrs_ptr` returns a valid
-    // SECURITY_ATTRIBUTES heap pointer for the duration of `security`.
     let server =
         unsafe { options.create_with_security_attributes_raw(PIPE_NAME, security.attrs_ptr()) }?;
     Ok((server, security))
 }
 
-/// Listen on the well-known pipe path and dispatch requests until
-/// `shutdown` fires.
+async fn next_listener_or_shutdown(
+    shutdown: &Notify,
+) -> Option<(NamedPipeServer, PipeSecurity)> {
+    let mut delay = Duration::from_millis(50);
+    loop {
+        match create_listener(false) {
+            Ok(pair) => return Some(pair),
+            Err(e) => {
+                warn!("pipe listener replacement failed ({e}); retrying in {delay:?}");
+                tokio::select! {
+                    () = sleep(delay) => {}
+                    () = shutdown.notified() => return None,
+                }
+                delay = (delay * 2).min(Duration::from_secs(2));
+            }
+        }
+    }
+}
+
+/// Listen on the well-known pipe path and dispatch requests until `shutdown` fires.
 pub async fn serve(state: Arc<DaemonState>, shutdown: Arc<Notify>) -> std::io::Result<()> {
-    let (mut listener, _initial_sec) = create_listener(true)?;
-    // Hold the SECURITY_ATTRIBUTES alive for the entire serve loop. We
-    // re-create one per new listener and let the previous drop; the
-    // tokio NamedPipeServer captures its own handle, so the security
-    // descriptor is only consulted at creation time.
+    let (mut listener, mut _active_sec) = create_listener(true)?;
+    let slots = Arc::new(Semaphore::new(MAX_INSTANCES - 1));
 
     loop {
+        let permit = tokio::select! {
+            res = Arc::clone(&slots).acquire_owned() => match res {
+                Ok(p) => p,
+                Err(_) => return Ok(()),
+            },
+            () = shutdown.notified() => {
+                debug!("pipe server: shutdown received while waiting for connection slot");
+                return Ok(());
+            }
+        };
+
         let connected = tokio::select! {
             res = listener.connect() => res,
             () = shutdown.notified() => {
@@ -88,20 +89,26 @@ pub async fn serve(state: Arc<DaemonState>, shutdown: Arc<Notify>) -> std::io::R
             }
         };
         if let Err(e) = connected {
+            drop(permit);
             warn!("pipe accept failed: {e}");
-            let (new_listener, _sec) = create_listener(false)?;
+            let Some((new_listener, new_sec)) = next_listener_or_shutdown(&shutdown).await else {
+                return Ok(());
+            };
             listener = new_listener;
+            _active_sec = new_sec;
             continue;
         }
 
-        // Swap the listener out: hand off the connected instance to the
-        // request handler, then build a fresh listener for the next caller.
-        let (new_listener, _sec) = create_listener(false)?;
+        let Some((new_listener, new_sec)) = next_listener_or_shutdown(&shutdown).await else {
+            return Ok(());
+        };
         let connection = std::mem::replace(&mut listener, new_listener);
+        _active_sec = new_sec;
 
         let state = state.clone();
         let shutdown = shutdown.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(e) = handle_connection(connection, state, shutdown).await {
                 warn!("pipe connection ended with error: {e:#}");
             }
@@ -109,7 +116,8 @@ pub async fn serve(state: Arc<DaemonState>, shutdown: Arc<Notify>) -> std::io::R
     }
 }
 
-/// Per-connection loop: read a frame, dispatch, write the response, repeat.
+/// Per-connection loop: read a frame with idle timeout, authenticate the client,
+/// dispatch, write the response, repeat.
 async fn handle_connection(
     pipe: NamedPipeServer,
     state: Arc<DaemonState>,
@@ -117,10 +125,20 @@ async fn handle_connection(
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(pipe);
     let mut line = String::new();
+    let mut caller_auth: Option<CallerAuth> = None;
+
     loop {
         line.clear();
         let read = tokio::select! {
-            res = read_bounded_line(&mut reader, &mut line, MAX_FRAME_BYTES) => res,
+            res = timeout(IDLE_READ_TIMEOUT, read_bounded_line(&mut reader, &mut line, MAX_FRAME_BYTES)) => {
+                match res {
+                    Ok(inner) => inner,
+                    Err(_) => {
+                        debug!("closing idle named-pipe client after {IDLE_READ_TIMEOUT:?}");
+                        return Ok(());
+                    }
+                }
+            }
             () = shutdown.notified() => return Ok(()),
         };
         match read? {
@@ -136,6 +154,26 @@ async fn handle_connection(
             }
             BoundedLine::Frame => {}
         }
+
+        if caller_auth.is_none() {
+            let raw_handle = reader.get_ref().as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+            match caller_auth_from_pipe(raw_handle) {
+                Ok(auth) => caller_auth = Some(auth),
+                Err(e) => {
+                    warn!("refusing named-pipe client whose token could not be inspected: {e}");
+                    let _ = write_error(
+                        reader.get_mut(),
+                        0,
+                        RpcError::PermissionDenied(format!(
+                            "could not verify named-pipe caller identity: {e}"
+                        )),
+                    )
+                    .await;
+                    return Ok(());
+                }
+            }
+        }
+        let caller = caller_auth.as_ref().expect("populated above");
 
         let trimmed = line.trim_end();
         let req: PipeRequest = match serde_json::from_str(trimmed) {
@@ -164,7 +202,7 @@ async fn handle_connection(
             continue;
         }
 
-        let response = dispatch::dispatch(&state, &req).await;
+        let response = dispatch::dispatch(&state, &req, caller).await;
         let frame = match serde_json::to_vec(&response) {
             Ok(mut v) => {
                 v.push(b'\n');
@@ -180,8 +218,6 @@ async fn handle_connection(
     }
 }
 
-/// Send a single error response with the given id. Used for early-stage
-/// protocol failures where we couldn't even parse the request.
 async fn write_error(pipe: &mut NamedPipeServer, id: u64, err: RpcError) -> std::io::Result<()> {
     let resp = PipeResponse {
         v: PROTOCOL_VERSION,

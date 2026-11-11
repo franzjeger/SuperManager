@@ -30,6 +30,7 @@ pub use azure as ikev2;
 pub mod openvpn;
 pub mod output;
 pub mod session;
+pub mod trust;
 pub mod wireguard;
 
 /// Outcome of a VPN operation on Windows. Carries enough detail for the

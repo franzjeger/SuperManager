@@ -120,50 +120,23 @@ impl Default for OpenVpnBackend {
     }
 }
 
-/// Locate the `openvpn.exe` binary. Search order:
-/// 1. SuperManager's own `bin\openvpn.exe` — bundled by the MSI alongside
-///    the daemon. This is the expected location for normal installations.
-/// 2. `OPENVPN_EXE` env var — lets advanced users override with a specific
-///    binary (portable install, staging build, etc.).
-/// 3. `%PATH%` lookup.
-/// 4. Legacy `C:\Program Files\OpenVPN\bin\openvpn.exe` — fallback for
-///    machines that happen to have a full OpenVPN Community install.
-fn locate_openvpn() -> Result<PathBuf, VpnError> {
-    // 1. Bundled in the same bin\ directory as the SuperManager daemon.
-    let bundled = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("openvpn.exe")));
-    if let Some(ref p) = bundled {
-        if p.exists() {
-            return Ok(p.clone());
-        }
-    }
-
-    // 2. Env var override.
-    if let Some(v) = std::env::var_os("OPENVPN_EXE") {
-        let path = PathBuf::from(v);
-        if path.exists() {
-            return Ok(path);
-        }
-    }
-
-    // 3. PATH.
-    if let Ok(p) = which::which("openvpn.exe") {
-        return Ok(p);
-    }
-
-    // 4. Legacy full-application install location.
-    let legacy = PathBuf::from(r"C:\Program Files\OpenVPN\bin\openvpn.exe");
-    if legacy.exists() {
-        return Ok(legacy);
-    }
-
-    Err(VpnError::MissingDependency(
-        "openvpn.exe not found. It should be bundled at \
-         %ProgramFiles%\\SuperManager\\bin\\openvpn.exe. \
-         Re-run the SuperManager installer to restore it."
-            .into(),
-    ))
+/// Locate a signed `openvpn.exe` binary inside `%ProgramFiles%`.
+///
+/// Search order (strictly admin-owned `%ProgramFiles%` locations with valid
+/// Authenticode signatures; never `%PATH%` or unprivileged directories):
+/// 1. `<daemon_dir>\openvpn.exe` (when the daemon itself lives under `%ProgramFiles%`)
+/// 2. `%ProgramFiles%\SuperManager\bin\openvpn.exe`
+/// 3. `%ProgramFiles%\OpenVPN\bin\openvpn.exe`
+pub(super) fn locate_openvpn() -> Result<PathBuf, VpnError> {
+    super::trust::resolve_trusted_program_files_binary(
+        Some("openvpn.exe"),
+        &[
+            r"SuperManager\bin\openvpn.exe",
+            r"OpenVPN\bin\openvpn.exe",
+        ],
+        "openvpn.exe not found in %ProgramFiles%\\SuperManager\\bin or %ProgramFiles%\\OpenVPN\\bin. \
+         Re-run the SuperManager installer to restore it.",
+    )
 }
 
 /// Whether `openvpn.exe` can be found, and what to tell the operator when

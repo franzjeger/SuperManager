@@ -48,7 +48,7 @@
 //! "ikev2" slot in [`super::VpnBackends`]. The struct name is the only
 //! IKEv2-flavoured thing about this file; everything else is Azure P2S.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -83,9 +83,6 @@ const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Max time we wait for openvpn to finish negotiating the tunnel.
 const OPENVPN_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Default install location of the OpenVPN Community binary.
-const DEFAULT_OPENVPN_PATH: &str = r"C:\Program Files\OpenVPN\bin\openvpn.exe";
 
 /// Loopback redirect URI used by the PKCE callback listener. Bound
 /// BEFORE opening the browser so the redirect never races us.
@@ -842,23 +839,8 @@ fn build_ovpn_config(
 // openvpn.exe location + adapter parsing
 // ---------------------------------------------------------------------------
 
-fn locate_openvpn() -> Result<PathBuf, VpnError> {
-    if let Some(p) = std::env::var_os("OPENVPN_EXE") {
-        let path = PathBuf::from(p);
-        if path.exists() {
-            return Ok(path);
-        }
-    }
-    if let Ok(p) = which::which("openvpn.exe") {
-        return Ok(p);
-    }
-    let fallback = PathBuf::from(DEFAULT_OPENVPN_PATH);
-    if fallback.exists() {
-        return Ok(fallback);
-    }
-    Err(VpnError::MissingDependency(
-        "openvpn.exe not found. Install OpenVPN Community Edition or set OPENVPN_EXE.".into(),
-    ))
+fn locate_openvpn() -> Result<std::path::PathBuf, VpnError> {
+    super::openvpn::locate_openvpn()
 }
 
 /// Sniff the TAP/Wintun adapter name out of openvpn's stdout. OpenVPN

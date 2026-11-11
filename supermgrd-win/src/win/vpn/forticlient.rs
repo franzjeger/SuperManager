@@ -41,14 +41,6 @@ use super::{output, VpnBackend, VpnError};
 /// Soft cap on bring-up time.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Fallback locations probed when `OPENFORTIVPN_EXE` is unset and the
-/// binary is not on `%PATH%`. These are legacy/custom deployment paths;
-/// the standard installer does not supply a Windows openfortivpn binary.
-const DEFAULT_LOCATIONS: &[&str] = &[
-    r"C:\Program Files\SuperManager\bin\openfortivpn.exe",
-    r"C:\ProgramData\chocolatey\bin\openfortivpn.exe",
-];
-
 /// Marker in openfortivpn's stdout that signals a usable tunnel.
 const SUCCESS_MARKER: &str = "Tunnel is up and running.";
 
@@ -346,27 +338,12 @@ pub fn availability() -> Result<(), String> {
 }
 
 fn locate_openfortivpn() -> Result<PathBuf, VpnError> {
-    if let Some(p) = std::env::var_os("OPENFORTIVPN_EXE") {
-        let path = PathBuf::from(p);
-        if path.exists() {
-            return Ok(path);
-        }
-    }
-    if let Ok(p) = which::which("openfortivpn.exe") {
-        return Ok(p);
-    }
-    for fallback in DEFAULT_LOCATIONS {
-        let path = PathBuf::from(fallback);
-        if path.exists() {
-            return Ok(path);
-        }
-    }
-    Err(VpnError::MissingDependency(
+    super::trust::resolve_trusted_program_files_binary(
+        Some("openfortivpn.exe"),
+        &[r"SuperManager\bin\openfortivpn.exe"],
         "FortiClient SSL VPN is unavailable in this Windows release. \
-         A compatible Windows VPN client has not been integrated; \
-         reinstalling SuperManager will not add one."
-            .into(),
-    ))
+         A signed Windows VPN client has not been installed under %ProgramFiles%\\SuperManager\\bin.",
+    )
 }
 
 /// Sniff the PPP/Wintun interface name out of openfortivpn's stdout.

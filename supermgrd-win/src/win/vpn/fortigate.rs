@@ -394,29 +394,115 @@ async fn remove_connection(conn_name: &str) -> Result<(), VpnError> {
     Ok(())
 }
 
+fn encode_ras_field<const N: usize>(value: &str, what: &str) -> Result<[u16; N], VpnError> {
+    let mut buf = [0u16; N];
+    let units: Vec<u16> = value.encode_utf16().collect();
+    if units.contains(&0) {
+        return Err(invalid_input(format!("{what} must not contain NUL")));
+    }
+    if units.len() >= N {
+        return Err(invalid_input(format!(
+            "{what} exceeds maximum RAS length of {} characters",
+            N - 1
+        )));
+    }
+    buf[..units.len()].copy_from_slice(&units);
+    Ok(buf)
+}
+
+fn split_ras_domain_user(username: &str) -> (&str, &str) {
+    if let Some((domain, user)) = username.split_once('\\') {
+        if !domain.is_empty() && domain.encode_utf16().count() < 16 && !user.is_empty() {
+            return (domain, user);
+        }
+    }
+    ("", username)
+}
+
+fn all_users_phonebook_wide() -> Option<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt as _;
+    let prog_data = std::env::var_os("ProgramData")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\ProgramData"));
+    let pbk = prog_data.join(r"Microsoft\Network\Connections\Pbk\rasphone.pbk");
+    if !pbk.exists() {
+        return None;
+    }
+    let mut wide: Vec<u16> = pbk.as_os_str().encode_wide().collect();
+    wide.push(0);
+    Some(wide)
+}
+
 async fn rasdial_connect(conn_name: &str, username: &str, password: &str) -> Result<(), VpnError> {
+    use windows_sys::Win32::NetworkManagement::Rras::{
+        RasDialW, RasGetErrorStringW, RasHangUpW, HRASCONN, RASDIALPARAMSW,
+    };
+    use zeroize::Zeroize as _;
+
     validate_connection_name(conn_name)?;
     validate_rasdial_username(username)?;
-    let output = Command::new("rasdial.exe")
-        .arg(conn_name)
-        .arg(username)
-        .arg(password)
-        .kill_on_drop(true)
-        .output()
-        .await
-        .map_err(VpnError::Io)?;
-    if output.status.success() {
-        return Ok(());
-    }
-    // rasdial reports on stdout, not stderr, and exits with the RAS error
-    // number. Reading only stderr is why a failed dial used to say nothing.
-    let code = output.status.code().unwrap_or(-1);
-    let printed = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    Err(ras_error(code, &printed))
+
+    let entry_buf = encode_ras_field::<257>(conn_name, "VPN connection name")?;
+    let (domain_str, user_str) = split_ras_domain_user(username);
+    let domain_buf = encode_ras_field::<16>(domain_str, "VPN domain")?;
+    let user_buf = encode_ras_field::<257>(user_str, "VPN username")?;
+    let mut pw_buf = encode_ras_field::<257>(password, "VPN password")?;
+    let pbk_wide = all_users_phonebook_wide();
+
+    tokio::task::spawn_blocking(move || {
+        let mut params = RASDIALPARAMSW {
+            dwSize: std::mem::size_of::<RASDIALPARAMSW>() as u32,
+            szEntryName: entry_buf,
+            szUserName: user_buf,
+            szPassword: pw_buf,
+            szDomain: domain_buf,
+            ..Default::default()
+        };
+        pw_buf.zeroize();
+
+        let pbk_ptr = pbk_wide.as_ref().map_or(std::ptr::null(), Vec::as_ptr);
+        let mut hrasconn: HRASCONN = std::ptr::null_mut();
+        let ret = unsafe {
+            RasDialW(
+                std::ptr::null(),
+                pbk_ptr,
+                &params,
+                0,
+                std::ptr::null(),
+                &mut hrasconn,
+            )
+        };
+        unsafe {
+            std::ptr::write_volatile(std::ptr::addr_of_mut!(params.szPassword), [0u16; 257]);
+        }
+
+        if ret == 0 {
+            return Ok(());
+        }
+        if !hrasconn.is_null() {
+            unsafe {
+                let _ = RasHangUpW(hrasconn);
+            }
+        }
+        let mut err_buf = [0u16; 512];
+        let got_msg =
+            unsafe { RasGetErrorStringW(ret, err_buf.as_mut_ptr(), err_buf.len() as u32) };
+        let printed = if got_msg == 0 {
+            let end = err_buf
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(err_buf.len());
+            format!(
+                "Remote Access error {ret} - {}",
+                String::from_utf16_lossy(&err_buf[..end]).trim()
+            )
+        } else {
+            String::new()
+        };
+        Err(ras_error(ret as i32, &printed))
+    })
+    .await
+    .map_err(|e| VpnError::Win32(format!("RAS dial worker panicked: {e}")))?
 }
 
 /// Turn a RAS error into what an operator can act on.
@@ -621,5 +707,11 @@ mod tests {
         assert!(super::validate_rasdial_username("/disconnect").is_err());
         assert!(super::validate_rasdial_username("-flag").is_err());
         assert!(super::validate_rasdial_username("alice\nbob").is_err());
+
+        assert_eq!(super::split_ras_domain_user("CORP\\alice"), ("CORP", "alice"));
+        assert_eq!(super::split_ras_domain_user("alice@example.com"), ("", "alice@example.com"));
+        assert!(super::encode_ras_field::<16>("CORP", "domain").is_ok());
+        assert!(super::encode_ras_field::<8>("12345678", "password").is_err());
+        assert!(super::encode_ras_field::<8>("ab\0cd", "password").is_err());
     }
 }
