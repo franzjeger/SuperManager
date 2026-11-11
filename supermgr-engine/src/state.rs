@@ -281,36 +281,44 @@ fn load_toml_dir(dir: &PathBuf, mut on_entry: impl FnMut(String, PathBuf)) -> an
     Ok(())
 }
 
-/// Write a TOML record atomically: serialize to a sibling `.tmp` file,
-/// fsync, then rename over the target. A power loss / kill -9 mid-write
-/// no longer truncates the canonical file — the worst case is an orphan
-/// `<name>.toml.tmp` next to a still-valid `<name>.toml`. The next loader
-/// pass at startup ignores `.tmp` files (it only globs `*.toml`).
-fn save_toml<T: serde::Serialize>(dir: &PathBuf, name: &str, value: &T) -> anyhow::Result<()> {
+/// Write `bytes` to `path` atomically with owner-only (`0600`) permissions.
+///
+/// Uses `NamedTempFile` in the target directory so the file is created with
+/// `O_CREAT | O_EXCL` and mode `0600` from the first byte (never inheriting a
+/// permissive umask and never following a predictable `.tmp` symlink), synced
+/// to disk, and renamed into place.
+pub fn write_private_atomic(path: & std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
     std::fs::create_dir_all(dir)?;
-    let path = dir.join(format!("{name}.toml"));
-    let tmp = dir.join(format!("{name}.toml.tmp"));
-    let text = toml::to_string_pretty(value)?;
 
-    // Open with truncate + write + fsync.
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    #[cfg(unix)]
     {
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&tmp)?;
-        f.write_all(text.as_bytes())?;
-        f.flush()?;
-        f.sync_all()?;
+        use std::os::unix::fs::PermissionsExt;
+        tmp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
+    tmp.write_all(bytes)?;
+    tmp.flush()?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| e.error)?;
 
-    std::fs::rename(&tmp, &path)?;
-    // Best-effort: fsync the directory so the rename is durable on
-    // ext4/APFS. Failure here is non-fatal.
     if let Ok(dir_handle) = std::fs::File::open(dir) {
         let _ = dir_handle.sync_all();
     }
+    Ok(())
+}
+
+/// Write a TOML record atomically with owner-only (`0600`) permissions.
+fn save_toml<T: serde::Serialize>(dir: &PathBuf, name: &str, value: &T) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(format!("{name}.toml"));
+    let text = toml::to_string_pretty(value)?;
+    write_private_atomic(&path, text.as_bytes())?;
     Ok(())
 }
 

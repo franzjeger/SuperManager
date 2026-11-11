@@ -1,7 +1,305 @@
 //! Shared AI tools. Names and dispatch stay identical across providers.
 
+use std::collections::BTreeSet;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use serde_json::{json, Value};
 use supermgr_core::client::DaemonClient;
+use uuid::Uuid;
+
+fn confirm_property() -> Value {
+    json!({
+        "type": "boolean",
+        "description": "Set to true only after explicit operator confirmation for this mutating or active action."
+    })
+}
+
+/// Fine-grained authorization policy for `supermgr-mcp`.
+#[derive(Debug, Clone)]
+pub struct McpPolicy {
+    pub allow_writes: bool,
+    /// Optional allowlist of mutating tool names. When `Some`, unlisted
+    /// mutating tools are neither advertised nor executable.
+    pub allowed_tools: Option<BTreeSet<String>>,
+    /// Optional allowlist of target host UUIDs. When `Some`, any tool taking
+    /// `host_id` is restricted to these hosts.
+    pub allowed_hosts: Option<BTreeSet<Uuid>>,
+    /// Allow non-GET HTTP methods (`POST`, `PUT`, `DELETE`) on `fortigate_api`
+    /// and `unifi_api`. Disabled by default even when `allow_writes` is true.
+    pub allow_raw_api_writes: bool,
+    /// Require `"confirm": true` in arguments for mutating tool calls.
+    pub require_confirmation: bool,
+    /// Append-only `0600` JSONL audit log for mutating tool calls.
+    pub audit_log_path: Option<PathBuf>,
+}
+
+impl Default for McpPolicy {
+    fn default() -> Self {
+        Self {
+            allow_writes: false,
+            allowed_tools: None,
+            allowed_hosts: None,
+            allow_raw_api_writes: false,
+            require_confirmation: true,
+            audit_log_path: None,
+        }
+    }
+}
+
+impl McpPolicy {
+    /// Parse policy from CLI arguments and environment variables. Fails closed
+    /// on malformed host UUIDs or unknown tool names in allowlists.
+    pub fn from_args_and_env<I, S>(args: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let args_vec: Vec<String> = args.into_iter().map(|s| s.as_ref().to_owned()).collect();
+        let read_only_forced = std::env::var_os("SUPERMGR_MCP_READ_ONLY").is_some();
+        let env_truthy = |key: &str| {
+            matches!(
+                std::env::var(key).as_deref(),
+                Ok("1" | "true" | "TRUE" | "yes" | "YES")
+            )
+        };
+
+        let allow_writes = !read_only_forced
+            && (args_vec.iter().any(|a| a == "--allow-writes")
+                || env_truthy("SUPERMGR_MCP_ALLOW_WRITES"));
+
+        let allow_raw_api_writes = !read_only_forced
+            && (args_vec.iter().any(|a| a == "--allow-raw-api-writes")
+                || env_truthy("SUPERMGR_MCP_ALLOW_RAW_API_WRITES"));
+
+        let raw_tools = args_vec
+            .iter()
+            .find_map(|a| a.strip_prefix("--allow-tools=").map(str::to_owned))
+            .or_else(|| std::env::var("SUPERMGR_MCP_ALLOW_TOOLS").ok());
+        let allowed_tools = match raw_tools {
+            Some(csv) => {
+                let mut set = BTreeSet::new();
+                for item in csv.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    set.insert(item.to_owned());
+                }
+                Some(set)
+            }
+            None => None,
+        };
+
+        let raw_hosts = args_vec
+            .iter()
+            .find_map(|a| a.strip_prefix("--allow-hosts=").map(str::to_owned))
+            .or_else(|| std::env::var("SUPERMGR_MCP_ALLOW_HOSTS").ok());
+        let allowed_hosts = match raw_hosts {
+            Some(csv) => {
+                let mut set = BTreeSet::new();
+                for item in csv.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    let parsed = Uuid::parse_str(item)
+                        .map_err(|e| format!("invalid UUID '{item}' in allowed hosts: {e}"))?;
+                    set.insert(parsed);
+                }
+                Some(set)
+            }
+            None => None,
+        };
+
+        let audit_log_path = std::env::var("SUPERMGR_MCP_AUDIT_LOG")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                supermgr_core::paths::try_default_data_dir()
+                    .ok()
+                    .map(|d| d.join("mcp-audit.log"))
+            });
+
+        Ok(Self {
+            allow_writes,
+            allowed_tools,
+            allowed_hosts,
+            allow_raw_api_writes,
+            require_confirmation: true,
+            audit_log_path,
+        })
+    }
+
+    #[must_use]
+    pub fn is_tool_advertised(&self, name: &str) -> bool {
+        if is_read_only(name) {
+            return true;
+        }
+        if !self.allow_writes {
+            return false;
+        }
+        match &self.allowed_tools {
+            Some(set) => set.contains(name),
+            None => true,
+        }
+    }
+}
+
+/// Catalog filtered by [`McpPolicy`].
+#[must_use]
+pub fn available_tools_for_policy(policy: &McpPolicy) -> Value {
+    Value::Array(
+        tool_definitions()
+            .as_array()
+            .expect("catalog array")
+            .iter()
+            .filter(|t| policy.is_tool_advertised(t["name"].as_str().unwrap_or("")))
+            .cloned()
+            .collect(),
+    )
+}
+
+/// Enforce [`McpPolicy`] before dispatching a tool call.
+pub fn authorize_tool_call(policy: &McpPolicy, name: &str, args: &Value) -> Result<(), String> {
+    if matches!(name, "ssh_set_password" | "ssh_set_api_token") {
+        return Err("credential-setting tools are not exposed over MCP".into());
+    }
+
+    // Enforce host scope across both read-only and mutating calls when `host_id` is supplied.
+    if let Some(ref allowed_hosts) = policy.allowed_hosts {
+        if let Some(raw_host) = args.get("host_id").and_then(Value::as_str) {
+            let parsed = Uuid::parse_str(raw_host.trim())
+                .map_err(|_| format!("invalid host_id '{raw_host}'"))?;
+            if !allowed_hosts.contains(&parsed) {
+                return Err(format!(
+                    "host {parsed} is not in the MCP allowed-hosts policy"
+                ));
+            }
+        }
+    }
+
+    if is_read_only(name) {
+        return Ok(());
+    }
+
+    if !policy.allow_writes {
+        return Err(
+            "This MCP session is read-only by default. Pass --allow-writes to enable mutating tools."
+                .into(),
+        );
+    }
+
+    if let Some(ref allowed_tools) = policy.allowed_tools {
+        if !allowed_tools.contains(name) {
+            return Err(format!(
+                "tool '{name}' is not permitted by the active --allow-tools policy"
+            ));
+        }
+    }
+
+    if matches!(name, "fortigate_api" | "unifi_api") {
+        let method = args
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if !method.eq_ignore_ascii_case("GET") && !policy.allow_raw_api_writes {
+            return Err(format!(
+                "{name} non-GET method '{method}' requires --allow-raw-api-writes"
+            ));
+        }
+    }
+
+    if policy.require_confirmation
+        && args.get("confirm").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(format!(
+            "mutating tool '{name}' requires explicit confirmation (\"confirm\": true)"
+        ));
+    }
+
+    Ok(())
+}
+
+pub fn record_mcp_audit(
+    path: &Path,
+    tool: &str,
+    args: &Value,
+    allowed: bool,
+    outcome: &str,
+) -> Result<(), String> {
+    if let Some(dir) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("create MCP audit directory {}: {e}", dir.display()))?;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts
+        .open(path)
+        .map_err(|e| format!("open MCP audit log {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let entry = json!({
+        "ts_unix": ts,
+        "tool": tool,
+        "host_id": args.get("host_id").and_then(Value::as_str),
+        "profile_id": args.get("profile_id").and_then(Value::as_str),
+        "method": args.get("method").and_then(Value::as_str),
+        "path": args.get("path").and_then(Value::as_str),
+        "allowed": allowed,
+        "outcome": outcome,
+    });
+    let line = serde_json::to_string(&entry).map_err(|e| format!("serialize audit entry: {e}"))?;
+    writeln!(file, "{line}").map_err(|e| format!("write MCP audit entry: {e}"))?;
+    file.sync_data()
+        .map_err(|e| format!("sync MCP audit log: {e}"))?;
+    Ok(())
+}
+
+/// Authorize, audit, and execute a tool call under [`McpPolicy`].
+pub async fn dispatch_with_policy(
+    proxy: &DaemonClient,
+    name: &str,
+    args: &Value,
+    policy: &McpPolicy,
+) -> Result<Value, String> {
+    let mutating = !is_read_only(name);
+    if let Err(reason) = authorize_tool_call(policy, name, args) {
+        if mutating {
+            if let Some(ref log_path) = policy.audit_log_path {
+                let _ = record_mcp_audit(log_path, name, args, false, &reason);
+            }
+        }
+        return Err(reason);
+    }
+
+    if mutating {
+        if let Some(ref log_path) = policy.audit_log_path {
+            record_mcp_audit(log_path, name, args, true, "started")?;
+        }
+    }
+
+    let res = execute_tool(proxy, name, args).await;
+
+    if mutating {
+        if let Some(ref log_path) = policy.audit_log_path {
+            let outcome = match &res {
+                Ok(_) => "ok",
+                Err(_) => "error",
+            };
+            let _ = record_mcp_audit(log_path, name, args, true, outcome);
+        }
+    }
+
+    res
+}
 
 /// The canonical tool catalog used by MCP and both API providers.
 pub fn tool_definitions() -> Value {
@@ -37,7 +335,8 @@ pub fn tool_definitions() -> Value {
                     "command": {
                         "type": "string",
                         "description": "Shell command to execute on the remote host"
-                    }
+                    },
+                    "confirm": confirm_property()
                 },
                 "required": ["host_id", "command"]
             }
@@ -64,7 +363,8 @@ pub fn tool_definitions() -> Value {
                     "group": { "type": "string", "description": "Logical group (optional)" },
                     "device_type": { "type": "string", "description": "linux, uni_fi, pf_sense, open_wrt, fortigate, windows" },
                     "auth_method": { "type": "string", "description": "key or password" },
-                    "auth_key_id": { "type": "string", "description": "UUID of SSH key (for key auth)" }
+                    "auth_key_id": { "type": "string", "description": "UUID of SSH key (for key auth)" },
+                    "confirm": confirm_property()
                 },
                 "required": ["label", "hostname", "username", "auth_method"]
             }
@@ -78,7 +378,8 @@ pub fn tool_definitions() -> Value {
                     "host_id": {
                         "type": "string",
                         "description": "UUID of the SSH host to test"
-                    }
+                    },
+                    "confirm": confirm_property()
                 },
                 "required": ["host_id"]
             }
@@ -92,49 +393,10 @@ pub fn tool_definitions() -> Value {
                     "host_id": {
                         "type": "string",
                         "description": "UUID of the SSH host to pin/unpin"
-                    }
+                    },
+                    "confirm": confirm_property()
                 },
                 "required": ["host_id"]
-            }
-        },
-        {
-            "name": "ssh_set_password",
-            "description": "Store an SSH password for a host in the secret store. Used for password-based authentication.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "host_id": {
-                        "type": "string",
-                        "description": "UUID of the SSH host"
-                    },
-                    "password": {
-                        "type": "string",
-                        "description": "SSH password to store"
-                    }
-                },
-                "required": ["host_id", "password"]
-            }
-        },
-        {
-            "name": "ssh_set_api_token",
-            "description": "Store a FortiGate REST API token and optional port for a host. Pass port 0 to keep the existing port.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "host_id": {
-                        "type": "string",
-                        "description": "UUID of the FortiGate host"
-                    },
-                    "token": {
-                        "type": "string",
-                        "description": "FortiGate REST API token"
-                    },
-                    "port": {
-                        "type": "integer",
-                        "description": "API port (default 0 to keep existing)"
-                    }
-                },
-                "required": ["host_id", "token"]
             }
         },
         {
@@ -150,7 +412,8 @@ pub fn tool_definitions() -> Value {
                     "inform_url": {
                         "type": "string",
                         "description": "Controller inform URL (e.g. http://controller:8080/inform)"
-                    }
+                    },
+                    "confirm": confirm_property()
                 },
                 "required": ["host_id", "inform_url"]
             }
@@ -176,7 +439,8 @@ pub fn tool_definitions() -> Value {
                     "body": {
                         "type": "string",
                         "description": "Optional JSON request body (empty string for none)"
-                    }
+                    },
+                    "confirm": confirm_property()
                 },
                 "required": ["host_id", "method", "path"]
             }
@@ -200,7 +464,8 @@ pub fn tool_definitions() -> Value {
                         "profile_id": {
                             "type": "string",
                             "description": "UUID of the VPN profile to connect"
-                        }
+                        },
+                        "confirm": confirm_property()
                     },
                     "required": ["profile_id"]
                 }
@@ -208,7 +473,13 @@ pub fn tool_definitions() -> Value {
             json!({
                 "name": "vpn_disconnect",
                 "description": "Disconnect the currently active VPN connection.",
-                "inputSchema": { "type": "object", "properties": {}, "required": [] }
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "confirm": confirm_property()
+                    },
+                    "required": []
+                }
             }),
             json!({
                 "name": "fortigate_push_ssh_key",
@@ -227,7 +498,8 @@ pub fn tool_definitions() -> Value {
                         "admin_user": {
                             "type": "string",
                             "description": "FortiGate admin username (e.g. admin)"
-                        }
+                        },
+                        "confirm": confirm_property()
                     },
                     "required": ["host_id", "key_id", "admin_user"]
                 }
@@ -241,7 +513,8 @@ pub fn tool_definitions() -> Value {
                         "host_id": {
                             "type": "string",
                             "description": "UUID of the FortiGate host with API token configured"
-                        }
+                        },
+                        "confirm": confirm_property()
                     },
                     "required": ["host_id"]
                 }
@@ -263,7 +536,7 @@ pub fn tool_definitions() -> Value {
             ("compliance_history", "Read previous Linux compliance runs for a managed host.", json!({"host_id":{"type":"string","description":"UUID of the managed host from list_hosts"}}), json!(["host_id"])),
             ("compliance_get_run", "Read checks and evidence from a stored compliance run.", json!({"host_id":{"type":"string","description":"UUID of the managed host from list_hosts"},"run_id":{"type":"string","description":"Stored run identifier from compliance_history"}}), json!(["host_id","run_id"])),
             ("compliance_list_checks", "List available Linux and FortiGate baseline checks, their scope and remediation.", json!({}), json!([])),
-            ("fortigate_compliance_check", "Run the FortiGate configuration baseline over its API and store the findings. Requires operator-enabled actions.", json!({"host_id":{"type":"string","description":"UUID of the managed host from list_hosts"}}), json!(["host_id"])),
+            ("fortigate_compliance_check", "Run the FortiGate configuration baseline over its API and store the findings. Requires operator-enabled actions.", json!({"host_id":{"type":"string","description":"UUID of the managed host from list_hosts"},"confirm":confirm_property()}), json!(["host_id"])),
         ] {
             definitions.push(json!({"name":name,"description":description,"inputSchema":{
                 "type":"object","properties":properties,"required":required
@@ -275,7 +548,8 @@ pub fn tool_definitions() -> Value {
         "name":"fortigate_api", "description":"Call a managed FortiGate REST API. Requires operator-enabled actions.",
         "inputSchema":{"type":"object","properties":{
             "host_id":{"type":"string","description":"UUID of the managed host from list_hosts"},"method":{"type":"string","description":"HTTP method to send","enum":["GET","POST","PUT","DELETE"]},
-            "path":{"type":"string","description":"FortiGate REST API path, including query parameters if needed"},"body":{"type":"string","description":"Optional JSON-encoded request body"}
+            "path":{"type":"string","description":"FortiGate REST API path, including query parameters if needed"},"body":{"type":"string","description":"Optional JSON-encoded request body"},
+            "confirm":confirm_property()
         },"required":["host_id","method","path"]}
     }));
     catalog
@@ -483,37 +757,6 @@ pub async fn execute_tool(proxy: &DaemonClient, name: &str, args: &Value) -> Res
             let parsed: Value = serde_json::from_str(&result).map_err(|e| e.to_string())?;
             Ok(parsed)
         }
-        "ssh_set_password" => {
-            let host_id = args
-                .get("host_id")
-                .and_then(|v| v.as_str())
-                .ok_or("missing host_id")?;
-            let password = args
-                .get("password")
-                .and_then(|v| v.as_str())
-                .ok_or("missing password")?;
-            proxy
-                .ssh_set_password(host_id, password)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(json!({ "status": "ok", "host_id": host_id }))
-        }
-        "ssh_set_api_token" => {
-            let host_id = args
-                .get("host_id")
-                .and_then(|v| v.as_str())
-                .ok_or("missing host_id")?;
-            let token = args
-                .get("token")
-                .and_then(|v| v.as_str())
-                .ok_or("missing token")?;
-            let port = args.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
-            proxy
-                .ssh_set_api_token(host_id, token, port)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(json!({ "status": "ok", "host_id": host_id }))
-        }
         "unifi_set_inform" => {
             let host_id = args
                 .get("host_id")
@@ -647,6 +890,7 @@ mod tests {
             "fortigate_api",
             "vpn_connect",
             "ssh_set_password",
+            "ssh_set_api_token",
             "unknown",
         ] {
             assert!(!is_read_only(name));
@@ -658,5 +902,105 @@ mod tests {
             .unwrap()
             .iter()
             .any(|t| t["name"] == "ssh_execute"));
+        // Secret-setting tools are never advertised in any mode.
+        let all = tool_definitions();
+        for forbidden in ["ssh_set_password", "ssh_set_api_token"] {
+            assert!(!all
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == forbidden));
+        }
+    }
+
+    #[test]
+    fn policy_enforces_tool_allowlist_host_scope_raw_api_method_and_confirmation() {
+        let host_ok = Uuid::new_v4();
+        let host_denied = Uuid::new_v4();
+        let mut policy = McpPolicy {
+            allow_writes: true,
+            allowed_tools: Some(["ssh_execute".to_owned(), "fortigate_api".to_owned()].into()),
+            allowed_hosts: Some([host_ok].into()),
+            allow_raw_api_writes: false,
+            require_confirmation: true,
+            audit_log_path: None,
+        };
+
+        // Unlisted mutating tool is denied.
+        assert!(authorize_tool_call(
+            &policy,
+            "add_host",
+            &json!({"confirm": true})
+        )
+        .is_err());
+
+        // Listed tool without confirm=true is denied.
+        assert!(authorize_tool_call(
+            &policy,
+            "ssh_execute",
+            &json!({"host_id": host_ok.to_string(), "command": "uptime"})
+        )
+        .is_err());
+
+        // Listed tool on out-of-scope host is denied.
+        assert!(authorize_tool_call(
+            &policy,
+            "ssh_execute",
+            &json!({"host_id": host_denied.to_string(), "command": "uptime", "confirm": true})
+        )
+        .is_err());
+
+        // Listed tool on allowed host with confirm=true succeeds.
+        assert!(authorize_tool_call(
+            &policy,
+            "ssh_execute",
+            &json!({"host_id": host_ok.to_string(), "command": "uptime", "confirm": true})
+        )
+        .is_ok());
+
+        // fortigate_api GET succeeds, POST is denied until allow_raw_api_writes=true.
+        assert!(authorize_tool_call(
+            &policy,
+            "fortigate_api",
+            &json!({"host_id": host_ok.to_string(), "method": "GET", "path": "/api/v2/monitor/system/status", "confirm": true})
+        )
+        .is_ok());
+        assert!(authorize_tool_call(
+            &policy,
+            "fortigate_api",
+            &json!({"host_id": host_ok.to_string(), "method": "DELETE", "path": "/api/v2/cmdb/firewall/policy/1", "confirm": true})
+        )
+        .is_err());
+        policy.allow_raw_api_writes = true;
+        assert!(authorize_tool_call(
+            &policy,
+            "fortigate_api",
+            &json!({"host_id": host_ok.to_string(), "method": "DELETE", "path": "/api/v2/cmdb/firewall/policy/1", "confirm": true})
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn mcp_audit_log_writes_private_jsonl_without_leaking_command_body() {
+        let dir = std::env::temp_dir().join(format!("sm-mcp-audit-{}", Uuid::new_v4()));
+        let log_path = dir.join("mcp-audit.log");
+        record_mcp_audit(
+            &log_path,
+            "ssh_execute",
+            &json!({"host_id": "11111111-1111-1111-1111-111111111111", "command": "echo super-secret-token"}),
+            true,
+            "ok",
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&log_path).unwrap();
+        assert!(text.contains("\"tool\":\"ssh_execute\""));
+        assert!(!text.contains("super-secret-token"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&log_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

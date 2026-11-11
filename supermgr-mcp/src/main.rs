@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use tracing::{debug, error, info};
 
 use supermgr_core::client::{self, DaemonClient};
-use supermgr_mcp::execute_tool;
+use supermgr_mcp::{available_tools_for_policy, dispatch_with_policy, McpPolicy};
 #[cfg(test)]
 use supermgr_mcp::tool_definitions;
 
@@ -77,29 +77,11 @@ fn handle_initialize(id: &Value) -> JsonRpcResponse {
     }
 }
 
-/// Determine whether mutating/remote-exec tools are enabled.
-///
-/// Fails closed (read-only by default): mutating tools require an explicit
-/// `--allow-writes` flag or `SUPERMGR_MCP_ALLOW_WRITES=1`, and
-/// `SUPERMGR_MCP_READ_ONLY` always forces read-only when set.
-fn writes_enabled() -> bool {
-    if std::env::var_os("SUPERMGR_MCP_READ_ONLY").is_some() {
-        return false;
-    }
-    if std::env::args().any(|a| a == "--allow-writes") {
-        return true;
-    }
-    matches!(
-        std::env::var("SUPERMGR_MCP_ALLOW_WRITES").as_deref(),
-        Ok("1" | "true" | "TRUE" | "yes" | "YES")
-    )
-}
-
-fn handle_tools_list(id: &Value, allow_writes: bool) -> JsonRpcResponse {
+fn handle_tools_list(id: &Value, policy: &McpPolicy) -> JsonRpcResponse {
     JsonRpcResponse {
         jsonrpc: "2.0".into(),
         id: id.clone(),
-        result: Some(json!({ "tools": supermgr_mcp::available_tools(allow_writes) })),
+        result: Some(json!({ "tools": available_tools_for_policy(policy) })),
         error: None,
     }
 }
@@ -108,21 +90,14 @@ async fn handle_tools_call(
     proxy: &DaemonClient,
     id: &Value,
     params: &Value,
-    allow_writes: bool,
+    policy: &McpPolicy,
 ) -> JsonRpcResponse {
     let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
     debug!("tool call: {tool_name}");
 
-    let result = if !allow_writes && !supermgr_mcp::is_read_only(tool_name) {
-        Err(
-            "This MCP session is read-only by default. Pass --allow-writes (or enable Allow changes in the console) to use mutating tools."
-                .into(),
-        )
-    } else {
-        execute_tool(proxy, tool_name, &arguments).await
-    };
+    let result = dispatch_with_policy(proxy, tool_name, &arguments, policy).await;
     match result {
         Ok(result) => JsonRpcResponse {
             jsonrpc: "2.0".into(),
@@ -206,13 +181,34 @@ async fn main() -> anyhow::Result<()> {
         };
 
         let id = req.id.clone().unwrap_or(Value::Null);
-        let allow_writes = writes_enabled();
+        let policy = match McpPolicy::from_args_and_env(std::env::args()) {
+            Ok(p) => p,
+            Err(e) => {
+                error!("invalid MCP policy configuration: {e}");
+                if req.id.is_none() {
+                    continue;
+                }
+                let resp = JsonRpcResponse {
+                    jsonrpc: "2.0".into(),
+                    id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32603,
+                        message: format!("invalid MCP policy configuration: {e}"),
+                    }),
+                };
+                let out = serde_json::to_string(&resp)?;
+                writeln!(stdout, "{out}")?;
+                stdout.flush()?;
+                continue;
+            }
+        };
 
         let response = match req.method.as_str() {
             "initialize" => handle_initialize(&id),
             "notifications/initialized" => continue, // notification, no response
-            "tools/list" => handle_tools_list(&id, allow_writes),
-            "tools/call" => handle_tools_call(&proxy, &id, &req.params, allow_writes).await,
+            "tools/list" => handle_tools_list(&id, &policy),
+            "tools/call" => handle_tools_call(&proxy, &id, &req.params, &policy).await,
             "ping" => {
                 if req.id.is_none() {
                     continue;
@@ -470,7 +466,8 @@ mod tests {
 
     #[test]
     fn tools_list_defaults_to_read_only_and_returns_all_when_writes_allowed() {
-        let ro = handle_tools_list(&json!("ro"), false);
+        let ro_policy = McpPolicy::default();
+        let ro = handle_tools_list(&json!("ro"), &ro_policy);
         assert_eq!(ro.id, json!("ro"));
         let ro_tools = ro.result.expect("result")["tools"]
             .as_array()
@@ -480,13 +477,30 @@ mod tests {
             .iter()
             .all(|t| supermgr_mcp::is_read_only(t["name"].as_str().unwrap_or(""))));
 
-        let rw = handle_tools_list(&json!("abc"), true);
+        let rw_policy = McpPolicy {
+            allow_writes: true,
+            ..McpPolicy::default()
+        };
+        let rw = handle_tools_list(&json!("abc"), &rw_policy);
         assert_eq!(rw.id, json!("abc"), "string ids round-trip too");
         let tools = rw.result.expect("result")["tools"]
             .as_array()
             .expect("tools array")
             .len();
         assert_eq!(tools, advertised_tool_names().len());
+
+        let scoped_policy = McpPolicy {
+            allow_writes: true,
+            allowed_tools: Some(["ssh_execute".to_owned()].into()),
+            ..McpPolicy::default()
+        };
+        let scoped = handle_tools_list(&json!("scoped"), &scoped_policy);
+        let scoped_tools = scoped.result.expect("result")["tools"]
+            .as_array()
+            .expect("tools array")
+            .clone();
+        assert!(scoped_tools.iter().any(|t| t["name"] == "ssh_execute"));
+        assert!(!scoped_tools.iter().any(|t| t["name"] == "add_host"));
     }
 
     // -- JSON-RPC framing ---------------------------------------------------

@@ -182,6 +182,34 @@ enum VPNKeychain {
         }
     }
 
+    /// Data Protection Keychain account wrapping `supermgrd-mac`'s `secrets.json`
+    /// (`AES-256-GCM` v2 envelope).
+    static let engineSecretsMasterKeyAccount = "engine/secrets-master-key-v1"
+
+    /// Load or create the 32-byte `AES-256-GCM` master key for the engine's
+    /// on-disk `secrets.json` inside the Data Protection Keychain.
+    static func getOrCreateEngineMasterKey() throws -> Data {
+        do {
+            let existing = try getData(account: engineSecretsMasterKeyAccount)
+            guard existing.count == 32 else {
+                throw KeychainError.osStatus(errSecDecode, "engine master key length \(existing.count)")
+            }
+            return existing
+        } catch let KeychainError.osStatus(status, _) where status == errSecItemNotFound {
+            var bytes = [UInt8](repeating: 0, count: 32)
+            let rngStatus = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+            guard rngStatus == errSecSuccess else {
+                throw KeychainError.osStatus(rngStatus, "SecRandomCopyBytes")
+            }
+            let fresh = Data(bytes)
+            try set(fresh, account: engineSecretsMasterKeyAccount)
+            guard try getData(account: engineSecretsMasterKeyAccount) == fresh else {
+                throw KeychainError.osStatus(errSecDecode, "engine master key readback")
+            }
+            return fresh
+        }
+    }
+
     /// Copy every stored entry from one profile id to another.
     ///
     /// Used by Duplicate. The daemon can only clone what lives in its

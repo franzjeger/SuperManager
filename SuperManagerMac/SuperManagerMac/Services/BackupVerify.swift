@@ -1,21 +1,7 @@
 import Foundation
 
-/// Dress rehearsal for a backup archive.
-///
-/// The point is to find out that an archive is broken on the day it is
-/// *taken*, not the day it is needed. `verify` extracts the archive into
-/// a private temp directory and runs the checks a restore would care
-/// about, without touching the live data directory at all.
-///
-/// The checks are deliberately restore-shaped rather than exhaustive:
-/// does the tar extract, are the stores parseable, and does every secret
-/// a profile references actually exist in the archived secret store.
-/// That last one is the check with teeth — this codebase has already
-/// shipped delete paths that leaked secrets and enrolments with empty
-/// args, so "the reference and the referent are both present" is exactly
-/// the invariant worth rehearsing. (Keychain-held credentials — IKEv2,
-/// OpenVPN/Azure — are expected to be absent and are NOT flagged; the
-/// archive never contains them, see `Backup`'s doc.)
+/// Dress rehearsal for a backup archive (both `SMBKUP01` encrypted archives
+/// and legacy `.tar.gz` archives).
 enum BackupVerify {
 
     struct Check: Identifiable {
@@ -36,10 +22,8 @@ enum BackupVerify {
         }
     }
 
-    /// Extract `archive` to a temp dir and inspect it. Blocking; call it
-    /// off the main actor. The temp dir is removed before returning —
-    /// including on throw — so extracted secrets never outlive the call.
-    static func verify(archive: URL) -> Report {
+    /// Extract `archive` to a private `0700` temp dir and inspect it.
+    static func verify(archive: URL, password: String? = nil) -> Report {
         let fm = FileManager.default
         let scratch = fm.temporaryDirectory
             .appendingPathComponent("supermgr-verify-\(UUID().uuidString)", isDirectory: true)
@@ -54,18 +38,46 @@ enum BackupVerify {
         defer { try? fm.removeItem(at: scratch) }
 
         var checks: [Check] = []
+        let extractedDir = scratch.appendingPathComponent("extracted", isDirectory: true)
+        try? fm.createDirectory(at: extractedDir, withIntermediateDirectories: true,
+                                attributes: [.posixPermissions: 0o700])
+
+        let tarInput: URL
+        if Backup.isEncryptedArchive(archive) {
+            guard let pw = password, !pw.isEmpty else {
+                return Report(checks: [Check(
+                    title: "Decrypt archive", status: .fail,
+                    detail: Backup.BackupError.passwordRequired.localizedDescription)])
+            }
+            do {
+                let raw = try Data(contentsOf: archive)
+                let plainTar = try Backup.openArchive(raw, password: pw)
+                let tmpTar = scratch.appendingPathComponent("decrypted.tar.gz")
+                try plainTar.write(to: tmpTar, options: [.atomic])
+                tarInput = tmpTar
+                checks.append(Check(
+                    title: "Decrypt archive", status: .pass,
+                    detail: "AES-256-GCM authentication and decryption succeeded"))
+            } catch {
+                return Report(checks: [Check(
+                    title: "Decrypt archive", status: .fail,
+                    detail: error.localizedDescription)])
+            }
+        } else {
+            tarInput = archive
+        }
 
         // 1. Does the archive extract at all?
         let tar = Process()
         tar.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-        tar.arguments = ["-xzf", archive.path, "-C", scratch.path]
+        tar.arguments = ["-xzf", tarInput.path, "-C", extractedDir.path]
         let stderr = Pipe()
         tar.standardError = stderr
         do {
             try tar.run()
             tar.waitUntilExit()
         } catch {
-            return Report(checks: [Check(
+            return Report(checks: checks + [Check(
                 title: "Extract archive", status: .fail,
                 detail: error.localizedDescription)])
         }
@@ -73,28 +85,49 @@ enum BackupVerify {
             let msg = String(
                 data: stderr.fileHandleForReading.readDataToEndOfFile(),
                 encoding: .utf8) ?? "unknown"
-            return Report(checks: [Check(
+            return Report(checks: checks + [Check(
                 title: "Extract archive", status: .fail,
                 detail: "tar exited \(tar.terminationStatus): \(msg.trimmingCharacters(in: .whitespacesAndNewlines))")])
         }
         checks.append(Check(title: "Extract archive", status: .pass,
                             detail: "tar extracted cleanly"))
 
-        checks.append(contentsOf: inspect(extracted: scratch))
+        checks.append(contentsOf: inspect(extracted: extractedDir))
         return Report(checks: checks)
     }
 
     /// The content checks, split from the tar plumbing so tests can run
     /// them against a plain directory without building an archive first.
-    static func inspect(extracted dir: URL) -> [Check] {
+    static func inspect(extracted dir: URL, masterKey: Data? = nil) -> [Check] {
         let fm = FileManager.default
         var checks: [Check] = []
 
-        // 2. Secret store parses, and how big is it.
+        // 2. Secret store parses (plain JSON map or AES-256-GCM v2 envelope).
         let secretsURL = dir.appendingPathComponent("secrets.json")
         var secrets: [String: String] = [:]
+        var canCrossReferenceSecrets = true
         if let data = fm.contents(atPath: secretsURL.path) {
-            if let parsed = try? JSONDecoder().decode([String: String].self, from: data) {
+            if let env = try? JSONDecoder().decode(Backup.SecretsEnvelopeV2.self, from: data),
+               env.version == 2, env.cipher == "aes-256-gcm" {
+                let resolvedKey = masterKey ?? (try? VPNKeychain.getData(account: VPNKeychain.engineSecretsMasterKeyAccount))
+                if let unwrapped = try? Backup.unwrapSecretsJsonIfNeeded(data, masterKey: resolvedKey),
+                   let parsed = try? JSONDecoder().decode([String: String].self, from: unwrapped) {
+                    secrets = parsed
+                    checks.append(Check(
+                        title: "Secret store", status: .pass,
+                        detail: "secrets.json (AES-256-GCM v2) decrypted — \(parsed.count) entries"))
+                } else if Data(base64Encoded: env.nonce)?.count == 12,
+                          let ct = Data(base64Encoded: env.ciphertext), ct.count >= 16 {
+                    canCrossReferenceSecrets = false
+                    checks.append(Check(
+                        title: "Secret store", status: .warn,
+                        detail: "secrets.json is wrapped with another Mac's Keychain key; contents not decrypted here"))
+                } else {
+                    checks.append(Check(
+                        title: "Secret store", status: .fail,
+                        detail: "secrets.json v2 envelope is malformed"))
+                }
+            } else if let parsed = try? JSONDecoder().decode([String: String].self, from: data) {
                 secrets = parsed
                 checks.append(Check(
                     title: "Secret store", status: .pass,
@@ -105,8 +138,6 @@ enum BackupVerify {
                     detail: "secrets.json exists but does not parse as a string map"))
             }
         } else {
-            // Legitimate on a machine that never stored a secret, but worth
-            // a warning since a restore of THIS archive silently has none.
             checks.append(Check(
                 title: "Secret store", status: .warn,
                 detail: "no secrets.json in the archive"))
@@ -137,30 +168,25 @@ enum BackupVerify {
                 detail: "unreadable or empty: \(unreadable.joined(separator: ", "))"))
         }
 
-        // 4. The check with teeth: every daemon-store secret a profile
-        // references must exist in the archived store. Keychain-held
-        // labels (password/psk/ovpn-*) are expected to be absent on
-        // macOS and are not flagged — only labels the daemon store OWNS
-        // (WireGuard key material) count as missing.
-        var missing: [String] = []
-        for (profileId, text) in profileTexts {
-            for label in referencedLabels(inProfileToml: text)
-            where daemonStoreOwns(label: label) && secrets[label] == nil {
-                missing.append("\(profileId.prefix(8)): \(label)")
+        // 4. Every daemon-store secret a profile references must exist in the archived store.
+        if canCrossReferenceSecrets && !profileTexts.isEmpty {
+            var missing: [String] = []
+            for (profileId, text) in profileTexts {
+                for label in referencedLabels(inProfileToml: text)
+                where daemonStoreOwns(label: label) && secrets[label] == nil {
+                    missing.append("\(profileId.prefix(8)): \(label)")
+                }
             }
-        }
-        if profileTexts.isEmpty {
-            // Nothing to cross-reference; say nothing rather than a
-            // vacuous pass.
-        } else if missing.isEmpty {
-            checks.append(Check(
-                title: "Secret cross-reference", status: .pass,
-                detail: "every daemon-store secret referenced by a profile is present"))
-        } else {
-            checks.append(Check(
-                title: "Secret cross-reference", status: .fail,
-                detail: "referenced but absent — a restore breaks these: "
-                    + missing.sorted().joined(separator: "; ")))
+            if missing.isEmpty {
+                checks.append(Check(
+                    title: "Secret cross-reference", status: .pass,
+                    detail: "every daemon-store secret referenced by a profile is present"))
+            } else {
+                checks.append(Check(
+                    title: "Secret cross-reference", status: .fail,
+                    detail: "referenced but absent — a restore breaks these: "
+                        + missing.sorted().joined(separator: "; ")))
+            }
         }
 
         // 5. The .ovpn files OpenVPN profiles point at.
@@ -181,10 +207,6 @@ enum BackupVerify {
         return checks
     }
 
-    /// Secret labels referenced from a profile TOML. The daemon writes
-    /// refs as quoted strings like `"vpn/<uuid>/wg-private-key"`; keying
-    /// on the `vpn/` prefix inside quotes keeps this independent of
-    /// which field name carries the ref.
     static func referencedLabels(inProfileToml text: String) -> [String] {
         var labels: [String] = []
         var rest = Substring(text)
@@ -197,10 +219,6 @@ enum BackupVerify {
         return labels
     }
 
-    /// Which referenced labels live in the daemon's file store on macOS
-    /// (as opposed to the Keychain, which the GUI owns). Must stay in
-    /// step with where the engine actually mints secrets — see
-    /// `handlers/vpn.rs`.
     static func daemonStoreOwns(label: String) -> Bool {
         label.contains("/wg-private-key") || label.contains("/wg-psk-")
     }

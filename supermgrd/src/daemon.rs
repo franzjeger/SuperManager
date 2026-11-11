@@ -4299,12 +4299,28 @@ impl DaemonService {
             .map_err(|e| fdo::Error::Failed(format!("SSH connection failed: {e}")))?;
 
         // Use interactive shell — each CLI line sent separately, waiting
-        // for the FortiGate prompt between each.
+        // for the FortiGate prompt between each. Provision a dedicated
+        // read-only accprofile instead of granting super_admin.
         let api_user_owned = api_user.to_owned();
         let cmd_lines: Vec<String> = vec![
+            "config system accprofile".into(),
+            "edit \"supermgr_ro\"".into(),
+            "set secfabgrp read".into(),
+            "set ftviewgrp read".into(),
+            "set authgrp read".into(),
+            "set sysgrp read".into(),
+            "set netgrp read".into(),
+            "set loggrp read".into(),
+            "set fwgrp read".into(),
+            "set vpngrp read".into(),
+            "set utmgrp read".into(),
+            "set wanoptgrp read".into(),
+            "set wifi read".into(),
+            "next".into(),
+            "end".into(),
             "config system api-user".into(),
             format!("edit \"{api_user_owned}\""),
-            "set accprofile \"super_admin\"".into(),
+            "set accprofile \"supermgr_ro\"".into(),
             "set vdom \"root\"".into(),
             "next".into(),
             "end".into(),

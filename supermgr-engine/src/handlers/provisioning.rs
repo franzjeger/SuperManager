@@ -147,17 +147,29 @@ impl EngineServer {
             Ok(id) => id,
             Err(r) => return r,
         };
-        let backup_path = match params.get("backup_path").and_then(|v| v.as_str()) {
-            Some(s) => s.to_owned(),
-            None => {
+        let deployment_id = match params.get("deployment_id").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.trim().to_owned(),
+            _ => {
                 return Response::err(
                     id,
                     protocol::INVALID_PARAMS,
-                    "missing backup_path".to_owned(),
+                    "missing deployment_id".to_owned(),
                 )
             }
         };
-        match crate::provisioning::rollback(&self.state, &self.secrets, host_id, &backup_path).await
+        if let Err(e) =
+            supermgr_core::sanitize::validate_safe_ident(&deployment_id, "deployment_id")
+        {
+            return Response::err(id, protocol::INVALID_PARAMS, e);
+        }
+        match crate::provisioning::rollback(
+            &self.state,
+            &self.secrets,
+            &self.plans,
+            host_id,
+            &deployment_id,
+        )
+        .await
         {
             Ok(record) => match serde_json::to_value(&record) {
                 Ok(v) => Response::ok(id, v),

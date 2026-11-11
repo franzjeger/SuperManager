@@ -482,6 +482,30 @@ impl SshSession {
         inputs: &[ShellInput<'_>],
         timeout_secs: u64,
     ) -> Result<String, SshError> {
+        self.shell_interact_checked(inputs, timeout_secs, false)
+            .await
+    }
+
+    /// Like [`SshSession::shell_interact`], except each `Command` response is
+    /// inspected before typing the next input; if the device outputs a CLI
+    /// error (`Command fail` or `Command parse error`), the push aborts
+    /// immediately with `SshError::ShellInterrupted` so subsequent lines are
+    /// never typed into a wrong configuration context.
+    pub async fn shell_interact_abort_on_error(
+        &self,
+        inputs: &[ShellInput<'_>],
+        timeout_secs: u64,
+    ) -> Result<String, SshError> {
+        self.shell_interact_checked(inputs, timeout_secs, true)
+            .await
+    }
+
+    async fn shell_interact_checked(
+        &self,
+        inputs: &[ShellInput<'_>],
+        timeout_secs: u64,
+        abort_on_cli_error: bool,
+    ) -> Result<String, SshError> {
         let mut channel =
             self.handle
                 .channel_open_session()
@@ -509,7 +533,8 @@ impl SshSession {
             })?;
 
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-        let result = interact(&mut channel, inputs, deadline, timeout_secs).await;
+        let result =
+            interact(&mut channel, inputs, deadline, timeout_secs, abort_on_cli_error).await;
         let _ = channel.close().await;
         result
     }
@@ -739,6 +764,7 @@ async fn interact<C: ShellChannel>(
     inputs: &[ShellInput<'_>],
     deadline: tokio::time::Instant,
     timeout_secs: u64,
+    abort_on_cli_error: bool,
 ) -> Result<String, SshError> {
     let total = inputs.len();
     let stop = |acknowledged: usize, reason: String, output: &[u8]| SshError::ShellInterrupted {
@@ -783,6 +809,17 @@ async fn interact<C: ShellChannel>(
             Ok(prompt) => prompt,
             Err(reason) => return Err(stop(acknowledged, reason, &output)),
         };
+        if abort_on_cli_error && !secret {
+            let chunk = String::from_utf8_lossy(&output[start..]);
+            let reply = chunk.split_once('\n').map_or("", |(_, rest)| rest);
+            if let Some(err_line) = reply
+                .lines()
+                .map(str::trim)
+                .find(|l| l.contains("Command fail") || l.contains("Command parse error"))
+            {
+                return Err(stop(acknowledged, err_line.to_owned(), &output));
+            }
+        }
         acknowledged += 1;
     }
     Ok(String::from_utf8_lossy(&output).into_owned())
@@ -856,8 +893,36 @@ mod shell_tests {
             typed: Vec::new(),
         };
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        let result = interact(&mut device, inputs, deadline, 5).await;
+        let result = interact(&mut device, inputs, deadline, 5, false).await;
         (result, device.typed)
+    }
+
+    #[tokio::test]
+    async fn a_fortios_cli_error_aborts_immediately_when_requested() {
+        let mut device = Device {
+            outputs: VecDeque::from([
+                says("FGT60F # "),
+                says("config system interface\r\nFGT60F (interface) # "),
+                says("set ip bad\r\nnode_check_object fail! for ip bad\r\nCommand parse error before 'bad'\r\nCommand fail. Return code -61\r\nFGT60F (interface) # "),
+                says("end\r\nFGT60F # "),
+            ]),
+            typed: Vec::new(),
+        };
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let result = interact(
+            &mut device,
+            &[
+                ShellInput::Command("config system interface"),
+                ShellInput::Command("set ip bad"),
+                ShellInput::Command("end"),
+            ],
+            deadline,
+            5,
+            true,
+        )
+        .await;
+        assert_eq!(interrupted_after(&result), Some(1), "{result:?}");
+        assert_eq!(device.typed, ["config system interface", "set ip bad"]);
     }
 
     fn interrupted_after(result: &Result<String, SshError>) -> Option<usize> {

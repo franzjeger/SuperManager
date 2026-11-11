@@ -190,11 +190,11 @@ extension AppState {
     }
 
     @discardableResult
-    func rollbackDeployment(hostId: String, backupPath: String) async -> Deployment? {
+    func rollbackDeployment(hostId: String, deploymentId: String) async -> Deployment? {
         do {
             let result: Deployment = try await client.call(
                 "provisioning_rollback",
-                params: ["host_id": hostId, "backup_path": backupPath]
+                params: ["host_id": hostId, "deployment_id": deploymentId]
             )
             await loadDeploymentHistory(hostId: hostId)
             return result

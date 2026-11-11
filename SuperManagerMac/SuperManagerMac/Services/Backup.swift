@@ -1,67 +1,38 @@
+import CommonCrypto
+import CryptoKit
 import Foundation
+import Security
 
-/// Full-config backup / restore.
+/// Full-config backup / restore with authenticated `AES-256-GCM` archive encryption.
 ///
-/// Backs up the daemon's data dir
-/// (`~/Library/Application Support/SuperManager/`) as a single
-/// `tar -czf` archive. That covers:
-///   • SSH hosts (`ssh/hosts/*.toml`)
-///   • SSH key metadata (`ssh/keys/*.toml`) — note: private key
-///     material is in here, since `ssh-keygen` produces files we
-///     persist alongside metadata. This is intentional — restoring on
-///     a new Mac without the private keys would leave hosts orphaned.
-///   • VPN profile metadata (`profiles/*.toml`)
-///   • Daemon secret store (`secrets.json`, mode 0600, plus any
-///     `secrets.json.migrated` left by an earlier store migration).
-///     On macOS the daemon runs the file-backed store — see the
-///     comment at `supermgrd-mac`'s `FileSecretStore::default_path()`
-///     for why it can't hold the keychain-access-groups entitlement —
-///     so this file carries, as plain base64, everything the engine
-///     calls `secrets.store()` on: SSH private keys and host passwords
-///     (`handlers/ssh.rs`), FortiGate API tokens (`handlers/ssh.rs`
-///     and `fortigate.rs`), UniFi controller passwords
-///     (`handlers/unifi.rs`), and **WireGuard private keys and peer
-///     PSKs** (`handlers/vpn.rs`).
-///   • `.ovpn` config files (`ovpn/<profile-id>.ovpn`), which carry
-///     inline `<key>`, `<cert>`, `<ca>` and `<tls-auth>` blocks — an
-///     embedded client private key is secret material in its own right.
-///   • Notification config (`notify.toml`): Slack/Mattermost webhook
-///     URLs, PagerDuty routing keys, OpsGenie API keys.
-///   • Audit log (`ssh-audit.log`), `known_hosts.json`, and whatever
-///     else the daemon has written under the data dir.
+/// Exports `~/Library/Application Support/SuperManager/` into a temporary
+/// `.tar.gz` archive (unwrapping `secrets.json` v2 inside a private `0700`
+/// staging copy using the Mac's Data Protection Keychain wrapping key so the
+/// archive is self-contained across Macs), and seals the `.tar.gz` with
+/// `PBKDF2-HMAC-SHA256` + `AES-256-GCM` under a user-chosen backup passphrase.
 ///
-/// That list is illustrative, not exhaustive, and enumerating it has
-/// already gone stale twice. The invariant is the thing to remember:
-/// `export` tars the ENTIRE data directory with no filter, so anything
-/// the daemon writes there is in the archive by construction. Treat the
-/// file as being exactly as sensitive as the directory.
+/// Binary format (`SMBKUP01`):
+///   • `0..<8`   — ASCII magic `"SMBKUP01"`
+///   • `8..<12`  — Big-endian `UInt32` PBKDF2 iteration count
+///   • `12..<28` — 16-byte random PBKDF2 salt
+///   • `28..<40` — 12-byte random AES-GCM nonce
+///   • `40...`   — AES-256-GCM ciphertext + 16-byte authentication tag
+///                 (with bytes `0..<28` bound as AAD)
 ///
-/// What's *not* in the archive — everything the GUI routes through
-/// `VPNKeychain`/`MasterPassword` into the macOS Data Protection
-/// Keychain, which is scoped to this Mac's hardware and so can't be
-/// exported without breaking the security model (it would refuse to
-/// import on another Mac anyway):
-///   • **IKEv2 credentials** — EAP passwords and PSKs.
-///   • **OpenVPN and Azure VPN credentials** — `vpn/<id>/ovpn-username`
-///     and `vpn/<id>/ovpn-password`, read back at connect time in
-///     `AppState+VPN.openVPNConnect`. Note the engine mints matching
-///     `SecretRef` labels for these, but on macOS the GUI supplies the
-///     values over RPC, so nothing lands in the file store.
-///   • **Master-password hash**.
-///
-/// Restoring on a new Mac means re-entering each of those.
-///
-/// WireGuard is deliberately NOT in that list: its keys are minted by
-/// the engine straight into the secret store above, so they travel
-/// with the archive.
-///
-/// Because the data dir contains private SSH keys and possibly
-/// password material, the produced archive is just as sensitive as
-/// the original directory. We preserve mode 0600 on the file.
-@MainActor
+/// Legacy unencrypted `.tar.gz` archives remain supported by `restore` and
+/// `BackupVerify.verify` so older backups can still be recovered.
 enum Backup {
+    static let encryptedMagic = Data("SMBKUP01".utf8)
+    static let defaultIterations: UInt32 = 600_000
+    static let minPasswordLength = 8
+    private static let secretsEnvelopeAAD = Data("supermanager-secrets-v2".utf8)
+
     enum BackupError: Error, LocalizedError {
         case dataDirMissing
+        case weakPassword
+        case passwordRequired
+        case invalidPasswordOrCorruptArchive
+        case cryptoFailure(String)
         case tarFailed(Int32, String)
         case restoreFailed(String)
 
@@ -69,6 +40,14 @@ enum Backup {
             switch self {
             case .dataDirMissing:
                 return "SuperManager's data directory doesn't exist yet — there's nothing to back up."
+            case .weakPassword:
+                return "Backup passphrase must be at least \(Backup.minPasswordLength) characters."
+            case .passwordRequired:
+                return "This backup archive is encrypted and requires its passphrase."
+            case .invalidPasswordOrCorruptArchive:
+                return "Incorrect backup passphrase or corrupted archive."
+            case .cryptoFailure(let detail):
+                return "Backup encryption error: \(detail)"
             case .tarFailed(let code, let msg):
                 return "tar exited with code \(code): \(msg)"
             case .restoreFailed(let msg):
@@ -77,43 +56,204 @@ enum Backup {
         }
     }
 
-    /// Path to SuperManager's data directory. Single source of truth —
-    /// matches `supermgr_engine::secrets::default_data_dir()` on macOS.
+    struct SecretsEnvelopeV2: Decodable {
+        let version: Int
+        let cipher: String
+        let nonce: String
+        let ciphertext: String
+    }
+
+    /// Path to SuperManager's data directory.
     static var dataDir: URL {
         let support = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return support.appendingPathComponent("SuperManager", isDirectory: true)
     }
 
-    /// Suggested filename for a fresh backup, including a timestamp so
-    /// successive backups don't overwrite each other when the user
-    /// accepts the default name.
+    /// Suggested filename for a fresh encrypted backup.
     static func suggestedFilename() -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd-HHmmss"
-        return "supermanager-backup-\(formatter.string(from: Date())).tar.gz"
+        return "supermanager-backup-\(formatter.string(from: Date())).tar.gz.enc"
     }
 
-    /// Create a `.tar.gz` archive of the data directory at `destination`.
-    /// `destination` must include a filename (use `suggestedFilename()`
-    /// or whatever the user picked from `NSSavePanel`).
-    static func export(to destination: URL) throws {
-        let dir = dataDir
-        guard FileManager.default.fileExists(atPath: dir.path) else {
+    /// Check whether `archive` starts with the `SMBKUP01` encrypted header.
+    static func isEncryptedArchive(_ archive: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: archive) else { return false }
+        defer { try? handle.close() }
+        guard let prefix = try? handle.read(upToCount: encryptedMagic.count) else { return false }
+        return prefix == encryptedMagic
+    }
+
+    /// Derive a 256-bit key from `password` and `salt` via `PBKDF2-HMAC-SHA256`.
+    static func deriveKey(password: String, salt: Data, iterations: UInt32) throws -> SymmetricKey {
+        guard iterations >= 1_000 else {
+            throw BackupError.cryptoFailure("PBKDF2 iteration count too low")
+        }
+        let pwBytes = Array(password.utf8)
+        var derived = [UInt8](repeating: 0, count: 32)
+        let status = salt.withUnsafeBytes { saltRaw -> CCCryptorStatus in
+            guard let saltBase = saltRaw.bindMemory(to: UInt8.self).baseAddress else {
+                return CCCryptorStatus(kCCParamError)
+            }
+            return CCKeyDerivationPBKDF(
+                CCPBKDFAlgorithm(kCCPBKDF2),
+                pwBytes,
+                pwBytes.count,
+                saltBase,
+                salt.count,
+                CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256),
+                iterations,
+                &derived,
+                derived.count
+            )
+        }
+        guard status == kCCSuccess else {
+            throw BackupError.cryptoFailure("CCKeyDerivationPBKDF status \(status)")
+        }
+        return SymmetricKey(data: Data(derived))
+    }
+
+    /// Seal raw `.tar.gz` bytes into an `SMBKUP01` `AES-256-GCM` archive.
+    static func sealArchive(
+        _ plaintext: Data,
+        password: String,
+        iterations: UInt32 = defaultIterations
+    ) throws -> Data {
+        guard password.count >= minPasswordLength else {
+            throw BackupError.weakPassword
+        }
+        var saltBytes = [UInt8](repeating: 0, count: 16)
+        guard SecRandomCopyBytes(kSecRandomDefault, saltBytes.count, &saltBytes) == errSecSuccess else {
+            throw BackupError.cryptoFailure("SecRandomCopyBytes salt failed")
+        }
+        var nonceBytes = [UInt8](repeating: 0, count: 12)
+        guard SecRandomCopyBytes(kSecRandomDefault, nonceBytes.count, &nonceBytes) == errSecSuccess else {
+            throw BackupError.cryptoFailure("SecRandomCopyBytes nonce failed")
+        }
+        let salt = Data(saltBytes)
+        var header = Data()
+        header.append(encryptedMagic)
+        var bigIter = iterations.bigEndian
+        withUnsafeBytes(of: &bigIter) { header.append(contentsOf: $0) }
+        header.append(salt)
+
+        let key = try deriveKey(password: password, salt: salt, iterations: iterations)
+        let nonce = try AES.GCM.Nonce(data: Data(nonceBytes))
+        let sealed = try AES.GCM.seal(plaintext, using: key, nonce: nonce, authenticating: header)
+
+        var out = Data()
+        out.reserveCapacity(header.count + 12 + sealed.ciphertext.count + sealed.tag.count)
+        out.append(header)
+        out.append(contentsOf: nonceBytes)
+        out.append(sealed.ciphertext)
+        out.append(sealed.tag)
+        return out
+    }
+
+    /// Open an `SMBKUP01` `AES-256-GCM` archive back to `.tar.gz` bytes.
+    static func openArchive(_ archiveData: Data, password: String) throws -> Data {
+        // Minimum: 8 magic + 4 iter + 16 salt + 12 nonce + 16 tag = 56 bytes.
+        guard archiveData.count >= 56,
+              archiveData.prefix(encryptedMagic.count) == encryptedMagic else {
+            throw BackupError.invalidPasswordOrCorruptArchive
+        }
+        let header = archiveData.subdata(in: 0..<28)
+        let iterSlice = archiveData.subdata(in: 8..<12)
+        let iterations = iterSlice.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+        guard (1_000...10_000_000).contains(iterations) else {
+            throw BackupError.invalidPasswordOrCorruptArchive
+        }
+        let salt = archiveData.subdata(in: 12..<28)
+        let nonceData = archiveData.subdata(in: 28..<40)
+        let body = archiveData.subdata(in: 40..<archiveData.count)
+        guard body.count >= 16 else {
+            throw BackupError.invalidPasswordOrCorruptArchive
+        }
+        let ciphertext = body.dropLast(16)
+        let tag = body.suffix(16)
+
+        let key = try deriveKey(password: password, salt: salt, iterations: iterations)
+        do {
+            let nonce = try AES.GCM.Nonce(data: nonceData)
+            let box = try AES.GCM.SealedBox(nonce: nonce, ciphertext: ciphertext, tag: tag)
+            return try AES.GCM.open(box, using: key, authenticating: header)
+        } catch {
+            throw BackupError.invalidPasswordOrCorruptArchive
+        }
+    }
+
+    /// Decrypt an engine `secrets.json` v2 envelope (`AES-256-GCM`) into its
+    /// inner `[String: String]` JSON bytes when `masterKey` is available.
+    /// Plain v1 JSON is returned unchanged.
+    static func unwrapSecretsJsonIfNeeded(_ data: Data, masterKey: Data?) throws -> Data {
+        guard let env = try? JSONDecoder().decode(SecretsEnvelopeV2.self, from: data) else {
+            return data
+        }
+        guard env.version == 2, env.cipher == "aes-256-gcm" else {
+            throw BackupError.cryptoFailure("Unsupported secrets.json envelope v\(env.version) (\(env.cipher))")
+        }
+        guard let keyData = masterKey, keyData.count == 32 else {
+            throw BackupError.cryptoFailure("Keychain wrapping key unavailable to decrypt secrets.json")
+        }
+        guard let nonceBytes = Data(base64Encoded: env.nonce), nonceBytes.count == 12,
+              let ctAndTag = Data(base64Encoded: env.ciphertext), ctAndTag.count >= 16 else {
+            throw BackupError.cryptoFailure("Malformed secrets.json v2 envelope")
+        }
+        let box = try AES.GCM.SealedBox(
+            nonce: try AES.GCM.Nonce(data: nonceBytes),
+            ciphertext: ctAndTag.dropLast(16),
+            tag: ctAndTag.suffix(16)
+        )
+        return try AES.GCM.open(
+            box,
+            using: SymmetricKey(data: keyData),
+            authenticating: secretsEnvelopeAAD
+        )
+    }
+
+    /// Export `sourceDir` (defaults to `dataDir`) as a passphrase-encrypted
+    /// `SMBKUP01` archive at `destination` (`0600`).
+    static func export(
+        to destination: URL,
+        password: String,
+        iterations: UInt32 = defaultIterations,
+        sourceDir: URL? = nil,
+        masterKey: Data? = nil
+    ) throws {
+        guard password.count >= minPasswordLength else {
+            throw BackupError.weakPassword
+        }
+        let fm = FileManager.default
+        let dir = sourceDir ?? dataDir
+        guard fm.fileExists(atPath: dir.path) else {
             throw BackupError.dataDirMissing
         }
 
-        // tar's `-C <dir>` followed by `.` means "archive the contents of
-        // <dir>, with paths relative to <dir>" — restoring then drops
-        // them straight back into the data dir without an extra level
-        // of nesting.
+        let work = fm.temporaryDirectory
+            .appendingPathComponent("supermgr-export-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: work, withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: 0o700])
+        defer { try? fm.removeItem(at: work) }
+
+        let staging = work.appendingPathComponent("staging", isDirectory: true)
+        try fm.copyItem(at: dir, to: staging)
+        // Remove Unix socket or lock files that cannot/should not be archived.
+        try? fm.removeItem(at: staging.appendingPathComponent("supermgrd.sock"))
+        try? fm.removeItem(at: staging.appendingPathComponent("secrets.lock"))
+
+        let stagedSecrets = staging.appendingPathComponent("secrets.json")
+        if let rawSecrets = try? Data(contentsOf: stagedSecrets) {
+            let resolvedKey = masterKey ?? (try? VPNKeychain.getData(account: VPNKeychain.engineSecretsMasterKeyAccount))
+            let unwrapped = try unwrapSecretsJsonIfNeeded(rawSecrets, masterKey: resolvedKey)
+            try unwrapped.write(to: stagedSecrets, options: [.atomic])
+            try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stagedSecrets.path)
+        }
+
+        let tempTar = work.appendingPathComponent("archive.tar.gz")
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-        process.arguments = [
-            "-czf", destination.path,
-            "-C", dir.path,
-            ".",
-        ]
+        process.arguments = ["-czf", tempTar.path, "-C", staging.path, "."]
         let stderr = Pipe()
         process.standardError = stderr
         try process.run()
@@ -125,36 +265,54 @@ enum Backup {
             throw BackupError.tarFailed(process.terminationStatus, errStr)
         }
 
-        // Tighten file mode — the archive contains private SSH keys.
-        try? FileManager.default.setAttributes(
-            [.posixPermissions: 0o600],
-            ofItemAtPath: destination.path
-        )
+        let tarBytes = try Data(contentsOf: tempTar)
+        let sealed = try sealArchive(tarBytes, password: password, iterations: iterations)
+        try sealed.write(to: destination, options: [.atomic])
+        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
     }
 
-    /// Restore a `.tar.gz` archive into the data directory.
-    ///
-    /// The user is responsible for stopping the running app + daemon
-    /// first; otherwise the daemon will keep stale state in memory and
-    /// won't see the restored files until restart. We document this in
-    /// the UI rather than silently killing the daemon.
-    ///
-    /// Backs up the existing data dir to
-    /// `<data_dir>.before-restore-<timestamp>` before extracting, so
-    /// a botched restore can be reverted with a `mv`.
-    static func restore(from archive: URL) throws {
-        let dir = dataDir
+    /// Restore an encrypted (`SMBKUP01`) or legacy `.tar.gz` archive into
+    /// `targetDir` (defaults to `dataDir`), verifying decryption BEFORE moving
+    /// the existing directory aside and rolling back automatically on tar failure.
+    static func restore(
+        from archive: URL,
+        password: String? = nil,
+        targetDir: URL? = nil
+    ) throws {
+        let fm = FileManager.default
+        let dir = targetDir ?? dataDir
 
-        // Quarantine the current data dir (never delete during restore;
-        // user might have overlooked something they wanted).
-        if FileManager.default.fileExists(atPath: dir.path) {
+        let work = fm.temporaryDirectory
+            .appendingPathComponent("supermgr-restore-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: work, withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: 0o700])
+        defer { try? fm.removeItem(at: work) }
+
+        let tarToExtract: URL
+        if isEncryptedArchive(archive) {
+            guard let pw = password, !pw.isEmpty else {
+                throw BackupError.passwordRequired
+            }
+            let sealed = try Data(contentsOf: archive)
+            let decrypted = try openArchive(sealed, password: pw)
+            let tempTar = work.appendingPathComponent("decrypted.tar.gz")
+            try decrypted.write(to: tempTar, options: [.atomic])
+            try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tempTar.path)
+            tarToExtract = tempTar
+        } else {
+            tarToExtract = archive
+        }
+
+        var quarantineURL: URL?
+        if fm.fileExists(atPath: dir.path) {
             let formatter = DateFormatter()
             formatter.dateFormat = "yyyy-MM-dd-HHmmss"
-            let backupName = "SuperManager.before-restore-\(formatter.string(from: Date()))"
+            let backupName = "SuperManager.before-restore-\(formatter.string(from: Date()))-\(UUID().uuidString.prefix(6))"
             let quarantine = dir.deletingLastPathComponent()
                 .appendingPathComponent(backupName, isDirectory: true)
             do {
-                try FileManager.default.moveItem(at: dir, to: quarantine)
+                try fm.moveItem(at: dir, to: quarantine)
+                quarantineURL = quarantine
             } catch {
                 throw BackupError.restoreFailed(
                     "Couldn't quarantine existing data dir: \(error.localizedDescription)"
@@ -162,12 +320,18 @@ enum Backup {
             }
         }
 
-        // Recreate the data dir, then extract into it.
+        let rollbackQuarantine = {
+            if let q = quarantineURL {
+                try? fm.removeItem(at: dir)
+                try? fm.moveItem(at: q, to: dir)
+            }
+        }
+
         do {
-            try FileManager.default.createDirectory(
-                at: dir, withIntermediateDirectories: true
-            )
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true,
+                                   attributes: [.posixPermissions: 0o700])
         } catch {
+            rollbackQuarantine()
             throw BackupError.restoreFailed(
                 "Couldn't create data dir: \(error.localizedDescription)"
             )
@@ -175,15 +339,13 @@ enum Backup {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-        process.arguments = [
-            "-xzf", archive.path,
-            "-C", dir.path,
-        ]
+        process.arguments = ["-xzf", tarToExtract.path, "-C", dir.path]
         let stderr = Pipe()
         process.standardError = stderr
         do {
             try process.run()
         } catch {
+            rollbackQuarantine()
             throw BackupError.restoreFailed("tar launch: \(error.localizedDescription)")
         }
         process.waitUntilExit()
@@ -191,6 +353,7 @@ enum Backup {
         if process.terminationStatus != 0 {
             let errBytes = stderr.fileHandleForReading.readDataToEndOfFile()
             let errStr = String(data: errBytes, encoding: .utf8) ?? "unknown"
+            rollbackQuarantine()
             throw BackupError.tarFailed(process.terminationStatus, errStr)
         }
     }

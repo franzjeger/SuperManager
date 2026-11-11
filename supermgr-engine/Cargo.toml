@@ -9,11 +9,13 @@ license     = "GPL-3.0-or-later"
 supermgr-core   = { path = "../supermgr-core" }
 
 anyhow          = { workspace = true }
+aes-gcm         = { version = "0.11", default-features = false, features = ["aes", "alloc", "zeroize"] }
 async-trait     = { workspace = true }
 base64          = { workspace = true }
 chrono          = { workspace = true }
 ipnet           = { workspace = true }
 native-tls      = "0.2"
+rand            = { workspace = true }
 reqwest         = { workspace = true }
 rsa             = { workspace = true }
 russh           = { workspace = true }

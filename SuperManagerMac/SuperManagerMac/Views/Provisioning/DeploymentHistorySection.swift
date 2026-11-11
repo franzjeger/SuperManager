@@ -288,12 +288,12 @@ struct DeploymentHistorySection: View {
 
     private func performRollback(_ deployment: Deployment) async {
         pendingRollback = nil
-        guard let backupPath = deployment.backupPath else { return }
+        guard deployment.backupPath != nil else { return }
         rollingBack = true
         defer { rollingBack = false }
         let result = await appState.rollbackDeployment(
             hostId: deployment.hostId,
-            backupPath: backupPath
+            deploymentId: deployment.id
         )
         if let result {
             statusBanner = result.status == .rolledBack

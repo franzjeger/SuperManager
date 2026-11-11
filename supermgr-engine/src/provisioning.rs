@@ -377,6 +377,135 @@ pub fn render(req: &RenderRequest) -> Result<RenderResult> {
     render_with_customer(&customer, site, &req.template_id, &req.extras)
 }
 
+fn reject_unsafe_template_strings(path: &str, value: &serde_json::Value) -> Result<()> {
+    match value {
+        serde_json::Value::String(s) => {
+            if s.chars().any(|c| c.is_control() || c == '"' || c == '\\') {
+                return Err(anyhow!(
+                    "{path} must not contain control characters, quotes, or backslashes"
+                ));
+            }
+            Ok(())
+        }
+        serde_json::Value::Array(items) => {
+            for (idx, item) in items.iter().enumerate() {
+                reject_unsafe_template_strings(&format!("{path}[{idx}]"), item)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                if k.chars().any(|c| c.is_control() || c == '"' || c == '\\') {
+                    return Err(anyhow!(
+                        "{path}.{k} key must not contain control characters, quotes, or backslashes"
+                    ));
+                }
+                reject_unsafe_template_strings(&format!("{path}.{k}"), v)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_wan_ip_spec(raw: &str, field: &str) -> Result<()> {
+    let trimmed = raw.trim();
+    if trimmed.parse::<ipnet::Ipv4Net>().is_ok() {
+        return Ok(());
+    }
+    let mut parts = trimmed.split_whitespace();
+    if let (Some(ip), Some(mask), None) = (parts.next(), parts.next(), parts.next()) {
+        if ip.parse::<std::net::Ipv4Addr>().is_ok() && mask.parse::<std::net::Ipv4Addr>().is_ok() {
+            return Ok(());
+        }
+    }
+    Err(anyhow!(
+        "{field} must be an IPv4 CIDR (e.g. 203.0.113.2/30) or '<ip> <netmask>'"
+    ))
+}
+
+fn validate_render_inputs(
+    customer: &Customer,
+    site: &Site,
+    extras: &serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    reject_unsafe_template_strings("customer", &serde_json::to_value(customer)?)?;
+    reject_unsafe_template_strings("site", &serde_json::to_value(site)?)?;
+    reject_unsafe_template_strings("extras", &serde_json::Value::Object(extras.clone()))?;
+
+    if !site.lan_base.trim().is_empty() {
+        site.lan_base
+            .trim()
+            .parse::<ipnet::Ipv4Net>()
+            .map_err(|e| anyhow!("site.lan_base '{}' is not a valid IPv4 CIDR: {e}", site.lan_base))?;
+    }
+    if site.wan_type == "static" || !site.wan_static_ip.trim().is_empty() {
+        validate_wan_ip_spec(&site.wan_static_ip, "site.wan_static_ip")?;
+    }
+    for (idx, vlan) in site.vlans.iter().enumerate() {
+        if !(1..=4094).contains(&vlan.id) {
+            return Err(anyhow!(
+                "site.vlans[{idx}].id ({}) must be between 1 and 4094",
+                vlan.id
+            ));
+        }
+        vlan.subnet
+            .trim()
+            .parse::<ipnet::Ipv4Net>()
+            .map_err(|e| anyhow!("site.vlans[{idx}].subnet '{}' is invalid: {e}", vlan.subnet))?;
+        if !vlan.purpose.is_empty()
+            && !vlan
+                .purpose
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+        {
+            return Err(anyhow!(
+                "site.vlans[{idx}].purpose '{}' may only contain [a-z0-9_-]",
+                vlan.purpose
+            ));
+        }
+    }
+
+    if let Some(ip) = extras.get("s2s_peer_ip").and_then(serde_json::Value::as_str) {
+        if !ip.trim().is_empty() {
+            ip.trim()
+                .parse::<std::net::Ipv4Addr>()
+                .map_err(|e| anyhow!("extras.s2s_peer_ip '{ip}' is not a valid IPv4 address: {e}"))?;
+        }
+    }
+    for cidr_key in ["s2s_peer_subnet", "wan2_static_ip"] {
+        if let Some(cidr) = extras.get(cidr_key).and_then(serde_json::Value::as_str) {
+            if !cidr.trim().is_empty() {
+                cidr.trim()
+                    .parse::<ipnet::Ipv4Net>()
+                    .map_err(|e| anyhow!("extras.{cidr_key} '{cidr}' is not a valid IPv4 CIDR: {e}"))?;
+            }
+        }
+    }
+    for host_key in ["backup_tftp_server", "radius_server_ip"] {
+        if let Some(h) = extras.get(host_key).and_then(serde_json::Value::as_str) {
+            let trimmed = h.trim();
+            if !trimmed.is_empty() {
+                if trimmed.contains('$') {
+                    return Err(anyhow!("extras.{host_key} must not contain '$'"));
+                }
+                supermgr_core::sanitize::validate_host_or_ip(trimmed)
+                    .map_err(|e| anyhow!("extras.{host_key}: {e}"))?;
+            }
+        }
+    }
+    for ident_key in ["controller_site", "vpn_admin_user"] {
+        if let Some(id) = extras.get(ident_key).and_then(serde_json::Value::as_str) {
+            let trimmed = id.trim();
+            if !trimmed.is_empty() {
+                supermgr_core::sanitize::validate_safe_ident(trimmed, ident_key)
+                    .map_err(|e| anyhow!("{e}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Render and return the rendered text directly without re-fetching
 /// the customer (used by future pre-flight / diff paths). Public
 /// for callers that already have a customer object loaded.
@@ -386,6 +515,7 @@ pub fn render_with_customer(
     template_id: &str,
     extras: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<RenderResult> {
+    validate_render_inputs(customer, site, extras)?;
     validate_template_secrets(template_id, site, extras)?;
     let body = template_body(template_id)?;
     let mut tera = Tera::default();
@@ -890,15 +1020,58 @@ fn deployments_dir(host_id: &str) -> Result<PathBuf> {
     Ok(p)
 }
 
+fn ensure_private_dir(dir: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("create {dir:?}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("chmod 0700 {dir:?}"))?;
+    }
+    Ok(())
+}
+
+/// Redact inline passphrases/PSKs before persisting deployment history JSON.
+pub(crate) fn redact_rendered_secrets(rendered: &str) -> String {
+    let mut out = String::with_capacity(rendered.len());
+    for line in rendered.lines() {
+        let trimmed = line.trim_start();
+        let indent = &line[..line.len() - trimmed.len()];
+        let redacted_forti = ["set passwd ", "set password ", "set psksecret ", "set secret "]
+            .iter()
+            .find_map(|prefix| trimmed.strip_prefix(prefix).map(|_| *prefix));
+        if let Some(prefix) = redacted_forti {
+            out.push_str(indent);
+            out.push_str(prefix);
+            out.push_str("\"<redacted>\"\n");
+        } else if trimmed.starts_with("\"x_passphrase\":") {
+            let comma = if trimmed.trim_end().ends_with(',') { "," } else { "" };
+            out.push_str(indent);
+            out.push_str("\"x_passphrase\": \"<redacted>\"");
+            out.push_str(comma);
+            out.push('\n');
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !rendered.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 fn save_deployment(record: &Deployment) -> Result<()> {
     supermgr_core::sanitize::validate_safe_ident(&record.id, "deployment_id")
         .map_err(|e| anyhow!("{e}"))?;
     let dir = deployments_dir(&record.host_id)?;
-    std::fs::create_dir_all(&dir).context("create deployments dir")?;
+    ensure_private_dir(&dir)?;
     let mut path = dir;
     path.push(format!("{}.json", record.id));
-    let bytes = serde_json::to_vec_pretty(record)?;
-    std::fs::write(&path, bytes).with_context(|| format!("write {path:?}"))?;
+    let mut sanitized = record.clone();
+    sanitized.rendered_config = redact_rendered_secrets(&record.rendered_config);
+    let bytes = serde_json::to_vec_pretty(&sanitized)?;
+    crate::state::write_private_atomic(&path, &bytes).with_context(|| format!("write {path:?}"))?;
     Ok(())
 }
 
@@ -963,11 +1136,12 @@ pub async fn pre_deploy_backup(
     let _ = session.disconnect().await;
 
     let dir = backups_dir(&host_id.simple().to_string())?;
-    std::fs::create_dir_all(&dir).context("create backups dir")?;
+    ensure_private_dir(&dir)?;
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S");
     let mut path = dir;
     path.push(format!("backup-{timestamp}.conf"));
-    std::fs::write(&path, cfg.as_bytes()).with_context(|| format!("write {path:?}"))?;
+    crate::state::write_private_atomic(&path, cfg.as_bytes())
+        .with_context(|| format!("write {path:?}"))?;
     let path_str = path.to_string_lossy().into_owned();
     tracing::info!("pre_deploy_backup: saved {path_str} ({} bytes)", cfg.len());
     Ok(path_str)
@@ -1202,17 +1376,15 @@ pub async fn deploy(
         }
     };
 
-    // One shell_interact for the whole batch, 120 s for the whole push.
-    // This is conservative; FortiOS acks each line in typically <50ms.
+    // One shell_interact_abort_on_error for the whole batch, 120 s budget:
+    // aborts immediately at the first FortiOS CLI error so subsequent lines
+    // are never typed into the wrong CLI block.
     let inputs: Vec<ShellInput<'_>> = lines.iter().map(|l| ShellInput::Command(l)).collect();
-    let result = session.shell_interact(&inputs, 120).await;
+    let result = session.shell_interact_abort_on_error(&inputs, 120).await;
     let _ = session.disconnect().await;
 
     match result {
         Ok(transcript) => {
-            // Every line was acknowledged. Detect FortiOS's common error
-            // markers in the transcript. Real FortiOS errors include
-            // "Command fail" or "Command parse error".
             record.lines_pushed = lines.len() as u64;
             if transcript.contains("Command fail") || transcript.contains("Command parse error") {
                 record.status = DeploymentStatus::Failed;
@@ -1261,41 +1433,97 @@ fn extract_first_error(transcript: &str) -> String {
         .to_owned()
 }
 
-/// Restore from a saved backup. Reads the backup .conf and
-/// pushes it via `shell_interact` — same path as a deploy but
-/// the source is an old config, not a fresh render. A new
-/// Deployment record with status=RolledBack is created so the
-/// rollback shows up in history.
+fn resolve_verified_backup_path(
+    expected_dir: &std::path::Path,
+    recorded_backup_path: &str,
+) -> Result<PathBuf> {
+    if !expected_dir.exists() {
+        return Err(anyhow!(
+            "backup directory {} does not exist",
+            expected_dir.display()
+        ));
+    }
+    let canon_dir = std::fs::canonicalize(expected_dir)
+        .with_context(|| format!("canonicalize {}", expected_dir.display()))?;
+    let canon_file = std::fs::canonicalize(recorded_backup_path)
+        .with_context(|| format!("canonicalize backup {recorded_backup_path}"))?;
+    if !canon_file.starts_with(&canon_dir)
+        || canon_file.parent() != Some(canon_dir.as_path())
+        || canon_file.extension().and_then(|s| s.to_str()) != Some("conf")
+    {
+        return Err(anyhow!(
+            "recorded backup path lies outside this host's backup directory"
+        ));
+    }
+    Ok(canon_file)
+}
+
+/// Restore from a recorded deployment's pre-deploy backup.
+///
+/// Looks up `deployment_id` under `host_id`, verifies that its `backup_path`
+/// canonicalizes inside `backups_dir(host_id)`, acquires an exclusive host
+/// lease via `PlanRegistry` (and validates target linkage), and replays the
+/// snapshot with immediate abort on the first `FortiOS` CLI error.
 pub async fn rollback(
     state: &std::sync::Arc<tokio::sync::Mutex<crate::state::DaemonState>>,
     secrets: &std::sync::Arc<dyn supermgr_core::keyring::SecretStore>,
+    registry: &std::sync::Arc<PlanRegistry>,
     host_id: uuid::Uuid,
-    backup_path: &str,
+    deployment_id: &str,
 ) -> Result<Deployment> {
     let host_str = host_id.simple().to_string();
-    let id = uuid::Uuid::new_v4().simple().to_string();
-    let backup_text =
-        std::fs::read_to_string(backup_path).with_context(|| format!("read {backup_path}"))?;
-    // Backups taken before the read was checked can hold an error message
-    // instead. Pushing that restores nothing and would be recorded as a
-    // rollback all the same.
+    let prior = load_deployment(&host_str, deployment_id)?;
+    if prior.host_id != host_str {
+        return Err(anyhow!("deployment does not belong to host {host_id}"));
+    }
+    let raw_backup_path = prior
+        .backup_path
+        .as_deref()
+        .ok_or_else(|| anyhow!("deployment {deployment_id} has no recorded backup"))?;
+    let expected_dir = backups_dir(&host_str)?;
+    let verified_backup = resolve_verified_backup_path(&expected_dir, raw_backup_path)?;
+    let verified_backup_str = verified_backup.to_string_lossy().into_owned();
+
+    let host = if prior.customer_slug != "rollback" && !prior.customer_slug.is_empty() {
+        let req = RenderRequest {
+            template_id: prior.template_id.clone(),
+            customer_slug: prior.customer_slug.clone(),
+            site_id: prior.site_id.clone(),
+            extras: serde_json::Map::new(),
+        };
+        target(state, host_id, &req).await?.0
+    } else {
+        state
+            .lock()
+            .await
+            .ssh_hosts
+            .get(&host_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("host not found"))?
+    };
+    let _lease = registry.lease_host(&host)?;
+
+    let backup_text = std::fs::read_to_string(&verified_backup)
+        .with_context(|| format!("read {}", verified_backup.display()))?;
     if !is_full_config(&backup_text) {
         return Err(anyhow!(
-            "{backup_path} is not a FortiOS configuration; nothing was restored"
+            "{} is not a FortiOS configuration; nothing was restored",
+            verified_backup.display()
         ));
     }
 
+    let id = uuid::Uuid::new_v4().simple().to_string();
     let mut record = Deployment {
         id: id.clone(),
         host_id: host_str.clone(),
-        customer_slug: "rollback".into(),
-        site_id: "rollback".into(),
+        customer_slug: prior.customer_slug,
+        site_id: prior.site_id,
         template_id: "rollback".into(),
         started_at: chrono::Utc::now(),
         finished_at: None,
         status: DeploymentStatus::Running,
-        backup_path: Some(backup_path.to_owned()),
-        rendered_config: backup_text.clone(),
+        backup_path: Some(verified_backup_str),
+        rendered_config: format!("# rollback of deployment {deployment_id}"),
         lines_pushed: 0,
         error: None,
     };
@@ -1317,18 +1545,58 @@ pub async fn rollback(
         .map(str::to_owned)
         .collect();
     let inputs: Vec<ShellInput<'_>> = lines.iter().map(|l| ShellInput::Command(l)).collect();
-    let result = session.shell_interact(&inputs, 180).await;
+    let result = session.shell_interact_abort_on_error(&inputs, 180).await;
     let _ = session.disconnect().await;
     record.finished_at = Some(chrono::Utc::now());
     match result {
-        Ok(_) => {
-            record.status = DeploymentStatus::RolledBack;
+        Ok(transcript) => {
             record.lines_pushed = lines.len() as u64;
+            if transcript.contains("Command fail") || transcript.contains("Command parse error") {
+                record.status = DeploymentStatus::Failed;
+                record.error = Some(extract_first_error(&transcript));
+            } else {
+                record.status = DeploymentStatus::RolledBack;
+            }
         }
         Err(e) => record_failed_push(&mut record, &e),
     }
     save_deployment(&record)?;
     Ok(record)
+}
+
+fn parse_filter_cidr(cidr: &str, filter_name: &str) -> std::result::Result<ipnet::Ipv4Net, tera::Error> {
+    cidr.trim()
+        .parse::<ipnet::Ipv4Net>()
+        .map_err(|e| tera::Error::msg(format!("{filter_name}: invalid IPv4 CIDR '{cidr}': {e}")))
+}
+
+fn dhcp_pool_bounds(net: ipnet::Ipv4Net, filter_name: &str) -> std::result::Result<(std::net::Ipv4Addr, std::net::Ipv4Addr), tera::Error> {
+    let base = u32::from(net.network());
+    let bcast = u32::from(net.broadcast());
+    if net.prefix_len() <= 24 {
+        Ok((
+            std::net::Ipv4Addr::from(base + 50),
+            std::net::Ipv4Addr::from(base + 250),
+        ))
+    } else if net.prefix_len() <= 29 {
+        // Smaller subnets (/25../29): reserve .1 for gateway and hand out the remaining usable hosts.
+        let start = base + 2;
+        let end = bcast - 1;
+        if start > end {
+            return Err(tera::Error::msg(format!(
+                "{filter_name}: subnet {net} has no usable DHCP range"
+            )));
+        }
+        Ok((
+            std::net::Ipv4Addr::from(start),
+            std::net::Ipv4Addr::from(end),
+        ))
+    } else {
+        Err(tera::Error::msg(format!(
+            "{filter_name}: subnet {net} (/{}) is too small for a DHCP pool",
+            net.prefix_len()
+        )))
+    }
 }
 
 /// Register filters that templates rely on. We keep these tightly
@@ -1378,108 +1646,72 @@ fn register_filters(tera: &mut Tera) {
 
     // `cidr_first_host` — given "10.0.10.0/24" returns "10.0.10.1"
     // (the first usable host IP). Used for DHCP default-gateway
-    // and similar settings. Errors if the input isn't a CIDR.
+    // and similar settings. Errors if the input isn't a valid CIDR with usable hosts.
     tera.register_filter(
         "cidr_first_host",
         |value: &tera::Value, _args: &std::collections::HashMap<String, tera::Value>| {
             let cidr = value
                 .as_str()
                 .ok_or_else(|| tera::Error::msg("cidr_first_host requires a string"))?;
-            let parts: Vec<&str> = cidr.split('/').collect();
-            let ip = parts.first().copied().unwrap_or("");
-            let octets: Vec<&str> = ip.split('.').collect();
-            if octets.len() != 4 {
-                return Err(tera::Error::msg("cidr_first_host: expected dotted-quad"));
+            let net = parse_filter_cidr(cidr, "cidr_first_host")?;
+            if net.prefix_len() > 30 {
+                return Err(tera::Error::msg(format!(
+                    "cidr_first_host: subnet {net} has no standard gateway host"
+                )));
             }
-            let last: u32 = octets[3].parse().unwrap_or(0);
-            Ok(tera::Value::String(format!(
-                "{}.{}.{}.{}",
-                octets[0],
-                octets[1],
-                octets[2],
-                last + 1
-            )))
+            let first = std::net::Ipv4Addr::from(u32::from(net.network()) + 1);
+            Ok(tera::Value::String(first.to_string()))
         },
     );
 
     // `cidr_dhcp_start` — given "10.0.10.0/24" returns "10.0.10.50"
-    // (the first .50 to leave room for static reservations 1-49).
-    // Convention chosen so admins have predictable static-block
-    // headroom without per-template thought.
+    // (or network+2 on /25../29 subnets).
     tera.register_filter(
         "cidr_dhcp_start",
         |value: &tera::Value, _args: &std::collections::HashMap<String, tera::Value>| {
             let cidr = value
                 .as_str()
                 .ok_or_else(|| tera::Error::msg("cidr_dhcp_start requires a string"))?;
-            let parts: Vec<&str> = cidr.split('/').collect();
-            let ip = parts.first().copied().unwrap_or("");
-            let octets: Vec<&str> = ip.split('.').collect();
-            if octets.len() != 4 {
-                return Err(tera::Error::msg("cidr_dhcp_start: expected dotted-quad"));
-            }
-            Ok(tera::Value::String(format!(
-                "{}.{}.{}.50",
-                octets[0], octets[1], octets[2]
-            )))
+            let net = parse_filter_cidr(cidr, "cidr_dhcp_start")?;
+            let (start, _) = dhcp_pool_bounds(net, "cidr_dhcp_start")?;
+            Ok(tera::Value::String(start.to_string()))
         },
     );
 
-    // `cidr_dhcp_end` — last `.250` of a /24 (leaves .251-.254 for
-    // statically-assigned servers / printers / APs).
+    // `cidr_dhcp_end` — last `.250` of a /24 (or broadcast-1 on /25../29).
     tera.register_filter(
         "cidr_dhcp_end",
         |value: &tera::Value, _args: &std::collections::HashMap<String, tera::Value>| {
             let cidr = value
                 .as_str()
                 .ok_or_else(|| tera::Error::msg("cidr_dhcp_end requires a string"))?;
-            let parts: Vec<&str> = cidr.split('/').collect();
-            let ip = parts.first().copied().unwrap_or("");
-            let octets: Vec<&str> = ip.split('.').collect();
-            if octets.len() != 4 {
-                return Err(tera::Error::msg("cidr_dhcp_end: expected dotted-quad"));
-            }
-            Ok(tera::Value::String(format!(
-                "{}.{}.{}.250",
-                octets[0], octets[1], octets[2]
-            )))
+            let net = parse_filter_cidr(cidr, "cidr_dhcp_end")?;
+            let (_, end) = dhcp_pool_bounds(net, "cidr_dhcp_end")?;
+            Ok(tera::Value::String(end.to_string()))
         },
     );
 
     // `cidr_netmask` — given "10.0.10.0/24" returns "255.255.255.0".
-    // Used by FortiOS DHCP server which wants explicit netmask
-    // separately from the IP+CIDR.
     tera.register_filter(
         "cidr_netmask",
         |value: &tera::Value, _args: &std::collections::HashMap<String, tera::Value>| {
             let cidr = value
                 .as_str()
                 .ok_or_else(|| tera::Error::msg("cidr_netmask requires a string"))?;
-            let parts: Vec<&str> = cidr.split('/').collect();
-            let prefix: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(24);
-            let mask = if prefix == 0 {
-                0u32
-            } else {
-                (!0u32) << (32 - prefix)
-            };
-            Ok(tera::Value::String(format!(
-                "{}.{}.{}.{}",
-                (mask >> 24) & 0xff,
-                (mask >> 16) & 0xff,
-                (mask >> 8) & 0xff,
-                mask & 0xff,
-            )))
+            let net = parse_filter_cidr(cidr, "cidr_netmask")?;
+            Ok(tera::Value::String(net.netmask().to_string()))
         },
     );
 
-    // `comment(width=80, char='-')` filter: format a banner-style
-    // CLI comment line. Used for section headers in FortiOS configs.
     tera.register_filter(
         "banner",
         |value: &tera::Value, _args: &std::collections::HashMap<String, tera::Value>| {
             let text = value
                 .as_str()
                 .ok_or_else(|| tera::Error::msg("banner filter requires a string"))?;
+            if text.chars().any(char::is_control) {
+                return Err(tera::Error::msg("banner text must not contain control characters"));
+            }
             let width = 60;
             let line = "=".repeat(width);
             let padding = (width.saturating_sub(text.len() + 2)) / 2;
@@ -1489,10 +1721,7 @@ fn register_filters(tera: &mut Tera) {
             )))
         },
     );
-    // `replace_octet(prefix='10.0', n)` — derive a /24 from a
-    // base CIDR and an octet. Cheap subnet-derivation that works
-    // for the common branch-office case without pulling in ipnet
-    // into a Tera filter.
+
     tera.register_filter(
         "third_octet",
         |value: &tera::Value, args: &std::collections::HashMap<String, tera::Value>| {
@@ -1503,17 +1732,16 @@ fn register_filters(tera: &mut Tera) {
                 .get("n")
                 .and_then(tera::Value::as_u64)
                 .ok_or_else(|| tera::Error::msg("third_octet requires arg 'n'"))?;
-            // Crude — just splits on dots and rewrites the third
-            // octet. "10.0.0.0/24" + n=10 → "10.0.10.0/24".
-            let parts: Vec<&str> = cidr.split('.').collect();
-            if parts.len() != 4 {
-                return Err(tera::Error::msg("third_octet: expected dotted-quad CIDR"));
-            }
-            let last_with_mask = parts[3];
-            Ok(tera::Value::String(format!(
-                "{}.{}.{}.{}",
-                parts[0], parts[1], n, last_with_mask
-            )))
+            let octet = u8::try_from(n)
+                .map_err(|_| tera::Error::msg("third_octet: 'n' must fit in 0..=255"))?;
+            let net = parse_filter_cidr(cidr, "third_octet")?;
+            let octets = net.addr().octets();
+            let derived = ipnet::Ipv4Net::new(
+                std::net::Ipv4Addr::new(octets[0], octets[1], octet, octets[3]),
+                net.prefix_len(),
+            )
+            .map_err(|e| tera::Error::msg(format!("third_octet: {e}")))?;
+            Ok(tera::Value::String(derived.to_string()))
         },
     );
 }
@@ -1685,5 +1913,93 @@ mod backup_tests {
         assert!(diffs[0].unified_diff.contains("+    set subnet 10.99.0.0 255.255.255.0"));
         assert!(diffs[0].unified_diff.contains("-    edit \"last-old\""));
         assert!(diffs[0].unified_diff.contains("+    edit \"last-new\""));
+    }
+
+    #[test]
+    fn render_rejects_cli_injection_and_invalid_cidrs_without_panicking() {
+        use crate::customer::{Customer, Site, Vlan};
+
+        let mut extras = serde_json::Map::new();
+        extras.insert(
+            "vpn_psk".into(),
+            serde_json::Value::String("R9x#kL29!mPq81$vN4zW".into()),
+        );
+        extras.insert(
+            "vpn_admin_password".into(),
+            serde_json::Value::String("T7y@bQ44!zXc92#pL8mK".into()),
+        );
+
+        let customer = Customer {
+            slug: "acme".into(),
+            display_name: "Acme Corp".into(),
+            ..Customer::default()
+        };
+        let base_site = Site {
+            id: "oslo".into(),
+            display_name: "Oslo".into(),
+            wan_type: "dhcp".into(),
+            lan_base: "10.10.0.0/24".into(),
+            vlans: vec![Vlan {
+                id: 10,
+                name: "Corp".into(),
+                subnet: "10.10.10.0/24".into(),
+                purpose: "internal".into(),
+            }],
+            ..Site::default()
+        };
+
+        // Newline or quote injection in operator-supplied text is rejected.
+        let mut injected_site = base_site.clone();
+        injected_site.address = "Oslo\"\nconfig system admin\nedit backdoor".into();
+        assert!(super::render_with_customer(
+            &customer,
+            &injected_site,
+            "fortigate.branch_office",
+            &extras,
+        )
+        .is_err());
+
+        // Out-of-range CIDR prefix (/33) is rejected cleanly (never panics on 32 - prefix).
+        let mut bad_cidr_site = base_site.clone();
+        bad_cidr_site.vlans[0].subnet = "10.10.10.0/33".into();
+        assert!(super::render_with_customer(
+            &customer,
+            &bad_cidr_site,
+            "fortigate.branch_office",
+            &extras,
+        )
+        .is_err());
+
+        // Secret redaction removes plaintext passphrases from persisted history.
+        let rendered = super::render_with_customer(
+            &customer,
+            &base_site,
+            "fortigate.branch_office",
+            &extras,
+        )
+        .unwrap();
+        let redacted = super::redact_rendered_secrets(&rendered.output);
+        assert!(!redacted.contains("R9x#kL29!mPq81$vN4zW"));
+        assert!(!redacted.contains("T7y@bQ44!zXc92#pL8mK"));
+        assert!(redacted.contains("\"<redacted>\""));
+    }
+
+    #[test]
+    fn resolve_verified_backup_path_blocks_escape_outside_host_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let host_dir = root.path().join("hostA");
+        let other_dir = root.path().join("hostB");
+        std::fs::create_dir_all(&host_dir).unwrap();
+        std::fs::create_dir_all(&other_dir).unwrap();
+
+        let good = host_dir.join("backup-20261111T120000.conf");
+        let outside = other_dir.join("backup-20261111T120000.conf");
+        std::fs::write(&good, CONFIG).unwrap();
+        std::fs::write(&outside, CONFIG).unwrap();
+
+        assert!(super::resolve_verified_backup_path(&host_dir, &good.to_string_lossy()).is_ok());
+        assert!(
+            super::resolve_verified_backup_path(&host_dir, &outside.to_string_lossy()).is_err()
+        );
     }
 }

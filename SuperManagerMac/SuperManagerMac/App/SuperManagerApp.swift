@@ -346,7 +346,24 @@ struct SuperManagerApp: App {
         let sockPath = ServiceClient.socketPath
         try? FileManager.default.removeItem(atPath: sockPath)
 
-        // 3. Spawn fresh from the first available binary path. In
+        // 3. Obtain the 32-byte engine secrets wrapping key from the Data
+        //    Protection Keychain and deliver it to `supermgrd-mac` over an
+        //    anonymous stdin pipe (never argv or env).
+        let masterKeyHex: String?
+        do {
+            let keyData = try VPNKeychain.getOrCreateEngineMasterKey()
+            masterKeyHex = keyData.map { String(format: "%02x", $0) }.joined()
+        } catch {
+            #if !DEBUG
+            appState.errorBanner = error.localizedDescription
+            return
+            #else
+            DebugLog.write("[daemon] Data Protection Keychain unavailable in debug build: \(error.localizedDescription)")
+            masterKeyHex = nil
+            #endif
+        }
+
+        // 4. Spawn fresh from the first available binary path. In
         //    a packaged build that's `Contents/MacOS/supermgrd-mac`;
         //    in dev (running the binary out of DerivedData with cargo
         //    rebuilds in `target/`) the fallbacks let us pick up the
@@ -355,12 +372,26 @@ struct SuperManagerApp: App {
             guard FileManager.default.isExecutableFile(atPath: path) else { continue }
             let process = Process()
             process.executableURL = URL(fileURLWithPath: path)
+            let stdinPipe: Pipe?
+            if masterKeyHex != nil {
+                process.arguments = ["--key-stdin"]
+                let p = Pipe()
+                process.standardInput = p
+                stdinPipe = p
+            } else {
+                stdinPipe = nil
+            }
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
             do {
                 try process.run()
             } catch {
+                try? stdinPipe?.fileHandleForWriting.close()
                 continue
+            }
+            if let hex = masterKeyHex, let pipe = stdinPipe {
+                try? pipe.fileHandleForWriting.write(contentsOf: Data((hex + "\n").utf8))
+                try? pipe.fileHandleForWriting.close()
             }
             // Poll for the socket to come up (up to ~5 s). The daemon
             // does its `DaemonState::load_*` here, which can take a

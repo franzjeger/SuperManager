@@ -177,12 +177,75 @@ pub async fn api_request(
 /// Returns `(token, secret_label)` so the caller can both display the
 /// token in the GUI (one-time, for "Copy") and persist the label on
 /// the host record.
+/// Build the `FortiOS` CLI commands that provision a least-privilege read-only
+/// `accprofile` (`supermgr_ro`) and bind `api_user` to it (plus an optional
+/// IPv4 `trusthost` CIDR restriction), then generate an API key.
+///
+/// Never assigns `super_admin`: dashboard queries, compliance checks, and
+/// configuration reads only need read permissions across monitoring/config
+/// groups.
+pub fn build_api_token_cli_commands(
+    api_user: &str,
+    trusthost_cidr: Option<&str>,
+) -> Result<Vec<String>> {
+    supermgr_core::sanitize::validate_safe_ident(api_user, "api_user")
+        .map_err(|e| anyhow!("{e}"))?;
+
+    let parsed_trusthost = match trusthost_cidr.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => {
+            let net: ipnet::Ipv4Net = raw
+                .parse()
+                .map_err(|e| anyhow!("invalid trusthost CIDR '{raw}': {e}"))?;
+            Some((net.network(), net.netmask()))
+        }
+        None => None,
+    };
+
+    let mut cmd_lines = vec![
+        "config system accprofile".into(),
+        "edit \"supermgr_ro\"".into(),
+        "set secfabgrp read".into(),
+        "set ftviewgrp read".into(),
+        "set authgrp read".into(),
+        "set sysgrp read".into(),
+        "set netgrp read".into(),
+        "set loggrp read".into(),
+        "set fwgrp read".into(),
+        "set vpngrp read".into(),
+        "set utmgrp read".into(),
+        "set wanoptgrp read".into(),
+        "set wifi read".into(),
+        "next".into(),
+        "end".into(),
+        "config system api-user".into(),
+        format!("edit \"{api_user}\""),
+        "set accprofile \"supermgr_ro\"".into(),
+        "set vdom \"root\"".into(),
+    ];
+    if let Some((net_ip, mask)) = parsed_trusthost {
+        cmd_lines.extend([
+            "config trusthost".into(),
+            "edit 1".into(),
+            format!("set ipv4-trusthost {net_ip} {mask}"),
+            "next".into(),
+            "end".into(),
+        ]);
+    }
+    cmd_lines.extend([
+        "next".into(),
+        "end".into(),
+        format!("execute api-user generate-key {api_user}"),
+    ]);
+    Ok(cmd_lines)
+}
+
 pub async fn generate_token(
     state: &Arc<Mutex<DaemonState>>,
     secrets: &Arc<dyn SecretStore>,
     session: &SshSession,
     host: &Host,
     api_user: &str,
+    trusthost: Option<&str>,
 ) -> Result<(String, String)> {
     info!(
         "fortigate_generate_api_token: generating for user '{}' on {}",
@@ -204,19 +267,7 @@ pub async fn generate_token(
         None
     };
 
-    supermgr_core::sanitize::validate_safe_ident(api_user, "api_user")
-        .map_err(|e| anyhow!("{e}"))?;
-
-    let api_user_owned = api_user.to_owned();
-    let cmd_lines: Vec<String> = vec![
-        "config system api-user".into(),
-        format!("edit \"{api_user_owned}\""),
-        "set accprofile \"super_admin\"".into(),
-        "set vdom \"root\"".into(),
-        "next".into(),
-        "end".into(),
-        format!("execute api-user generate-key {api_user_owned}"),
-    ];
+    let cmd_lines = build_api_token_cli_commands(api_user, trusthost)?;
     let mut inputs: Vec<ShellInput<'_>> =
         cmd_lines.iter().map(|l| ShellInput::Command(l)).collect();
     if let Some(ref pw) = admin_password {
@@ -718,4 +769,22 @@ fn parse_vpn(body: &str) -> Option<VpnSummary> {
         tunnels_total: total,
         tunnels_up: up,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_token_commands_use_read_only_profile_and_validate_trusthost() {
+        let cmds = build_api_token_cli_commands("supermgr-api", Some("10.20.30.0/24")).unwrap();
+        assert!(!cmds.iter().any(|l| l.contains("super_admin")));
+        assert!(cmds.iter().any(|l| l == "set accprofile \"supermgr_ro\""));
+        assert!(cmds
+            .iter()
+            .any(|l| l == "set ipv4-trusthost 10.20.30.0 255.255.255.0"));
+
+        assert!(build_api_token_cli_commands("bad\nuser", None).is_err());
+        assert!(build_api_token_cli_commands("supermgr-api", Some("not-a-cidr")).is_err());
+    }
 }
