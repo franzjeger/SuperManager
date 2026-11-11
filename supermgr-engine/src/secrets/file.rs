@@ -191,8 +191,7 @@ fn persist_map_atomic(
     let mut tmp =
         tempfile::NamedTempFile::new_in(dir).context("create private secrets temporary file")?;
     if let Some(key) = master_key {
-        let plaintext =
-            Zeroizing::new(serde_json::to_vec(map).context("serialize secrets map")?);
+        let plaintext = Zeroizing::new(serde_json::to_vec(map).context("serialize secrets map")?);
         let cipher = Aes256Gcm::new(key.into());
         let mut nonce_bytes = [0u8; 12];
         rand::rng().fill(&mut nonce_bytes);
@@ -262,10 +261,12 @@ fn parse_secrets_text(
         let nonce_bytes = STANDARD
             .decode(&env.nonce)
             .context("decode secrets envelope nonce")?;
-        let nonce_arr: [u8; 12] = nonce_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| anyhow!("invalid secrets envelope nonce length {}", nonce_bytes.len()))?;
+        let nonce_arr: [u8; 12] = nonce_bytes.as_slice().try_into().map_err(|_| {
+            anyhow!(
+                "invalid secrets envelope nonce length {}",
+                nonce_bytes.len()
+            )
+        })?;
         let ciphertext = STANDARD
             .decode(&env.ciphertext)
             .context("decode secrets envelope ciphertext")?;

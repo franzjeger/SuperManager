@@ -164,9 +164,11 @@ impl EngineError {
                 supermgr_core::error::FindingsError::Parse { reason } => Self::FindingsParse {
                     reason: reason.clone(),
                 },
-                supermgr_core::error::FindingsError::InvalidScope { reason } => Self::InvalidScope {
-                    reason: reason.clone(),
-                },
+                supermgr_core::error::FindingsError::InvalidScope { reason } => {
+                    Self::InvalidScope {
+                        reason: reason.clone(),
+                    }
+                }
             };
         }
         Self::Other(err)

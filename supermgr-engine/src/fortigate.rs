@@ -57,6 +57,130 @@ pub struct ApiResponse {
     pub body: String,
 }
 
+/// Reusable HTTPS session against a single `FortiGate` host (`P3-10`).
+///
+/// Resolves the host record, API token, and TLS pin once, and shares a single
+/// connection-pooled `reqwest::Client` across multiple REST requests.
+pub struct FortigateApiSession {
+    hostname: String,
+    api_port: u16,
+    token: zeroize::Zeroizing<String>,
+    client: reqwest::Client,
+}
+
+/// Distinguishes transport/connection failure (host unreachable, TLS pin
+/// mismatch, DNS error — where running 46 more compliance queries against the
+/// same dead host is futile) from per-endpoint errors.
+#[derive(Debug, thiserror::Error)]
+pub enum FortigateRequestError {
+    #[error("{0}")]
+    Transport(String),
+    #[error("{0}")]
+    Other(#[from] anyhow::Error),
+}
+
+impl FortigateApiSession {
+    pub async fn open(
+        state: &Arc<Mutex<DaemonState>>,
+        secrets: &Arc<dyn SecretStore>,
+        host_id: uuid::Uuid,
+    ) -> std::result::Result<Self, FortigateRequestError> {
+        let (hostname, api_port, verify_tls, token_label, known_hosts) = {
+            let st = state.lock().await;
+            let host = st
+                .ssh_hosts
+                .get(&host_id)
+                .ok_or_else(|| anyhow!("host not found: {host_id}"))?;
+            let token_ref = host
+                .api_token_ref
+                .as_ref()
+                .ok_or_else(|| anyhow!("no API token configured for host {host_id}"))?;
+            (
+                host.hostname.clone(),
+                host.api_port.unwrap_or(443),
+                host.api_verify_tls,
+                token_ref.0.clone(),
+                Arc::clone(&st.known_hosts),
+            )
+        };
+
+        if !verify_tls {
+            crate::tls_pin::verify_or_enroll_endpoint(&known_hosts, &hostname, api_port)
+                .await
+                .map_err(|e| FortigateRequestError::Transport(e.to_string()))?;
+        }
+
+        let token_bytes = secrets
+            .retrieve(&token_label)
+            .await
+            .context("retrieve API token from keychain")?;
+        let token_raw =
+            String::from_utf8(token_bytes.to_vec()).context("API token is not valid UTF-8")?;
+        let token = zeroize::Zeroizing::new(token_raw.trim().to_owned());
+
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(!verify_tls)
+            .timeout(HTTP_TIMEOUT)
+            .build()
+            .context("build HTTP client")?;
+
+        Ok(Self {
+            hostname,
+            api_port,
+            token,
+            client,
+        })
+    }
+
+    pub async fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: &str,
+    ) -> std::result::Result<ApiResponse, FortigateRequestError> {
+        let url = supermgr_core::sanitize::build_https_api_url(&self.hostname, self.api_port, path)
+            .map_err(|e| FortigateRequestError::Other(anyhow!("{e}")))?;
+
+        info!("fortigate_api: {method} {url}");
+
+        let mut req = match method.to_uppercase().as_str() {
+            "GET" => self.client.get(&url),
+            "POST" => self.client.post(&url),
+            "PUT" => self.client.put(&url),
+            "DELETE" => self.client.delete(&url),
+            other => {
+                return Err(FortigateRequestError::Other(anyhow!(
+                    "invalid HTTP method: {other}"
+                )))
+            }
+        };
+
+        req = req.header("Authorization", format!("Bearer {}", self.token.as_str()));
+        if !body.is_empty() && method.to_uppercase() != "GET" {
+            req = req
+                .header("Content-Type", "application/json")
+                .body(body.to_owned());
+        }
+
+        let resp = req.send().await.map_err(|e| {
+            let msg = e.to_string().replace(&*self.token, "***");
+            warn!("fortigate_api: send failed: {msg}");
+            FortigateRequestError::Transport(format!("API request failed: {msg}"))
+        })?;
+
+        let status = resp.status().as_u16();
+        let body_text = resp
+            .text()
+            .await
+            .context("read response body")
+            .map_err(FortigateRequestError::Other)?;
+        Ok(ApiResponse {
+            status,
+            body: body_text,
+        })
+    }
+}
+
 /// Make a single REST call against a `FortiGate` host's API.
 ///
 /// Looks up the host's API token from `secrets`, builds an HTTPS
@@ -75,82 +199,13 @@ pub async fn api_request(
     path: &str,
     body: &str,
 ) -> Result<ApiResponse> {
-    // Snapshot connection params under lock; never call out to the
-    // network with the state mutex held.
-    let (hostname, api_port, verify_tls, token_label, known_hosts) = {
-        let st = state.lock().await;
-        let host = st
-            .ssh_hosts
-            .get(&host_id)
-            .ok_or_else(|| anyhow!("host not found: {host_id}"))?;
-        let token_ref = host
-            .api_token_ref
-            .as_ref()
-            .ok_or_else(|| anyhow!("no API token configured for host {host_id}"))?;
-        (
-            host.hostname.clone(),
-            host.api_port.unwrap_or(443),
-            host.api_verify_tls,
-            token_ref.0.clone(),
-            Arc::clone(&st.known_hosts),
-        )
-    };
-
-    let url = supermgr_core::sanitize::build_https_api_url(&hostname, api_port, path)
-        .map_err(|e| anyhow!("{e}"))?;
-
-    if !verify_tls {
-        crate::tls_pin::verify_or_enroll_endpoint(&known_hosts, &hostname, api_port).await?;
-    }
-
-    let token_bytes = secrets
-        .retrieve(&token_label)
+    let session = FortigateApiSession::open(state, secrets, host_id)
         .await
-        .context("retrieve API token from keychain")?;
-    let token = String::from_utf8(token_bytes.to_vec()).context("API token is not valid UTF-8")?;
-    let token = token.trim().to_owned();
-
-    info!("fortigate_api: {method} {url}");
-
-    // Strict TLS verification is enabled by default (`api_verify_tls = true`);
-    // when an operator explicitly disables CA chain checks for a self-signed
-    // appliance, the leaf certificate was already verified/pinned above.
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(!verify_tls)
-        .timeout(HTTP_TIMEOUT)
-        .build()
-        .context("build HTTP client")?;
-
-    let mut req = match method.to_uppercase().as_str() {
-        "GET" => client.get(&url),
-        "POST" => client.post(&url),
-        "PUT" => client.put(&url),
-        "DELETE" => client.delete(&url),
-        other => return Err(anyhow!("invalid HTTP method: {other}")),
-    };
-
-    req = req.header("Authorization", format!("Bearer {token}"));
-    if !body.is_empty() && method.to_uppercase() != "GET" {
-        req = req
-            .header("Content-Type", "application/json")
-            .body(body.to_owned());
-    }
-
-    let resp = req.send().await.map_err(|e| {
-        // Strip the token from any error message before bubbling
-        // out — reqwest sometimes embeds the URL in errors which
-        // shouldn't leak even to logs.
-        let msg = e.to_string().replace(&token, "***");
-        warn!("fortigate_api: send failed: {msg}");
-        anyhow!("API request failed: {msg}")
-    })?;
-
-    let status = resp.status().as_u16();
-    let body_text = resp.text().await.context("read response body")?;
-    Ok(ApiResponse {
-        status,
-        body: body_text,
-    })
+        .map_err(|e| anyhow!("{e}"))?;
+    session
+        .request(method, path, body)
+        .await
+        .map_err(|e| anyhow!("{e}"))
 }
 
 /// Generate a new API token on the `FortiGate` via SSH, store it in

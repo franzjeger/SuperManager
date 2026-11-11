@@ -18,8 +18,77 @@ use supermgr_core::ssh::authorized_keys::{
 use supermgr_core::ssh::key::{SshKey, SshKeySummary, SshKeyType};
 use supermgr_core::ssh::keygen;
 
+use serde::Deserialize;
+
 use crate::protocol::{self, Response};
-use crate::server::{connect_to_host_owned, get_uuid_param, merge_host_update, EngineServer};
+use crate::server::{connect_to_host_owned, get_uuid_param, try_merge_host_update, EngineServer};
+
+fn parse_ssh_key_type(raw: &str) -> Result<SshKeyType, String> {
+    match raw {
+        "ed25519" => Ok(SshKeyType::Ed25519),
+        "rsa2048" | "rsa" => Ok(SshKeyType::Rsa2048),
+        "rsa4096" => Ok(SshKeyType::Rsa4096),
+        other => Err(format!(
+            "unsupported key_type '{other}' (expected 'ed25519', 'rsa2048', or 'rsa4096')"
+        )),
+    }
+}
+
+fn default_ed25519() -> String {
+    "ed25519".to_owned()
+}
+fn default_unnamed() -> String {
+    "Unnamed".to_owned()
+}
+fn default_imported() -> String {
+    "Imported".to_owned()
+}
+fn default_empty_tags() -> String {
+    "[]".to_owned()
+}
+fn default_exec_timeout_secs() -> u64 {
+    60
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SshGenerateKeyParams {
+    #[serde(default = "default_ed25519")]
+    key_type: String,
+    #[serde(default = "default_unnamed")]
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default = "default_empty_tags")]
+    tags_json: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SshImportKeyParams {
+    #[serde(default = "default_imported")]
+    name: String,
+    public_key: String,
+    private_key_pem: String,
+    #[serde(default = "default_ed25519")]
+    key_type: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SshSetPasswordParams {
+    host_id: uuid::Uuid,
+    password: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SshExecuteCommandParams {
+    host_id: uuid::Uuid,
+    command: String,
+    #[serde(default = "default_exec_timeout_secs")]
+    timeout_secs: u64,
+}
 
 /// Two operations share fan-out plumbing in `handle_ssh_fanout_key_op`.
 /// Encoded as an enum so we can branch the inner SSH call without
@@ -70,30 +139,28 @@ impl EngineServer {
         id: u64,
         params: serde_json::Value,
     ) -> Response {
-        let key_type_str = params
-            .get("key_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("ed25519");
-        let name = params
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unnamed");
-        let description = params
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let tags_json = params
-            .get("tags_json")
-            .and_then(|v| v.as_str())
-            .unwrap_or("[]");
-
-        let key_type = match key_type_str {
-            "rsa2048" | "rsa" => SshKeyType::Rsa2048,
-            "rsa4096" => SshKeyType::Rsa4096,
-            _ => SshKeyType::Ed25519,
+        let p: SshGenerateKeyParams = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => {
+                return Response::err(id, protocol::INVALID_PARAMS, format!("bad params: {e}"))
+            }
+        };
+        let key_type = match parse_ssh_key_type(&p.key_type) {
+            Ok(kt) => kt,
+            Err(msg) => return Response::err(id, protocol::INVALID_PARAMS, msg),
+        };
+        let tags: Vec<String> = match serde_json::from_str(&p.tags_json) {
+            Ok(t) => t,
+            Err(e) => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    format!("invalid tags_json: {e}"),
+                )
+            }
         };
 
-        let name_for_keygen = name.to_owned();
+        let name_for_keygen = p.name.clone();
         let generated = match tokio::task::spawn_blocking(move || {
             keygen::generate_key(key_type, &name_for_keygen)
         })
@@ -121,12 +188,10 @@ impl EngineServer {
             return Response::err(id, protocol::INTERNAL_ERROR, format!("store secret: {e}"));
         }
 
-        let tags: Vec<String> = serde_json::from_str(tags_json).unwrap_or_default();
-
         let ssh_key = SshKey {
             id: key_id,
-            name: name.to_owned(),
-            description: description.to_owned(),
+            name: p.name.clone(),
+            description: p.description,
             key_type,
             public_key: generated.public_key,
             private_key_ref: supermgr_core::vpn::profile::SecretRef(secret_label),
@@ -143,7 +208,7 @@ impl EngineServer {
         }
         let fingerprint = ssh_key.fingerprint.clone();
         state.ssh_keys.insert(key_id, ssh_key);
-        audit_key_event(AuditAction::Generate, name, &fingerprint);
+        audit_key_event(AuditAction::Generate, &p.name, &fingerprint);
 
         Response::ok(id, serde_json::json!(key_id.to_string()))
     }
@@ -241,39 +306,27 @@ impl EngineServer {
         id: u64,
         params: serde_json::Value,
     ) -> Response {
-        let name = params
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Imported");
-        let public_key = match params.get("public_key").and_then(|v| v.as_str()) {
-            Some(pk) => pk,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing public_key"),
+        let p: SshImportKeyParams = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => {
+                return Response::err(id, protocol::INVALID_PARAMS, format!("bad params: {e}"))
+            }
         };
-        let private_key_pem = match params.get("private_key_pem").and_then(|v| v.as_str()) {
-            Some(pk) => pk,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing private_key_pem"),
-        };
-        let key_type_str = params
-            .get("key_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("ed25519");
-
-        let key_type = match key_type_str {
-            "rsa2048" | "rsa" => SshKeyType::Rsa2048,
-            "rsa4096" => SshKeyType::Rsa4096,
-            _ => SshKeyType::Ed25519,
+        let key_type = match parse_ssh_key_type(&p.key_type) {
+            Ok(kt) => kt,
+            Err(msg) => return Response::err(id, protocol::INVALID_PARAMS, msg),
         };
 
-        let fingerprint = match keygen::compute_fingerprint(public_key) {
+        let fingerprint = match keygen::compute_fingerprint(&p.public_key) {
             Ok(fp) => fp,
-            Err(e) => return Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
+            Err(e) => return Response::err(id, protocol::INVALID_PARAMS, e.to_string()),
         };
 
         let key_id = uuid::Uuid::new_v4();
         let secret_label = format!("supermgr/ssh/{key_id}/privkey");
         if let Err(e) = self
             .secrets
-            .store(&secret_label, private_key_pem.as_bytes())
+            .store(&secret_label, p.private_key_pem.as_bytes())
             .await
         {
             return Response::err(id, protocol::INTERNAL_ERROR, format!("store secret: {e}"));
@@ -281,10 +334,10 @@ impl EngineServer {
 
         let ssh_key = SshKey {
             id: key_id,
-            name: name.to_owned(),
+            name: p.name.clone(),
             description: String::new(),
             key_type,
-            public_key: public_key.to_owned(),
+            public_key: p.public_key,
             private_key_ref: supermgr_core::vpn::profile::SecretRef(secret_label),
             fingerprint,
             tags: Vec::new(),
@@ -299,7 +352,7 @@ impl EngineServer {
         }
         let fingerprint = ssh_key.fingerprint.clone();
         state.ssh_keys.insert(key_id, ssh_key);
-        audit_key_event(AuditAction::Import, name, &fingerprint);
+        audit_key_event(AuditAction::Import, &p.name, &fingerprint);
 
         Response::ok(id, serde_json::json!(key_id.to_string()))
     }
@@ -467,7 +520,9 @@ impl EngineServer {
         let old_port = host.port;
         let old_api_port = host.api_port;
 
-        merge_host_update(&mut host, &incoming);
+        if let Err(msg) = try_merge_host_update(&mut host, &incoming) {
+            return Response::err(id, protocol::INVALID_PARAMS, msg);
+        }
         if let Err(e) = supermgr_core::sanitize::validate_host_or_ip(&host.hostname) {
             return Response::err(id, protocol::INVALID_PARAMS, e.to_string());
         }
@@ -572,13 +627,18 @@ impl EngineServer {
             Err(r) => return r,
         };
         let mut state = self.state.lock().await;
-        if let Some(host) = state.ssh_hosts.get_mut(&host_id) {
-            host.pinned = !host.pinned;
-            host.updated_at = chrono::Utc::now();
-            let host_clone = host.clone();
-            if let Err(e) = state.save_ssh_host(&host_clone) {
-                return Response::err(id, protocol::INTERNAL_ERROR, format!("save host: {e}"));
-            }
+        let Some(host) = state.ssh_hosts.get_mut(&host_id) else {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                format!("host not found: {host_id}"),
+            );
+        };
+        host.pinned = !host.pinned;
+        host.updated_at = chrono::Utc::now();
+        let host_clone = host.clone();
+        if let Err(e) = state.save_ssh_host(&host_clone) {
+            return Response::err(id, protocol::INTERNAL_ERROR, format!("save host: {e}"));
         }
         let summaries: Vec<HostSummary> = state.ssh_hosts.values().map(HostSummary::from).collect();
         match serde_json::to_value(&summaries) {
@@ -592,19 +652,23 @@ impl EngineServer {
         id: u64,
         params: serde_json::Value,
     ) -> Response {
-        let host_id = match get_uuid_param(&params, "host_id") {
-            Ok(id) => id,
-            Err(r) => return r,
+        let p: SshSetPasswordParams = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => {
+                return Response::err(id, protocol::INVALID_PARAMS, format!("bad params: {e}"))
+            }
         };
-        let password = match params.get("password").and_then(|v| v.as_str()) {
-            Some(p) => p,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing password"),
-        };
+        let host_id = p.host_id;
+        let password = p.password;
 
         let secret_label = format!("supermgr/ssh/host/{host_id}/password");
         let mut state = self.state.lock().await;
         if !state.ssh_hosts.contains_key(&host_id) {
-            return Response::err(id, protocol::INVALID_PARAMS, format!("host not found: {host_id}"));
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                format!("host not found: {host_id}"),
+            );
         }
         if let Err(e) = self.secrets.store(&secret_label, password.as_bytes()).await {
             return Response::err(id, protocol::INTERNAL_ERROR, format!("store secret: {e}"));
@@ -685,33 +749,42 @@ impl EngineServer {
         id: u64,
         params: serde_json::Value,
     ) -> Response {
-        let host_id = match get_uuid_param(&params, "host_id") {
-            Ok(id) => id,
-            Err(r) => return r,
+        const MAX_EXEC_TIMEOUT_SECS: u64 = 3600;
+        let p: SshExecuteCommandParams = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => {
+                return Response::err(id, protocol::INVALID_PARAMS, format!("bad params: {e}"))
+            }
         };
-        let command = match params.get("command").and_then(|v| v.as_str()) {
-            Some(c) => c.to_owned(),
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing command"),
-        };
+        if p.command.trim().is_empty() {
+            return Response::err(id, protocol::INVALID_PARAMS, "missing command");
+        }
+        if p.timeout_secs == 0 || p.timeout_secs > MAX_EXEC_TIMEOUT_SECS {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                format!("timeout_secs must be in 1..={MAX_EXEC_TIMEOUT_SECS}"),
+            );
+        }
 
-        let (_host, session) = match self.connect_to_host(host_id).await {
+        let (_host, session) = match self.connect_to_host(p.host_id).await {
             Ok(hs) => hs,
             Err(e) => return Response::err(id, protocol::INTERNAL_ERROR, e),
         };
 
-        // The operator's own command runs for as long as it runs.
-        match session.exec(&command, None).await {
-            Ok((exit_code, stdout, stderr)) => {
-                let _ = session.disconnect().await;
-                Response::ok(
-                    id,
-                    serde_json::json!({
-                        "stdout": stdout,
-                        "stderr": stderr,
-                        "exit_code": exit_code,
-                    }),
-                )
-            }
+        let budget = Some(std::time::Duration::from_secs(p.timeout_secs));
+        let exec_res = session.exec_detailed(&p.command, budget).await;
+        let _ = session.disconnect().await;
+        match exec_res {
+            Ok(out) => Response::ok(
+                id,
+                serde_json::json!({
+                    "stdout": out.stdout,
+                    "stderr": out.stderr,
+                    "exit_code": out.exit_code,
+                    "truncated": out.truncated,
+                }),
+            ),
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
         }
     }
@@ -959,40 +1032,44 @@ impl EngineServer {
                 match connect_to_host_owned(&state, &secrets, hid).await {
                     Ok((host, session)) => {
                         let result = match op {
-                            FanoutOp::Push => match push_public_key(&session, &public_key, use_sudo).await {
-                                Ok(()) => PushResult {
-                                    host_id: hid.to_string(),
-                                    host_label: host.label.clone(),
-                                    success: true,
-                                    message: "key pushed".into(),
-                                },
-                                Err(e) => PushResult {
-                                    host_id: hid.to_string(),
-                                    host_label: host.label.clone(),
-                                    success: false,
-                                    message: e.to_string(),
-                                },
-                            },
-                            FanoutOp::Revoke => match revoke_public_key(&session, &public_key, use_sudo).await {
-                                Ok(RevokeOutcome::Removed) => PushResult {
-                                    host_id: hid.to_string(),
-                                    host_label: host.label.clone(),
-                                    success: true,
-                                    message: "key revoked".into(),
-                                },
-                                Ok(RevokeOutcome::NotPresent) => PushResult {
-                                    host_id: hid.to_string(),
-                                    host_label: host.label.clone(),
-                                    success: true,
-                                    message: "key not present on host".into(),
-                                },
-                                Err(e) => PushResult {
-                                    host_id: hid.to_string(),
-                                    host_label: host.label.clone(),
-                                    success: false,
-                                    message: e.to_string(),
-                                },
-                            },
+                            FanoutOp::Push => {
+                                match push_public_key(&session, &public_key, use_sudo).await {
+                                    Ok(()) => PushResult {
+                                        host_id: hid.to_string(),
+                                        host_label: host.label.clone(),
+                                        success: true,
+                                        message: "key pushed".into(),
+                                    },
+                                    Err(e) => PushResult {
+                                        host_id: hid.to_string(),
+                                        host_label: host.label.clone(),
+                                        success: false,
+                                        message: e.to_string(),
+                                    },
+                                }
+                            }
+                            FanoutOp::Revoke => {
+                                match revoke_public_key(&session, &public_key, use_sudo).await {
+                                    Ok(RevokeOutcome::Removed) => PushResult {
+                                        host_id: hid.to_string(),
+                                        host_label: host.label.clone(),
+                                        success: true,
+                                        message: "key revoked".into(),
+                                    },
+                                    Ok(RevokeOutcome::NotPresent) => PushResult {
+                                        host_id: hid.to_string(),
+                                        host_label: host.label.clone(),
+                                        success: true,
+                                        message: "key not present on host".into(),
+                                    },
+                                    Err(e) => PushResult {
+                                        host_id: hid.to_string(),
+                                        host_label: host.label.clone(),
+                                        success: false,
+                                        message: e.to_string(),
+                                    },
+                                }
+                            }
                         };
                         let _ = session.disconnect().await;
                         // The audit log's whole purpose: which key reached
@@ -1249,7 +1326,11 @@ impl EngineServer {
 
         let host_to_validate = raw_host.strip_prefix("tls:").unwrap_or(raw_host);
         if let Err(e) = supermgr_core::sanitize::validate_host_or_ip(host_to_validate) {
-            return Response::err(id, protocol::INVALID_PARAMS, format!("invalid hostname: {e}"));
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                format!("invalid hostname: {e}"),
+            );
         }
 
         let port = match params
@@ -1269,7 +1350,10 @@ impl EngineServer {
         };
 
         let normalized_key = if raw_host.starts_with("tls:") {
-            format!("tls:{}", crate::tls_pin::normalize_tls_pin_host(host_to_validate))
+            format!(
+                "tls:{}",
+                crate::tls_pin::normalize_tls_pin_host(host_to_validate)
+            )
         } else {
             raw_host.to_owned()
         };

@@ -263,8 +263,12 @@ mod tests {
     #[test]
     fn build_https_api_url_preserves_host_and_port_and_rejects_authority_smuggling() {
         assert_eq!(
-            build_https_api_url("fw.example.com", 8443, "/api/v2/cmdb/system/global?vdom=root")
-                .unwrap(),
+            build_https_api_url(
+                "fw.example.com",
+                8443,
+                "/api/v2/cmdb/system/global?vdom=root"
+            )
+            .unwrap(),
             "https://fw.example.com:8443/api/v2/cmdb/system/global?vdom=root"
         );
         assert_eq!(

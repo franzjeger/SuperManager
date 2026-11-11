@@ -96,6 +96,17 @@ pub struct PortableBackup {
 }
 
 impl PortableBackup {
+    /// Validate that `version` is within `[1, BACKUP_VERSION]`.
+    pub fn validate_version(&self) -> Result<(), String> {
+        if self.version == 0 || self.version > BACKUP_VERSION {
+            return Err(format!(
+                "unsupported backup format version {} (expected 1..={BACKUP_VERSION})",
+                self.version
+            ));
+        }
+        Ok(())
+    }
+
     /// A new, empty backup stamped with the current version. Callers
     /// fill the sections they have and set `exported_at`.
     #[must_use]

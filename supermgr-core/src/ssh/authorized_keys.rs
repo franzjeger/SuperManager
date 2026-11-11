@@ -123,9 +123,7 @@ pub fn parse_public_key_core(line: &str) -> Option<(&str, &str)> {
         return None;
     }
 
-    let first_end = trimmed
-        .find([' ', '\t'])
-        .unwrap_or(trimmed.len());
+    let first_end = trimmed.find([' ', '\t']).unwrap_or(trimmed.len());
     let first_tok = &trimmed[..first_end];
 
     let key_part = if is_ssh_key_type(first_tok) {
@@ -148,8 +146,9 @@ fn validate_input_public_key(raw: &str) -> Result<(&str, &str, &str), String> {
     if pub_line.contains(['\n', '\r', '\0']) {
         return Err("public key must be a single line without control characters".into());
     }
-    let (key_type, blob) = parse_public_key_core(pub_line)
-        .ok_or_else(|| "invalid SSH public key format (expected '<type> <base64> [comment]')".to_owned())?;
+    let (key_type, blob) = parse_public_key_core(pub_line).ok_or_else(|| {
+        "invalid SSH public key format (expected '<type> <base64> [comment]')".to_owned()
+    })?;
     // Ensure caller input starts directly with `<key_type> <blob>`, not attacker-injected options.
     if !pub_line.starts_with(key_type) {
         return Err("public key must not include authorized_keys options".into());
@@ -158,8 +157,7 @@ fn validate_input_public_key(raw: &str) -> Result<(&str, &str, &str), String> {
 }
 
 fn line_matches_key(line: &str, key_type: &str, blob: &str) -> bool {
-    parse_public_key_core(line)
-        .is_some_and(|(kt, kb)| kt == key_type && kb == blob)
+    parse_public_key_core(line).is_some_and(|(kt, kb)| kt == key_type && kb == blob)
 }
 
 async fn stage_and_replace_sftp(
@@ -188,7 +186,9 @@ async fn stage_and_replace_sftp(
             Ok((0, _, _)) => {}
             Ok((rc, _, stderr)) => {
                 let _ = files.remove_file(&tmp_path).await;
-                return Err(format!("atomic replace of {ak_path} failed (rc={rc}): {stderr}"));
+                return Err(format!(
+                    "atomic replace of {ak_path} failed (rc={rc}): {stderr}"
+                ));
             }
             Err(e) => {
                 let _ = files.remove_file(&tmp_path).await;
@@ -302,16 +302,16 @@ async fn push_via_exec(
         .await;
 
     let key_core_b64 = encode(&format!("{key_type} {blob}"));
-    let check_cmd = format!(
-        "grep -qF \"$(printf '%s' {key_core_b64} | base64 -d)\" {ak_path} 2>/dev/null"
-    );
+    let check_cmd =
+        format!("grep -qF \"$(printf '%s' {key_core_b64} | base64 -d)\" {ak_path} 2>/dev/null");
     let (rc, _, _) = shell.exec(&check_cmd).await?;
     if rc == 0 {
         return Ok(());
     }
 
     let full_b64 = encode(pub_line);
-    let append_cmd = format!("printf '%s' {full_b64} | base64 -d >> {ak_path} && printf '\\n' >> {ak_path}");
+    let append_cmd =
+        format!("printf '%s' {full_b64} | base64 -d >> {ak_path} && printf '\\n' >> {ak_path}");
     let (rc, _, stderr) = shell.exec(&append_cmd).await?;
     if rc != 0 {
         return Err(SshError::PushFailed(format!(
@@ -533,10 +533,8 @@ mod tests {
 
     use super::*;
 
-    const KEY: &str =
-        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexampleKeyMaterial12345 admin@laptop";
-    const KEY_CORE: &str =
-        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexampleKeyMaterial12345";
+    const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexampleKeyMaterial12345 admin@laptop";
+    const KEY_CORE: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexampleKeyMaterial12345";
 
     struct FakeShell {
         commands: Mutex<Vec<String>>,
@@ -891,7 +889,10 @@ mod tests {
             rewrite.contains("|| [ $? -eq 1 ]"),
             "removing the final key makes grep exit 1 and must still succeed: {rewrite}"
         );
-        assert!(rewrite.contains("&& mv -f "), "should move over the original");
+        assert!(
+            rewrite.contains("&& mv -f "),
+            "should move over the original"
+        );
     }
 
     #[tokio::test]
@@ -936,8 +937,10 @@ mod tests {
         let shell = FakeShell::exec_only();
         assert!(push_public_key(&shell, "", false).await.is_err());
         assert!(revoke_public_key(&shell, "", true).await.is_err());
-        assert!(push_public_key(&shell, &format!("{KEY}\nssh-ed25519 AAAAB3extra"), false)
-            .await
-            .is_err());
+        assert!(
+            push_public_key(&shell, &format!("{KEY}\nssh-ed25519 AAAAB3extra"), false)
+                .await
+                .is_err()
+        );
     }
 }

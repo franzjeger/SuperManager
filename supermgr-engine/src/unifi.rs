@@ -64,8 +64,8 @@ fn join_controller_url(base_url: &str, api_path: &str) -> Result<String> {
         return Err(anyhow!("API path must not contain a URL fragment"));
     }
 
-    let mut parsed =
-        url::Url::parse(base_url.trim()).with_context(|| format!("invalid controller URL: {base_url}"))?;
+    let mut parsed = url::Url::parse(base_url.trim())
+        .with_context(|| format!("invalid controller URL: {base_url}"))?;
     match parsed.scheme() {
         "https" | "http" => {}
         other => return Err(anyhow!("unsupported controller URL scheme: {other}")),
@@ -536,8 +536,11 @@ mod tests {
     #[test]
     fn join_controller_url_preserves_authority_and_rejects_injection() {
         assert_eq!(
-            join_controller_url("https://unifi.example.com:8443/", "/api/s/default/stat/device?limit=10")
-                .unwrap(),
+            join_controller_url(
+                "https://unifi.example.com:8443/",
+                "/api/s/default/stat/device?limit=10"
+            )
+            .unwrap(),
             "https://unifi.example.com:8443/api/s/default/stat/device?limit=10"
         );
         for bad_path in [
@@ -554,7 +557,8 @@ mod tests {
             );
         }
         assert!(
-            join_controller_url("https://admin:secret@unifi.example.com:8443", "/api/self").is_err()
+            join_controller_url("https://admin:secret@unifi.example.com:8443", "/api/self")
+                .is_err()
         );
     }
 }

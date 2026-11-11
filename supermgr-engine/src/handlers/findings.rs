@@ -143,7 +143,10 @@ impl EngineServer {
         let findings = match crate::findings_store::list_findings(&scope) {
             Ok(list) => list,
             Err(e) => {
-                return Response::err_engine(id, &crate::error::EngineError::from_findings_anyhow(e))
+                return Response::err_engine(
+                    id,
+                    &crate::error::EngineError::from_findings_anyhow(e),
+                )
             }
         };
         // Pull host zones from the most recent inventory snapshot —

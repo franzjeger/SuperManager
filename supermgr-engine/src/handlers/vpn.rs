@@ -327,14 +327,27 @@ impl EngineServer {
     ) -> Response {
         use supermgr_core::vpn::profile::{import_wireguard_conf, ProfileConfig};
 
-        let name = match params.get("name").and_then(|v| v.as_str()) {
-            Some(s) if !s.is_empty() => s.to_owned(),
-            _ => return Response::err(id, protocol::INVALID_PARAMS, "missing name".to_owned()),
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ImportWireGuardParams {
+            name: String,
+            content: String,
+        }
+
+        let p: ImportWireGuardParams = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => {
+                return Response::err(id, protocol::INVALID_PARAMS, format!("bad params: {e}"))
+            }
         };
-        let content = match params.get("content").and_then(|v| v.as_str()) {
-            Some(s) if !s.is_empty() => s.to_owned(),
-            _ => return Response::err(id, protocol::INVALID_PARAMS, "missing content".to_owned()),
-        };
+        if p.name.is_empty() {
+            return Response::err(id, protocol::INVALID_PARAMS, "missing name".to_owned());
+        }
+        if p.content.is_empty() {
+            return Response::err(id, protocol::INVALID_PARAMS, "missing content".to_owned());
+        }
+        let name = p.name;
+        let content = p.content;
 
         let new_id = uuid::Uuid::new_v4();
         let secret_label = format!("vpn/{new_id}/wg-private-key");
@@ -343,12 +356,6 @@ impl EngineServer {
             Err(e) => return Response::err(id, protocol::INVALID_PARAMS, format!("parse: {e}")),
         };
 
-        // Persist private key first. If it fails the profile would
-        // reference a missing secret — bail out without writing
-        // half-state. `ZeroingKey::take` consumes the wrapper and
-        // returns the raw `String`; we hand it straight to the secret
-        // store so it never sticks around in this scope longer than
-        // needed.
         let raw_pk = private_key.take();
         if let Err(e) = self.secrets.store(&secret_label, raw_pk.as_bytes()).await {
             return Response::err(
@@ -357,17 +364,24 @@ impl EngineServer {
                 format!("store private key: {e}"),
             );
         }
-        // Best-effort zero of the local copy — we passed the bytes
-        // through a clone into the secret store, so the actual store
-        // path's lifetime isn't ours to manage.
         drop(raw_pk);
-        // Then any per-peer pre-shared keys. A failure here doesn't
-        // invalidate the whole profile (the user can re-enter PSKs in
-        // the UI later), but we log it.
+
+        // Persist every per-peer pre-shared key strictly: a missing PSK makes
+        // the tunnel fail cryptographically at connect time, so roll back any
+        // stored secrets and return an error rather than reporting partial success (`P2-25`).
+        let mut stored_labels = vec![secret_label.clone()];
         for (label, value) in &psks {
             if let Err(e) = self.secrets.store(label, value.as_bytes()).await {
-                warn!("store WireGuard PSK {label}: {e}");
+                for cleanup in &stored_labels {
+                    let _ = self.secrets.delete(cleanup).await;
+                }
+                return Response::err(
+                    id,
+                    protocol::INTERNAL_ERROR,
+                    format!("store WireGuard PSK {label}: {e}"),
+                );
             }
+            stored_labels.push(label.clone());
         }
 
         let profile = Profile {
@@ -385,6 +399,10 @@ impl EngineServer {
 
         let mut state = self.state.lock().await;
         if let Err(e) = state.save_profile(&profile) {
+            drop(state);
+            for cleanup in &stored_labels {
+                let _ = self.secrets.delete(cleanup).await;
+            }
             return Response::err(id, protocol::INTERNAL_ERROR, format!("save: {e}"));
         }
         state.profiles.insert(profile.id, profile.clone());
@@ -1338,7 +1356,11 @@ impl EngineServer {
                 let ovpn_bytes = match std::fs::read(&ov.config_file) {
                     Ok(b) => b,
                     Err(e) => {
-                        return Response::err(id, protocol::INTERNAL_ERROR, format!("read ovpn: {e}"))
+                        return Response::err(
+                            id,
+                            protocol::INTERNAL_ERROR,
+                            format!("read ovpn: {e}"),
+                        )
                     }
                 };
                 if let Err(e) = write_private_file(&new_path, &ovpn_bytes) {

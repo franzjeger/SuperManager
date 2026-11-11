@@ -9,7 +9,7 @@
 //! malformed exchange invalidates that connection; reopen it before retrying.
 //! A lost response does not establish whether a mutating operation completed.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -92,9 +92,11 @@ pub struct MacClient {
 }
 
 struct Inner {
+    path: PathBuf,
     // Take the stream while exchanging, and return it only after a complete,
-    // validated response. Cancellation drops it instead of leaving half a frame
-    // for the next caller to interpret.
+    // validated response. Cancellation or timeout drops it instead of leaving
+    // half a frame for the next caller to interpret; the next exchange opens a
+    // fresh connection automatically so a single slow RPC never bricks the client.
     io: Mutex<Option<UnixStream>>,
     next_id: AtomicU64,
 }
@@ -107,9 +109,13 @@ impl MacClient {
 
     /// Connect to an explicit engine socket, including isolated test instances.
     pub async fn open_path(path: impl AsRef<Path>) -> Result<Self, MacError> {
-        let stream = UnixStream::connect(path).await.map_err(MacError::Connect)?;
+        let path = path.as_ref().to_path_buf();
+        let stream = UnixStream::connect(&path)
+            .await
+            .map_err(MacError::Connect)?;
         Ok(Self {
             inner: Arc::new(Inner {
+                path,
                 io: Mutex::new(Some(stream)),
                 next_id: AtomicU64::new(1),
             }),
@@ -118,6 +124,17 @@ impl MacClient {
 
     /// Invoke an engine method using its JSON-RPC name and named parameters.
     pub async fn invoke(&self, method: &str, params: Value) -> Result<Value, MacError> {
+        self.invoke_with_timeout(method, params, DEFAULT_TIMEOUT)
+            .await
+    }
+
+    /// Invoke an engine method with an explicit client-side deadline.
+    pub async fn invoke_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: Duration,
+    ) -> Result<Value, MacError> {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let request = Request {
             jsonrpc: "2.0",
@@ -132,9 +149,9 @@ impl MacClient {
                 "request exceeds {MAX_FRAME_BYTES} bytes"
             )));
         }
-        let response = timeout(DEFAULT_TIMEOUT, self.exchange(&frame, id))
+        let response = timeout(deadline, self.exchange(&frame, id))
             .await
-            .map_err(|_| MacError::Timeout(DEFAULT_TIMEOUT))??;
+            .map_err(|_| MacError::Timeout(deadline))??;
         if let Some(error) = response.error {
             return Err(MacError::Rpc {
                 code: error.code,
@@ -151,7 +168,19 @@ impl MacClient {
         method: &str,
         params: Value,
     ) -> Result<String, MacError> {
-        let value = self.invoke(method, params).await?;
+        self.invoke_json_string_with_timeout(method, params, DEFAULT_TIMEOUT)
+            .await
+    }
+
+    /// Return a string result verbatim, or serialize a structured JSON result,
+    /// using an explicit client-side deadline.
+    pub async fn invoke_json_string_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: Duration,
+    ) -> Result<String, MacError> {
+        let value = self.invoke_with_timeout(method, params, deadline).await?;
         match value {
             Value::String(text) => Ok(text),
             other => serde_json::to_string(&other)
@@ -167,12 +196,27 @@ impl MacClient {
 
     async fn exchange(&self, frame: &[u8], want_id: u64) -> Result<Response, MacError> {
         let mut guard = self.inner.io.lock().await;
-        let mut stream = guard.take().ok_or(MacError::Disconnected)?;
-        stream
-            .write_all(&(frame.len() as u32).to_be_bytes())
-            .await
-            .map_err(MacError::Io)?;
-        stream.write_all(frame).await.map_err(MacError::Io)?;
+        let (mut stream, was_cached) = match guard.take() {
+            Some(stream) => (stream, true),
+            None => (
+                UnixStream::connect(&self.inner.path)
+                    .await
+                    .map_err(MacError::Connect)?,
+                false,
+            ),
+        };
+        if let Err(err) = Self::write_request_frame(&mut stream, frame).await {
+            if was_cached && is_stale_cached_stream_error(&err) {
+                stream = UnixStream::connect(&self.inner.path)
+                    .await
+                    .map_err(MacError::Connect)?;
+                Self::write_request_frame(&mut stream, frame)
+                    .await
+                    .map_err(MacError::Io)?;
+            } else {
+                return Err(MacError::Io(err));
+            }
+        }
         let mut length = [0; 4];
         stream.read_exact(&mut length).await.map_err(read_error)?;
         let length = u32::from_be_bytes(length) as usize;
@@ -202,6 +246,23 @@ impl MacClient {
         *guard = Some(stream);
         Ok(response)
     }
+
+    async fn write_request_frame(stream: &mut UnixStream, frame: &[u8]) -> std::io::Result<()> {
+        stream
+            .write_all(&(frame.len() as u32).to_be_bytes())
+            .await?;
+        stream.write_all(frame).await
+    }
+}
+
+fn is_stale_cached_stream_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::NotConnected
+            | std::io::ErrorKind::UnexpectedEof
+    )
 }
 
 fn read_error(error: std::io::Error) -> MacError {
@@ -380,16 +441,36 @@ impl MacClient {
             .await
     }
 
-    /// Execute a shell command on a remote host via SSH. Returns JSON
-    /// containing `stdout`, `stderr`, and `exit_code`.
+    /// Execute a shell command on a remote host via SSH using the default
+    /// 60-second execution budget. Returns JSON containing `stdout`, `stderr`,
+    /// `exit_code`, and `truncated`.
     pub async fn ssh_execute_command(
         &self,
         host_id: &str,
         command: &str,
     ) -> Result<String, MacError> {
-        self.invoke_json_string(
+        self.ssh_execute_command_with_timeout(host_id, command, 60)
+            .await
+    }
+
+    /// Execute a shell command on a remote host via SSH with an explicit
+    /// execution budget (`timeout_secs` in `1..=3600`).
+    pub async fn ssh_execute_command_with_timeout(
+        &self,
+        host_id: &str,
+        command: &str,
+        timeout_secs: u64,
+    ) -> Result<String, MacError> {
+        let client_deadline =
+            DEFAULT_TIMEOUT.max(Duration::from_secs(timeout_secs.saturating_add(15)));
+        self.invoke_json_string_with_timeout(
             "ssh_execute_command",
-            serde_json::json!({ "host_id": host_id, "command": command }),
+            serde_json::json!({
+                "host_id": host_id,
+                "command": command,
+                "timeout_secs": timeout_secs,
+            }),
+            client_deadline,
         )
         .await
     }
@@ -598,11 +679,11 @@ mod tests {
             client.invoke("api_version", json!({})).await,
             Err(MacError::Protocol(_))
         ));
+        peer.await.unwrap();
         assert!(matches!(
             client.list_hosts().await,
-            Err(MacError::Disconnected)
+            Err(MacError::Connect(_))
         ));
-        peer.await.unwrap();
     }
 
     #[tokio::test]
@@ -619,30 +700,40 @@ mod tests {
                 client.invoke("api_version", json!({})).await,
                 Err(MacError::Protocol(_))
             ));
+            peer.await.unwrap();
             assert!(matches!(
                 client.list_hosts().await,
-                Err(MacError::Disconnected)
+                Err(MacError::Connect(_))
             ));
-            peer.await.unwrap();
         }
     }
 
     #[tokio::test]
-    async fn cancellation_during_partial_response_does_not_reuse_the_socket() {
+    async fn cancellation_during_partial_response_drops_stream_and_reconnects() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("engine.sock");
         let listener = UnixListener::bind(&path).unwrap();
         let (started, response_started) = tokio::sync::oneshot::channel();
         let peer = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
+            let (mut first, _) = listener.accept().await.unwrap();
             let mut length = [0; 4];
-            stream.read_exact(&mut length).await.unwrap();
+            first.read_exact(&mut length).await.unwrap();
             let mut request = vec![0; u32::from_be_bytes(length) as usize];
-            stream.read_exact(&mut request).await.unwrap();
-            stream.write_all(&100u32.to_be_bytes()).await.unwrap();
-            stream.write_all(b"{").await.unwrap();
+            first.read_exact(&mut request).await.unwrap();
+            first.write_all(&100u32.to_be_bytes()).await.unwrap();
+            first.write_all(b"{").await.unwrap();
             started.send(()).unwrap();
-            std::future::pending::<()>().await;
+
+            // Must accept a brand-new connection rather than receiving a second
+            // request on the half-read first stream.
+            let (mut second, _) = listener.accept().await.unwrap();
+            let mut length = [0; 4];
+            second.read_exact(&mut length).await.unwrap();
+            let mut request = vec![0; u32::from_be_bytes(length) as usize];
+            second.read_exact(&mut request).await.unwrap();
+            let parsed: Value = serde_json::from_slice(&request).unwrap();
+            let reply = frame(json!({"jsonrpc": "2.0", "id": parsed["id"], "result": []}));
+            second.write_all(&reply).await.unwrap();
         });
         let client = MacClient::open_path(path).await.unwrap();
         let caller = client.clone();
@@ -650,10 +741,7 @@ mod tests {
         response_started.await.unwrap();
         request.abort();
         assert!(request.await.unwrap_err().is_cancelled());
-        assert!(matches!(
-            client.list_hosts().await,
-            Err(MacError::Disconnected)
-        ));
-        peer.abort();
+        assert_eq!(client.list_hosts().await.unwrap(), "[]");
+        peer.await.unwrap();
     }
 }

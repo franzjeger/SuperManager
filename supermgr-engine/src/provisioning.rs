@@ -266,9 +266,7 @@ const SECRET_EXTRA_KEYS: &[&str] = &[
 fn validate_secret_value(key: &str, raw: &str) -> Result<()> {
     let trimmed = raw.trim();
     if trimmed.len() < 8 {
-        return Err(anyhow!(
-            "extras.{key} must be at least 8 characters long"
-        ));
+        return Err(anyhow!("extras.{key} must be at least 8 characters long"));
     }
     if raw.chars().any(|c| c.is_control() || c == '"') {
         return Err(anyhow!(
@@ -276,8 +274,10 @@ fn validate_secret_value(key: &str, raw: &str) -> Result<()> {
         ));
     }
     let lower = trimmed.to_ascii_lowercase();
-    if matches!(lower.as_str(), "admin" | "password" | "changeme" | "12345678")
-        || lower.starts_with("change-me")
+    if matches!(
+        lower.as_str(),
+        "admin" | "password" | "changeme" | "12345678"
+    ) || lower.starts_with("change-me")
     {
         return Err(anyhow!(
             "extras.{key} must not use a placeholder or default value"
@@ -437,7 +437,12 @@ fn validate_render_inputs(
         site.lan_base
             .trim()
             .parse::<ipnet::Ipv4Net>()
-            .map_err(|e| anyhow!("site.lan_base '{}' is not a valid IPv4 CIDR: {e}", site.lan_base))?;
+            .map_err(|e| {
+                anyhow!(
+                    "site.lan_base '{}' is not a valid IPv4 CIDR: {e}",
+                    site.lan_base
+                )
+            })?;
     }
     if site.wan_type == "static" || !site.wan_static_ip.trim().is_empty() {
         validate_wan_ip_spec(&site.wan_static_ip, "site.wan_static_ip")?;
@@ -466,19 +471,22 @@ fn validate_render_inputs(
         }
     }
 
-    if let Some(ip) = extras.get("s2s_peer_ip").and_then(serde_json::Value::as_str) {
+    if let Some(ip) = extras
+        .get("s2s_peer_ip")
+        .and_then(serde_json::Value::as_str)
+    {
         if !ip.trim().is_empty() {
-            ip.trim()
-                .parse::<std::net::Ipv4Addr>()
-                .map_err(|e| anyhow!("extras.s2s_peer_ip '{ip}' is not a valid IPv4 address: {e}"))?;
+            ip.trim().parse::<std::net::Ipv4Addr>().map_err(|e| {
+                anyhow!("extras.s2s_peer_ip '{ip}' is not a valid IPv4 address: {e}")
+            })?;
         }
     }
     for cidr_key in ["s2s_peer_subnet", "wan2_static_ip"] {
         if let Some(cidr) = extras.get(cidr_key).and_then(serde_json::Value::as_str) {
             if !cidr.trim().is_empty() {
-                cidr.trim()
-                    .parse::<ipnet::Ipv4Net>()
-                    .map_err(|e| anyhow!("extras.{cidr_key} '{cidr}' is not a valid IPv4 CIDR: {e}"))?;
+                cidr.trim().parse::<ipnet::Ipv4Net>().map_err(|e| {
+                    anyhow!("extras.{cidr_key} '{cidr}' is not a valid IPv4 CIDR: {e}")
+                })?;
             }
         }
     }
@@ -1037,15 +1045,24 @@ pub(crate) fn redact_rendered_secrets(rendered: &str) -> String {
     for line in rendered.lines() {
         let trimmed = line.trim_start();
         let indent = &line[..line.len() - trimmed.len()];
-        let redacted_forti = ["set passwd ", "set password ", "set psksecret ", "set secret "]
-            .iter()
-            .find_map(|prefix| trimmed.strip_prefix(prefix).map(|_| *prefix));
+        let redacted_forti = [
+            "set passwd ",
+            "set password ",
+            "set psksecret ",
+            "set secret ",
+        ]
+        .iter()
+        .find_map(|prefix| trimmed.strip_prefix(prefix).map(|_| *prefix));
         if let Some(prefix) = redacted_forti {
             out.push_str(indent);
             out.push_str(prefix);
             out.push_str("\"<redacted>\"\n");
         } else if trimmed.starts_with("\"x_passphrase\":") {
-            let comma = if trimmed.trim_end().ends_with(',') { "," } else { "" };
+            let comma = if trimmed.trim_end().ends_with(',') {
+                ","
+            } else {
+                ""
+            };
             out.push_str(indent);
             out.push_str("\"x_passphrase\": \"<redacted>\"");
             out.push_str(comma);
@@ -1199,6 +1216,292 @@ fn is_full_config(text: &str) -> bool {
         && text.lines().map(str::trim).rfind(|line| !line.is_empty()) == Some("end")
 }
 
+/// Normalize a `FortiOS` `set dst ...` value (`10.99.99.0/24` or
+/// `10.99.99.0 255.255.255.0`) to canonical CIDR form so `show full-configuration`
+/// output matches rendered template syntax.
+fn normalize_fortios_dst(raw: &str) -> String {
+    let trimmed = raw.trim().trim_matches('"');
+    if let Ok(net) = trimmed.parse::<ipnet::IpNet>() {
+        return net.trunc().to_string();
+    }
+    let mut parts = trimmed.split_whitespace();
+    if let (Some(ip_s), Some(mask_s), None) = (parts.next(), parts.next(), parts.next()) {
+        if let (Ok(ip), Ok(mask)) = (
+            ip_s.parse::<std::net::Ipv4Addr>(),
+            mask_s.parse::<std::net::Ipv4Addr>(),
+        ) {
+            if let Ok(net) = ipnet::Ipv4Net::with_netmask(ip, mask) {
+                return ipnet::IpNet::V4(net.trunc()).to_string();
+            }
+        }
+    }
+    trimmed.to_owned()
+}
+
+/// Index existing `config firewall policy` (`name -> id`) and
+/// `config router static` (`(dst_cidr, device) -> id`) entries in `live_config`,
+/// then rewrite matching `edit 0` entries in `rendered` to `edit <existing_id>`
+/// so repeated deploys update policies/routes in place instead of creating
+/// duplicates on every push (`P2-23`).
+pub(crate) fn resolve_idempotent_fortios_edits(rendered: &str, live_config: &str) -> String {
+    if live_config.trim().is_empty() {
+        return rendered.to_owned();
+    }
+
+    let mut policy_ids_by_name: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut route_ids_by_key: std::collections::HashMap<(String, String), String> =
+        std::collections::HashMap::new();
+
+    #[derive(Copy, Clone, PartialEq, Eq)]
+    enum Section {
+        Other(usize),
+        Policy,
+        StaticRoute,
+    }
+
+    let mut section: Option<Section> = None;
+    let mut cur_id: Option<String> = None;
+    let mut cur_name: Option<String> = None;
+    let mut cur_dst: Option<String> = None;
+    let mut cur_dev: Option<String> = None;
+    let mut nested_depth: usize = 0;
+
+    let flush_live_entry =
+        |sec: Section,
+         id: &mut Option<String>,
+         name: &mut Option<String>,
+         dst: &mut Option<String>,
+         dev: &mut Option<String>,
+         policies: &mut std::collections::HashMap<String, String>,
+         routes: &mut std::collections::HashMap<(String, String), String>| {
+            if let Some(edit_id) = id.take() {
+                match sec {
+                    Section::Policy => {
+                        if let Some(n) = name.take() {
+                            policies.entry(n).or_insert(edit_id);
+                        }
+                    }
+                    Section::StaticRoute => {
+                        let d = dst.take().unwrap_or_else(|| "0.0.0.0/0".to_owned());
+                        if let Some(dv) = dev.take() {
+                            routes.entry((d, dv)).or_insert(edit_id);
+                        }
+                    }
+                    Section::Other(_) => {}
+                }
+            }
+            *name = None;
+            *dst = None;
+            *dev = None;
+        };
+
+    for raw_line in live_config.lines() {
+        let line = raw_line.trim();
+        match section {
+            None => {
+                if line == "config firewall policy" {
+                    section = Some(Section::Policy);
+                    nested_depth = 0;
+                } else if line == "config router static" {
+                    section = Some(Section::StaticRoute);
+                    nested_depth = 0;
+                } else if line.starts_with("config ") {
+                    section = Some(Section::Other(1));
+                }
+            }
+            Some(Section::Other(depth)) => {
+                if line.starts_with("config ") {
+                    section = Some(Section::Other(depth + 1));
+                } else if line == "end" {
+                    section = if depth <= 1 {
+                        None
+                    } else {
+                        Some(Section::Other(depth - 1))
+                    };
+                }
+            }
+            Some(sec @ (Section::Policy | Section::StaticRoute)) => {
+                if line.starts_with("config ") {
+                    nested_depth += 1;
+                } else if line == "end" {
+                    if nested_depth > 0 {
+                        nested_depth -= 1;
+                    } else {
+                        flush_live_entry(
+                            sec,
+                            &mut cur_id,
+                            &mut cur_name,
+                            &mut cur_dst,
+                            &mut cur_dev,
+                            &mut policy_ids_by_name,
+                            &mut route_ids_by_key,
+                        );
+                        section = None;
+                    }
+                } else if nested_depth == 0 {
+                    if let Some(rest) = line.strip_prefix("edit ") {
+                        flush_live_entry(
+                            sec,
+                            &mut cur_id,
+                            &mut cur_name,
+                            &mut cur_dst,
+                            &mut cur_dev,
+                            &mut policy_ids_by_name,
+                            &mut route_ids_by_key,
+                        );
+                        let id_tok = rest.trim().trim_matches('"');
+                        if !id_tok.is_empty() && id_tok != "0" {
+                            cur_id = Some(id_tok.to_owned());
+                        }
+                    } else if line == "next" {
+                        flush_live_entry(
+                            sec,
+                            &mut cur_id,
+                            &mut cur_name,
+                            &mut cur_dst,
+                            &mut cur_dev,
+                            &mut policy_ids_by_name,
+                            &mut route_ids_by_key,
+                        );
+                    } else if cur_id.is_some() {
+                        if let Some(v) = line.strip_prefix("set name ") {
+                            cur_name = Some(v.trim().trim_matches('"').to_owned());
+                        } else if let Some(v) = line.strip_prefix("set dst ") {
+                            cur_dst = Some(normalize_fortios_dst(v));
+                        } else if let Some(v) = line.strip_prefix("set device ") {
+                            cur_dev = Some(v.trim().trim_matches('"').to_owned());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if policy_ids_by_name.is_empty() && route_ids_by_key.is_empty() {
+        return rendered.to_owned();
+    }
+
+    // Rewrite pass over `rendered`: buffer each top-level `edit 0 ... next`
+    // inside `config firewall policy` / `config router static` and substitute
+    // `edit <id>` when a matching live entry exists.
+    let src_lines: Vec<&str> = rendered.lines().collect();
+    let mut out_lines: Vec<String> = Vec::with_capacity(src_lines.len());
+    let mut idx = 0usize;
+    let mut r_sec: Option<Section> = None;
+    let mut r_nested: usize = 0;
+
+    while idx < src_lines.len() {
+        let raw = src_lines[idx];
+        let trimmed = raw.trim();
+        match r_sec {
+            None => {
+                if trimmed == "config firewall policy" {
+                    r_sec = Some(Section::Policy);
+                    r_nested = 0;
+                } else if trimmed == "config router static" {
+                    r_sec = Some(Section::StaticRoute);
+                    r_nested = 0;
+                } else if trimmed.starts_with("config ") {
+                    r_sec = Some(Section::Other(1));
+                }
+                out_lines.push(raw.to_owned());
+                idx += 1;
+            }
+            Some(Section::Other(depth)) => {
+                if trimmed.starts_with("config ") {
+                    r_sec = Some(Section::Other(depth + 1));
+                } else if trimmed == "end" {
+                    r_sec = if depth <= 1 {
+                        None
+                    } else {
+                        Some(Section::Other(depth - 1))
+                    };
+                }
+                out_lines.push(raw.to_owned());
+                idx += 1;
+            }
+            Some(sec @ (Section::Policy | Section::StaticRoute)) => {
+                if trimmed.starts_with("config ") {
+                    r_nested += 1;
+                    out_lines.push(raw.to_owned());
+                    idx += 1;
+                } else if trimmed == "end" {
+                    if r_nested > 0 {
+                        r_nested -= 1;
+                    } else {
+                        r_sec = None;
+                    }
+                    out_lines.push(raw.to_owned());
+                    idx += 1;
+                } else if r_nested == 0 && trimmed == "edit 0" {
+                    let indent_len = raw.len() - raw.trim_start().len();
+                    let indent = &raw[..indent_len];
+                    let block_start = idx;
+                    idx += 1;
+                    let mut inner_nested = 0usize;
+                    let mut entry_name: Option<String> = None;
+                    let mut entry_dst: Option<String> = None;
+                    let mut entry_dev: Option<String> = None;
+                    while idx < src_lines.len() {
+                        let b_trim = src_lines[idx].trim();
+                        if b_trim.starts_with("config ") {
+                            inner_nested += 1;
+                        } else if b_trim == "end" {
+                            if inner_nested > 0 {
+                                inner_nested -= 1;
+                            } else {
+                                break;
+                            }
+                        } else if inner_nested == 0 {
+                            if b_trim == "next" {
+                                idx += 1;
+                                break;
+                            }
+                            if let Some(v) = b_trim.strip_prefix("set name ") {
+                                entry_name = Some(v.trim().trim_matches('"').to_owned());
+                            } else if let Some(v) = b_trim.strip_prefix("set dst ") {
+                                entry_dst = Some(normalize_fortios_dst(v));
+                            } else if let Some(v) = b_trim.strip_prefix("set device ") {
+                                entry_dev = Some(v.trim().trim_matches('"').to_owned());
+                            }
+                        }
+                        idx += 1;
+                    }
+                    let resolved_id = match sec {
+                        Section::Policy => entry_name
+                            .as_deref()
+                            .and_then(|n| policy_ids_by_name.get(n))
+                            .cloned(),
+                        Section::StaticRoute => {
+                            let d = entry_dst.unwrap_or_else(|| "0.0.0.0/0".to_owned());
+                            entry_dev.and_then(|dv| route_ids_by_key.get(&(d, dv)).cloned())
+                        }
+                        Section::Other(_) => None,
+                    };
+                    if let Some(existing_id) = resolved_id {
+                        out_lines.push(format!("{indent}edit {existing_id}"));
+                    } else {
+                        out_lines.push(src_lines[block_start].to_owned());
+                    }
+                    for line in &src_lines[block_start + 1..idx] {
+                        out_lines.push((*line).to_owned());
+                    }
+                } else {
+                    out_lines.push(raw.to_owned());
+                    idx += 1;
+                }
+            }
+        }
+    }
+
+    let mut joined = out_lines.join("\n");
+    if rendered.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined
+}
+
 /// Render → fetch live → diff, for the site's own FortiGate. Returns a
 /// structured response the GUI can render as a per-section preview, and
 /// the plan a deploy of exactly this configuration takes (`plans`).
@@ -1219,17 +1522,18 @@ pub async fn diff_preview(
     let (_host, session) = open_session(state, secrets, host_id).await?;
     let live = fetch_full_config(&session).await?;
     let _ = session.disconnect().await;
-    let sections = diff_sections(&render.output, &live);
+    let idempotent_output = resolve_idempotent_fortios_edits(&render.output, &live);
+    let sections = diff_sections(&idempotent_output, &live);
     let summary = summarise_sections(&sections);
     let plan_id = registry.insert(plans::Plan::new(
         host,
         request.clone(),
-        render.output.clone(),
+        idempotent_output.clone(),
     )?)?;
     Ok(DiffPreviewResult {
         plan_id: plan_id.to_string(),
         expires_in_secs: plans::TTL.as_secs(),
-        rendered: render.output,
+        rendered: idempotent_output,
         sections,
         summary,
     })
@@ -1355,11 +1659,14 @@ pub async fn deploy(
     record.backup_path = Some(backup_path.clone());
     save_deployment(&record)?;
 
-    // Step 2: push. Each line is sent separately via shell_interact
-    // so we get prompt-level error checking. Lines starting with
-    // `{#` (Tera comments left over) and blank lines are skipped.
-    let lines: Vec<String> = plan
-        .rendered
+    // Step 2: push. Resolve any remaining `edit 0` firewall policies or static
+    // routes against the fresh pre-deploy snapshot so re-deploys update existing
+    // entries by ID instead of duplicating policies (`P2-23`), then send each
+    // line via `shell_interact_abort_on_error` so we abort on the first CLI error.
+    let fresh_live = std::fs::read_to_string(&backup_path).unwrap_or_default();
+    let effective_rendered = resolve_idempotent_fortios_edits(&plan.rendered, &fresh_live);
+    record.rendered_config = effective_rendered.clone();
+    let lines: Vec<String> = effective_rendered
         .lines()
         .filter(|l| !l.trim_start().starts_with("{#") && !l.trim().is_empty())
         .map(str::to_owned)
@@ -1564,13 +1871,19 @@ pub async fn rollback(
     Ok(record)
 }
 
-fn parse_filter_cidr(cidr: &str, filter_name: &str) -> std::result::Result<ipnet::Ipv4Net, tera::Error> {
+fn parse_filter_cidr(
+    cidr: &str,
+    filter_name: &str,
+) -> std::result::Result<ipnet::Ipv4Net, tera::Error> {
     cidr.trim()
         .parse::<ipnet::Ipv4Net>()
         .map_err(|e| tera::Error::msg(format!("{filter_name}: invalid IPv4 CIDR '{cidr}': {e}")))
 }
 
-fn dhcp_pool_bounds(net: ipnet::Ipv4Net, filter_name: &str) -> std::result::Result<(std::net::Ipv4Addr, std::net::Ipv4Addr), tera::Error> {
+fn dhcp_pool_bounds(
+    net: ipnet::Ipv4Net,
+    filter_name: &str,
+) -> std::result::Result<(std::net::Ipv4Addr, std::net::Ipv4Addr), tera::Error> {
     let base = u32::from(net.network());
     let bcast = u32::from(net.broadcast());
     if net.prefix_len() <= 24 {
@@ -1710,7 +2023,9 @@ fn register_filters(tera: &mut Tera) {
                 .as_str()
                 .ok_or_else(|| tera::Error::msg("banner filter requires a string"))?;
             if text.chars().any(char::is_control) {
-                return Err(tera::Error::msg("banner text must not contain control characters"));
+                return Err(tera::Error::msg(
+                    "banner text must not contain control characters",
+                ));
             }
             let width = 60;
             let line = "=".repeat(width);
@@ -1816,7 +2131,11 @@ mod backup_tests {
         };
 
         let empty = serde_json::Map::new();
-        for tmpl in ["fortigate.branch_office", "fortigate.hq", "unifi.wifi_basic"] {
+        for tmpl in [
+            "fortigate.branch_office",
+            "fortigate.hq",
+            "unifi.wifi_basic",
+        ] {
             assert!(
                 super::render_with_customer(&customer, &site, tmpl, &empty).is_err(),
                 "{tmpl} must refuse rendering without explicit secrets"
@@ -1824,7 +2143,13 @@ mod backup_tests {
         }
 
         // Placeholder / weak secrets must also be refused.
-        for bad in ["admin", "CHANGE-ME", "CHANGE-ME-LONG-PASSPHRASE", "short", "bad\"quote123"] {
+        for bad in [
+            "admin",
+            "CHANGE-ME",
+            "CHANGE-ME-LONG-PASSPHRASE",
+            "short",
+            "bad\"quote123",
+        ] {
             let mut ex = serde_json::Map::new();
             ex.insert("vpn_psk".into(), serde_json::Value::String(bad.into()));
             ex.insert(
@@ -1876,9 +2201,8 @@ mod backup_tests {
             "wifi_password".into(),
             serde_json::Value::String("Wpa3StrongPass!2026".into()),
         );
-        let wifi =
-            super::render_with_customer(&customer, &site, "unifi.wifi_basic", &wifi_extras)
-                .unwrap();
+        let wifi = super::render_with_customer(&customer, &site, "unifi.wifi_basic", &wifi_extras)
+            .unwrap();
         assert!(wifi.output.contains("Wpa3StrongPass!2026"));
         assert!(!wifi.output.contains("CHANGE-ME"));
     }
@@ -1909,8 +2233,12 @@ mod backup_tests {
         assert!(matches!(diffs[0].status, super::SectionStatus::Modified));
         assert!(diffs[0].unified_diff.contains("-    edit \"first-old\""));
         assert!(diffs[0].unified_diff.contains("+    edit \"first-new\""));
-        assert!(diffs[0].unified_diff.contains("-    set subnet 10.0.0.0 255.255.255.0"));
-        assert!(diffs[0].unified_diff.contains("+    set subnet 10.99.0.0 255.255.255.0"));
+        assert!(diffs[0]
+            .unified_diff
+            .contains("-    set subnet 10.0.0.0 255.255.255.0"));
+        assert!(diffs[0]
+            .unified_diff
+            .contains("+    set subnet 10.99.0.0 255.255.255.0"));
         assert!(diffs[0].unified_diff.contains("-    edit \"last-old\""));
         assert!(diffs[0].unified_diff.contains("+    edit \"last-new\""));
     }
@@ -1971,13 +2299,9 @@ mod backup_tests {
         .is_err());
 
         // Secret redaction removes plaintext passphrases from persisted history.
-        let rendered = super::render_with_customer(
-            &customer,
-            &base_site,
-            "fortigate.branch_office",
-            &extras,
-        )
-        .unwrap();
+        let rendered =
+            super::render_with_customer(&customer, &base_site, "fortigate.branch_office", &extras)
+                .unwrap();
         let redacted = super::redact_rendered_secrets(&rendered.output);
         assert!(!redacted.contains("R9x#kL29!mPq81$vN4zW"));
         assert!(!redacted.contains("T7y@bQ44!zXc92#pL8mK"));
@@ -2001,5 +2325,54 @@ mod backup_tests {
         assert!(
             super::resolve_verified_backup_path(&host_dir, &outside.to_string_lossy()).is_err()
         );
+    }
+
+    #[test]
+    fn resolve_idempotent_fortios_edits_reuses_live_policy_and_route_ids() {
+        let live = "\
+config router static
+    edit 7
+        set dst 10.99.99.0 255.255.255.0
+        set device \"MGMT_VPN\"
+    next
+end
+config firewall policy
+    edit 42
+        set name \"corp-to-Internet\"
+        set action accept
+    next
+    edit 99
+        set name \"Implicit-deny-with-log\"
+        set action deny
+    next
+end
+";
+        let rendered = "\
+config router static
+    edit 0
+        set dst 10.99.99.0/24
+        set device \"MGMT_VPN\"
+    next
+end
+config firewall policy
+    edit 0
+        set name \"corp-to-Internet\"
+        set action accept
+    next
+    edit 0
+        set name \"brand-new-policy\"
+        set action accept
+    next
+    edit 0
+        set name \"Implicit-deny-with-log\"
+        set action deny
+    next
+end
+";
+        let resolved = super::resolve_idempotent_fortios_edits(rendered, live);
+        assert!(resolved.contains("    edit 7\n        set dst 10.99.99.0/24"));
+        assert!(resolved.contains("    edit 42\n        set name \"corp-to-Internet\""));
+        assert!(resolved.contains("    edit 0\n        set name \"brand-new-policy\""));
+        assert!(resolved.contains("    edit 99\n        set name \"Implicit-deny-with-log\""));
     }
 }

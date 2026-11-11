@@ -60,17 +60,6 @@ fn try_load_config_at(path: &std::path::Path) -> Result<NotifyConfig> {
     }
 }
 
-#[must_use]
-pub fn load_config() -> NotifyConfig {
-    match try_load_config() {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            tracing::error!("notify config could not be loaded: {e:#}");
-            NotifyConfig::default()
-        }
-    }
-}
-
 pub fn save_config(cfg: &NotifyConfig) -> Result<()> {
     save_config_at(&config_path(), cfg)
 }

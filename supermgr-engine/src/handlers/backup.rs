@@ -63,62 +63,100 @@ impl EngineServer {
         id: u64,
         params: serde_json::Value,
     ) -> Response {
-        let Some(data) = params.get("backup").and_then(|v| v.as_str()) else {
-            return Response::err(id, protocol::INVALID_PARAMS, "missing backup".to_owned());
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct BackupImportParams {
+            backup: String,
+        }
+
+        let p: BackupImportParams = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => {
+                return Response::err(id, protocol::INVALID_PARAMS, format!("bad params: {e}"))
+            }
         };
-        let backup: PortableBackup = match serde_json::from_str(data) {
+        let backup: PortableBackup = match serde_json::from_str(&p.backup) {
             Ok(b) => b,
             Err(e) => {
                 return Response::err(id, protocol::INVALID_PARAMS, format!("parse backup: {e}"))
             }
         };
+        if let Err(msg) = backup.validate_version() {
+            return Response::err(id, protocol::INVALID_PARAMS, msg);
+        }
 
-        let mut imported_secrets = 0usize;
+        // Decode all base64 secret values up front before mutating any state (`P2-24`).
+        let mut decoded_secrets: Vec<(String, Vec<u8>)> = Vec::with_capacity(backup.secrets.len());
         for (label, b64) in &backup.secrets {
             match STANDARD.decode(b64) {
-                Ok(bytes) => match self.secrets.store(label, &bytes).await {
-                    Ok(()) => imported_secrets += 1,
-                    Err(e) => tracing::warn!("backup import: store secret {label}: {e}"),
-                },
-                Err(e) => tracing::warn!("backup import: bad base64 for {label}: {e}"),
+                Ok(bytes) => decoded_secrets.push((label.clone(), bytes)),
+                Err(e) => {
+                    return Response::err(
+                        id,
+                        protocol::INVALID_PARAMS,
+                        format!("bad base64 for secret '{label}': {e}"),
+                    )
+                }
             }
+        }
+
+        let mut imported_secrets = 0usize;
+        for (label, bytes) in &decoded_secrets {
+            if let Err(e) = self.secrets.store(label, bytes).await {
+                return Response::err(
+                    id,
+                    protocol::INTERNAL_ERROR,
+                    format!("store secret '{label}': {e}"),
+                );
+            }
+            imported_secrets += 1;
         }
 
         let mut state = self.state.lock().await;
         let (mut profiles, mut ssh_keys, mut hosts, mut customers) =
             (0usize, 0usize, 0usize, 0usize);
         for p in backup.profiles {
-            match state.save_profile(&p) {
-                Ok(()) => {
-                    state.profiles.insert(p.id, p);
-                    profiles += 1;
-                }
-                Err(e) => tracing::warn!("backup import: save profile: {e}"),
+            if let Err(e) = state.save_profile(&p) {
+                return Response::err(
+                    id,
+                    protocol::INTERNAL_ERROR,
+                    format!("save profile '{}': {e}", p.name),
+                );
             }
+            state.profiles.insert(p.id, p);
+            profiles += 1;
         }
         for k in backup.ssh_keys {
-            match state.save_ssh_key(&k) {
-                Ok(()) => {
-                    state.ssh_keys.insert(k.id, k);
-                    ssh_keys += 1;
-                }
-                Err(e) => tracing::warn!("backup import: save ssh key: {e}"),
+            if let Err(e) = state.save_ssh_key(&k) {
+                return Response::err(
+                    id,
+                    protocol::INTERNAL_ERROR,
+                    format!("save ssh key '{}': {e}", k.name),
+                );
             }
+            state.ssh_keys.insert(k.id, k);
+            ssh_keys += 1;
         }
         for h in backup.hosts {
-            match state.save_ssh_host(&h) {
-                Ok(()) => {
-                    state.ssh_hosts.insert(h.id, h);
-                    hosts += 1;
-                }
-                Err(e) => tracing::warn!("backup import: save ssh host: {e}"),
+            if let Err(e) = state.save_ssh_host(&h) {
+                return Response::err(
+                    id,
+                    protocol::INTERNAL_ERROR,
+                    format!("save ssh host '{}': {e}", h.label),
+                );
             }
+            state.ssh_hosts.insert(h.id, h);
+            hosts += 1;
         }
         for customer in backup.customers {
-            match crate::customer::save(&customer) {
-                Ok(()) => customers += 1,
-                Err(e) => tracing::warn!("backup import: save customer: {e:#}"),
+            if let Err(e) = crate::customer::save(&customer) {
+                return Response::err(
+                    id,
+                    protocol::INTERNAL_ERROR,
+                    format!("save customer '{}': {e:#}", customer.slug),
+                );
             }
+            customers += 1;
         }
 
         Response::ok(
