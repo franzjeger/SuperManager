@@ -714,11 +714,46 @@ impl RemoteFiles for SftpFiles {
             .map_err(|e| sftp_err("read", path, &e))
     }
 
+    async fn read_optional(&self, path: &str) -> Result<Option<Vec<u8>>, SshError> {
+        match self.0.read(path).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(russh_sftp::client::error::Error::Status(s))
+                if s.status_code == russh_sftp::protocol::StatusCode::NoSuchFile =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(sftp_err("read", path, &e)),
+        }
+    }
+
     async fn write(&self, path: &str, contents: &[u8]) -> Result<(), SshError> {
-        self.0
-            .write(path, contents)
+        use tokio::io::AsyncWriteExt;
+        let mut file = self
+            .0
+            .create(path)
             .await
-            .map_err(|e| sftp_err("write", path, &e))
+            .map_err(|e| sftp_err("create", path, &e))?;
+        file.write_all(contents)
+            .await
+            .map_err(|e| sftp_err("write", path, &e))?;
+        file.shutdown()
+            .await
+            .map_err(|e| sftp_err("close", path, &e))?;
+        Ok(())
+    }
+
+    async fn rename(&self, from: &str, to: &str) -> Result<(), SshError> {
+        self.0
+            .rename(from, to)
+            .await
+            .map_err(|e| sftp_err("rename", from, &e))
+    }
+
+    async fn remove_file(&self, path: &str) -> Result<(), SshError> {
+        self.0
+            .remove_file(path)
+            .await
+            .map_err(|e| sftp_err("remove_file", path, &e))
     }
 
     async fn create_dir(&self, path: &str) -> Result<(), SshError> {

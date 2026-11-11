@@ -41,7 +41,9 @@ use supermgr_core::{
 
 use supermgr_core::host::{AuthMethod, Host, HostSummary};
 use supermgr_core::secret_lifecycle::{LiveSecrets, SecretOwner};
-use supermgr_core::ssh::authorized_keys::{push_public_key, revoke_public_key, PushResult};
+use supermgr_core::ssh::authorized_keys::{
+    push_public_key, revoke_public_key, PushResult, RevokeOutcome,
+};
 use supermgr_core::ssh::key::{SshKey, SshKeySummary, SshKeyType};
 use supermgr_core::ssh::known_hosts::KnownHostsStore;
 
@@ -1242,17 +1244,46 @@ impl DaemonService {
             )));
         }
 
+        let proposed_api_port = match updates.get("api_port").and_then(|v| v.as_u64()) {
+            Some(p) => Some(p as u16),
+            None => current.api_port,
+        };
+        let endpoint_changed = !proposed_hostname.eq_ignore_ascii_case(&current.hostname)
+            || proposed_port != current.port
+            || proposed_api_port != current.api_port;
+
         let host = state
             .hosts
             .get_mut(&id)
             .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
 
         // Snapshot server-owned SecretRef fields so caller-supplied JSON can
-        // never Forge/overwrite credential references.
-        let saved_pw_ref = host.auth_password_ref.clone();
-        let saved_cert_ref = host.auth_cert_ref.clone();
-        let saved_api_ref = host.api_token_ref.clone();
-        let saved_unifi_ref = host.unifi_api_token_ref.clone();
+        // never forge/overwrite credential references. When the target endpoint
+        // changes, drop stored credentials so an unprivileged D-Bus caller
+        // cannot redirect a host to an attacker-controlled endpoint to harvest
+        // stored passwords or API tokens.
+        let mut stale_secret_labels: Vec<String> = Vec::new();
+        let (saved_pw_ref, saved_cert_ref, saved_api_ref, saved_unifi_ref) = if endpoint_changed {
+            for secret_ref in [
+                host.auth_password_ref.take(),
+                host.auth_cert_ref.take(),
+                host.api_token_ref.take(),
+                host.unifi_api_token_ref.take(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                stale_secret_labels.push(secret_ref.label().to_owned());
+            }
+            (None, None, None, None)
+        } else {
+            (
+                host.auth_password_ref.clone(),
+                host.auth_cert_ref.clone(),
+                host.api_token_ref.clone(),
+                host.unifi_api_token_ref.clone(),
+            )
+        };
 
         // Apply only the non-secret fields present in the update.
         if let Some(v) = updates.get("label").and_then(|v| v.as_str()) {
@@ -1326,6 +1357,11 @@ impl DaemonService {
         state
             .save_host(&host)
             .map_err(|e| fdo::Error::Failed(format!("save: {e}")))?;
+        drop(state);
+
+        for label in stale_secret_labels {
+            let _ = secrets::delete_secret(&label).await;
+        }
         Ok(())
     }
 }
@@ -2122,9 +2158,9 @@ impl DaemonService {
             profile.id = new_id;
             profile.updated_at = chrono::Utc::now();
 
-            // Re-label secrets for every backend type so imported profiles
-            // that reference old (vpnr/…) labels get fresh supermgr/… labels
-            // and the corresponding secret bytes are copied over.
+            // Never follow caller-supplied SecretRef labels into the daemon's
+            // secret store: a crafted TOML could otherwise copy another
+            // entity's secret into a newly imported profile or SSH key.
             match profile.config {
                 ProfileConfig::WireGuard(ref mut wg) => {
                     let new_label = format!("supermgr/wg/{}/privkey", new_id.simple());
@@ -2138,32 +2174,16 @@ impl DaemonService {
                         secrets::store_secret(&new_label, &raw)
                             .await
                             .map_err(|e| fdo::Error::Failed(format!("store secret: {e}")))?;
-                    } else if let Ok(existing) =
-                        secrets::retrieve_secret(wg.private_key.label()).await
-                    {
-                        secrets::store_secret(&new_label, &existing)
-                            .await
-                            .map_err(|e| fdo::Error::Failed(format!("store secret: {e}")))?;
                     } else {
                         warn!(
-                            "import_toml: no WireGuard private key found for '{}'",
+                            "import_toml: imported WireGuard profile '{}' without inline private_key; secret must be set explicitly",
                             original_name
                         );
                     }
                     wg.private_key = SecretRef::new(new_label);
 
                     for peer in &mut wg.peers {
-                        if let Some(ref old_psk) = peer.preshared_key {
-                            let new_psk_label = format!(
-                                "supermgr/wg/{}/psk/{}",
-                                new_id.simple(),
-                                supermgr_core::sanitize::truncate_utf8(&peer.public_key, 8)
-                            );
-                            if let Ok(existing) = secrets::retrieve_secret(old_psk.label()).await {
-                                let _ = secrets::store_secret(&new_psk_label, &existing).await;
-                            }
-                            peer.preshared_key = Some(SecretRef::new(new_psk_label));
-                        }
+                        peer.preshared_key = None;
                     }
                 }
                 ProfileConfig::FortiGate(ref mut fg) => {
@@ -2176,33 +2196,8 @@ impl DaemonService {
                         ));
                     }
 
-                    let new_pw = format!("supermgr/fg/{}/password", new_id.simple());
-                    let new_psk = format!("supermgr/fg/{}/psk", new_id.simple());
-
-                    if let Ok(existing) = secrets::retrieve_secret(fg.password.label()).await {
-                        secrets::store_secret(&new_pw, &existing)
-                            .await
-                            .map_err(|e| fdo::Error::Failed(format!("store secret: {e}")))?;
-                    } else {
-                        warn!(
-                            "import_toml: no FortiGate password found for '{}' (label '{}')",
-                            original_name,
-                            fg.password.label()
-                        );
-                    }
-                    if let Ok(existing) = secrets::retrieve_secret(fg.psk.label()).await {
-                        secrets::store_secret(&new_psk, &existing)
-                            .await
-                            .map_err(|e| fdo::Error::Failed(format!("store secret: {e}")))?;
-                    } else {
-                        warn!(
-                            "import_toml: no FortiGate PSK found for '{}' (label '{}')",
-                            original_name,
-                            fg.psk.label()
-                        );
-                    }
-                    fg.password = SecretRef::new(new_pw);
-                    fg.psk = SecretRef::new(new_psk);
+                    fg.password = SecretRef::new(format!("supermgr/fg/{}/password", new_id.simple()));
+                    fg.psk = SecretRef::new(format!("supermgr/fg/{}/psk", new_id.simple()));
                 }
                 ProfileConfig::OpenVpn(_) => {
                     return Err(fdo::Error::InvalidArgs(
@@ -2249,19 +2244,11 @@ impl DaemonService {
                 .map_err(|e| fdo::Error::InvalidArgs(format!("invalid SSH key TOML: {e}")))?;
 
             let new_id = Uuid::new_v4();
-            let old_label = key.private_key_ref.label().to_owned();
             let new_label = format!("supermgr/ssh/{}/privkey", new_id.simple());
-
-            if let Ok(existing) = secrets::retrieve_secret(&old_label).await {
-                secrets::store_secret(&new_label, &existing)
-                    .await
-                    .map_err(|e| fdo::Error::Failed(format!("store secret: {e}")))?;
-            } else {
-                warn!(
-                    "import_toml: no private key for SSH key '{}' (label '{}')",
-                    key.name, old_label
-                );
-            }
+            warn!(
+                "import_toml: imported SSH key metadata '{}' without copying caller-referenced private_key_ref",
+                key.name
+            );
 
             {
                 let state = self.state.lock().await;
@@ -4038,7 +4025,7 @@ impl DaemonService {
                         .await;
 
                         match revoke_public_key(&session, &public_key, use_sudo).await {
-                            Ok(()) => {
+                            Ok(outcome) => {
                                 // Remove from deployed_to
                                 {
                                     let mut state = state_arc.lock().await;
@@ -4062,7 +4049,14 @@ impl DaemonService {
                                     },
                                 );
 
-                                let msg = "Key revoked successfully".to_string();
+                                let msg = match outcome {
+                                    RevokeOutcome::Removed => {
+                                        "Key revoked successfully".to_string()
+                                    }
+                                    RevokeOutcome::NotPresent => {
+                                        "Key was not present on host".to_string()
+                                    }
+                                };
                                 let _ = DaemonService::ssh_operation_progress(
                                     &ctx_owned,
                                     op_id_clone.clone(),

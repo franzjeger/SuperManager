@@ -46,13 +46,26 @@ pub trait RemoteShell: Sync {
 
 /// File operations over an established transfer session.
 #[async_trait]
-pub trait RemoteFiles {
-    /// Read a file whole. `Err` covers "absent" as well as "unreadable" —
-    /// callers here treat both the same way.
+pub trait RemoteFiles: Send + Sync {
+    /// Read a file whole.
     async fn read(&self, path: &str) -> Result<Vec<u8>, SshError>;
 
-    /// Write `contents` to `path`, replacing what was there.
+    /// Read a file whole, returning `Ok(None)` **only** when the file does not
+    /// exist (`NoSuchFile`). Permission errors and transport failures MUST be
+    /// returned as `Err` so callers never mistake an unreadable file for an
+    /// empty one.
+    async fn read_optional(&self, path: &str) -> Result<Option<Vec<u8>>, SshError>;
+
+    /// Write `contents` to `path`, creating or truncating as needed.
     async fn write(&self, path: &str, contents: &[u8]) -> Result<(), SshError>;
+
+    /// Rename `from` to `to`. Standard SFTP v3 servers may refuse to overwrite
+    /// an existing destination; callers staging atomic updates should fall back
+    /// to POSIX `mv -f` over [`RemoteShell::exec`] when `rename` fails.
+    async fn rename(&self, from: &str, to: &str) -> Result<(), SshError>;
+
+    /// Remove a file. Best-effort cleanup of staged temp files.
+    async fn remove_file(&self, path: &str) -> Result<(), SshError>;
 
     /// Create a directory. Not required to be recursive.
     async fn create_dir(&self, path: &str) -> Result<(), SshError>;

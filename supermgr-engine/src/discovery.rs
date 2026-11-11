@@ -1465,11 +1465,37 @@ pub fn load_findings(customer_slug: &str) -> Result<Vec<crate::vuln::Finding>> {
     Ok(findings)
 }
 
+/// Hard upper ceiling on expanded active-scan targets per request.
+pub const MAX_SCAN_TARGETS: usize = 4096;
+
+/// Hard upper ceiling on TCP ports probed per target in an active scan.
+pub const MAX_SCAN_PORTS: usize = 1024;
+
+/// Validate a single raw scan target (either a valid IPv4 CIDR or a valid
+/// hostname / IP address).
+pub fn validate_scan_target(raw: &str) -> std::result::Result<(), String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Err("scan target must not be empty".into());
+    }
+    if t.contains('/') {
+        t.parse::<ipnet::Ipv4Net>()
+            .map(|_| ())
+            .map_err(|e| format!("invalid CIDR target '{t}': {e}"))
+    } else {
+        supermgr_core::sanitize::validate_host_or_ip(t)
+            .map_err(|e| format!("invalid target '{t}': {e}"))
+    }
+}
+
 /// Expand a list of targets (hosts and CIDRs) into a flat list
-/// of IPs. Caps total at 4096 to avoid runaways. Anything
-/// invalid is silently skipped.
+/// of targets, enforcing a hard ceiling of [`MAX_SCAN_TARGETS`].
 #[must_use]
 pub fn expand_targets(targets: &[String], cap: usize) -> Vec<String> {
+    let cap = cap.min(MAX_SCAN_TARGETS);
+    if cap == 0 {
+        return Vec::new();
+    }
     let mut out = Vec::new();
     for t in targets {
         let t = t.trim();
@@ -1477,15 +1503,17 @@ pub fn expand_targets(targets: &[String], cap: usize) -> Vec<String> {
             continue;
         }
         if t.contains('/') {
-            // CIDR — expand.
             if let Some(expanded) = expand_cidr(t, cap.saturating_sub(out.len())) {
                 out.extend(expanded);
                 if out.len() >= cap {
                     break;
                 }
             }
-        } else {
+        } else if supermgr_core::sanitize::validate_host_or_ip(t).is_ok() {
             out.push(t.to_owned());
+            if out.len() >= cap {
+                break;
+            }
         }
     }
     out.truncate(cap);
@@ -1493,50 +1521,17 @@ pub fn expand_targets(targets: &[String], cap: usize) -> Vec<String> {
 }
 
 fn expand_cidr(cidr: &str, cap: usize) -> Option<Vec<String>> {
-    let parts: Vec<&str> = cidr.split('/').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-    let prefix: u32 = parts[1].parse().ok()?;
-    if prefix > 32 {
-        return None;
-    }
-    let octets: Vec<u32> = parts[0]
-        .split('.')
-        .map(|s| s.parse::<u32>().ok())
-        .collect::<Option<Vec<_>>>()?;
-    if octets.len() != 4 {
-        return None;
-    }
-    let base = (octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3];
-    let mask = if prefix == 0 {
-        0u32
-    } else {
-        !0u32 << (32 - prefix)
-    };
-    let net = base & mask;
+    let net: ipnet::Ipv4Net = cidr.parse().ok()?;
+    let prefix = u32::from(net.prefix_len());
     let host_count = if prefix >= 31 {
         1u64 << (32 - prefix)
     } else {
         (1u64 << (32 - prefix)) - 2
     };
     if host_count > cap as u64 {
-        // Don't allow pathologically large CIDRs.
         return Some(Vec::new());
     }
-    let start = if prefix >= 31 { net } else { net + 1 };
-    let mut out = Vec::with_capacity(host_count as usize);
-    for i in 0..host_count {
-        let ip = start + i as u32;
-        out.push(format!(
-            "{}.{}.{}.{}",
-            (ip >> 24) & 0xff,
-            (ip >> 16) & 0xff,
-            (ip >> 8) & 0xff,
-            ip & 0xff
-        ));
-    }
-    Some(out)
+    Some(net.hosts().take(cap).map(|ip| ip.to_string()).collect())
 }
 
 #[cfg(test)]
@@ -1560,5 +1555,30 @@ Timestamp     A/R    Flags  if Domain               Service Type         Instanc
             super::browsed_instances(BROWSE),
             ["Frank\u{2019}s MacBook Pro", "Bedroom", "Living Room"]
         );
+    }
+
+    #[test]
+    fn scan_target_validation_rejects_malformed_cidrs_and_hosts() {
+        assert!(super::validate_scan_target("10.0.0.1").is_ok());
+        assert!(super::validate_scan_target("10.0.0.0/24").is_ok());
+        assert!(super::validate_scan_target("router.internal").is_ok());
+        assert!(super::validate_scan_target("").is_err());
+        assert!(super::validate_scan_target("999.999.999.999/24").is_err());
+        assert!(super::validate_scan_target("10.0.0.0/33").is_err());
+        assert!(super::validate_scan_target("-oProxyCommand=evil").is_err());
+        assert!(super::validate_scan_target("host with spaces").is_err());
+    }
+
+    #[test]
+    fn expand_targets_enforces_hard_ceiling_and_validates_octets() {
+        assert!(super::expand_targets(&["999.999.999.999/24".to_owned()], 512).is_empty());
+        assert_eq!(
+            super::expand_targets(&["10.0.0.0/30".to_owned()], 512),
+            vec!["10.0.0.1".to_owned(), "10.0.0.2".to_owned()]
+        );
+        // Even if caller passes a huge cap, MAX_SCAN_TARGETS (4096) clamps expansion.
+        assert!(super::expand_targets(&["10.0.0.0/16".to_owned()], 100_000).is_empty());
+        let within_ceiling = super::expand_targets(&["10.0.0.0/20".to_owned()], 100_000);
+        assert_eq!(within_ceiling.len(), 4094);
     }
 }

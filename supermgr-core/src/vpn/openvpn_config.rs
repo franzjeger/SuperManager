@@ -69,9 +69,10 @@ const ANY_ARGUMENTS: &[&str] = &[
     // Process options (note: `script-security` is validated explicitly below).
     "verb", "mute", "echo", "user", "group", "nice", "mlock", "suppress-timestamps",
     "machine-readable-output", "ignore-unknown-option", "up-delay", "down-pre",
-    // Windows-only options; harmless elsewhere.
-    "block-outside-dns", "register-dns", "ip-win32", "route-method", "dhcp-renew",
-    "dhcp-release", "tap-sleep", "win-sys", "windows-driver",
+    // Windows-only options; harmless elsewhere. (`win-sys`, `ip-win32`, and
+    // `route-method` are intentionally excluded so an unprivileged profile
+    // cannot redirect which directory or helper binary `LocalSystem` executes.)
+    "block-outside-dns", "register-dns", "dhcp-renew", "dhcp-release", "tap-sleep",
 ];
 
 /// File-bearing directives allowed only with `[inline]` / `<tag>...</tag>`.
@@ -196,7 +197,8 @@ fn closes(line: &str, name: &str) -> Result<bool, String> {
 }
 
 fn is_dangerous_env_var(variable: &str) -> bool {
-    let upper = variable.to_ascii_uppercase();
+    let name = variable.split('=').next().unwrap_or(variable);
+    let upper = name.to_ascii_uppercase();
     upper.starts_with("DYLD_")
         || upper.starts_with("LD_")
         || upper.starts_with("OPENSSL_")
@@ -205,7 +207,25 @@ fn is_dangerous_env_var(variable: &str) -> bool {
         || upper.starts_with("PERL")
         || matches!(
             upper.as_str(),
-            "PATH" | "IFS" | "BASH_ENV" | "ENV" | "COMSPEC" | "SYSTEMROOT"
+            "PATH"
+                | "PATHEXT"
+                | "IFS"
+                | "BASH_ENV"
+                | "ENV"
+                | "COMSPEC"
+                | "SYSTEMROOT"
+                | "WINDIR"
+                | "TEMP"
+                | "TMP"
+                | "TMPDIR"
+                | "HOME"
+                | "USERPROFILE"
+                | "APPDATA"
+                | "LOCALAPPDATA"
+                | "PROGRAMFILES"
+                | "PROGRAMFILES(X86)"
+                | "PROGRAMDATA"
+                | "PSMODULEPATH"
         )
 }
 
@@ -236,12 +256,16 @@ fn directive(name: &str, args: &[String]) -> Result<(), String> {
             Some(device) if tunnel_device(name, device) => Ok(()),
             _ => Err(format!("`{name}` must be tun, tap or utun")),
         },
-        "auth-user-pass" | "askpass" => match arg(0) {
+        "auth-user-pass" => match arg(0) {
             None | Some("[inline]") => Ok(()),
             Some(_) => Err(format!(
                 "`{name}` names a file, which SuperManager does not read; it passes the \
                  credentials itself"
             )),
+        },
+        "windows-driver" => match (arg(0), args.len()) {
+            (Some("wintun" | "tap-windows6" | "ovpn-dco"), 1) => Ok(()),
+            _ => Err("`windows-driver` must be wintun, tap-windows6 or ovpn-dco".into()),
         },
         "http-proxy" | "socks-proxy" => match arg(2) {
             None | Some("[inline]") => Ok(()),
@@ -392,6 +416,15 @@ mod tests {
             ("setenv LD_PRELOAD /tmp/lib.so\n", 1),
             ("setenv OPENSSL_CONF /tmp/evil.cnf\n", 1),
             ("setenv PATH /tmp/evil\n", 1),
+            ("setenv SYSTEMROOT C:\\Users\\Public\n", 1),
+            ("setenv WINDIR C:\\Users\\Public\n", 1),
+            ("setenv PATHEXT .TXT\n", 1),
+            ("win-sys C:\\Users\\Public\\evil\n", 1),
+            ("win-sys env\n", 1),
+            ("ip-win32 netsh\n", 1),
+            ("route-method exe\n", 1),
+            ("windows-driver C:\\Users\\Public\\evil.sys\n", 1),
+            ("askpass /etc/shadow\n", 1),
             ("<connection>\nremote a 1\nup hook\n</connection>\n", 3),
         ] {
             assert_eq!(refused(config).line, line, "{config:?}");
