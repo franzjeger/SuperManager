@@ -808,7 +808,7 @@ pub fn show_settings_dialog(
                         install_btn.set_sensitive(true);
                         match outcome {
                             CheckOutcome::UpToDate => {
-                                check_row.set_subtitle("Up to date with origin/main");
+                                check_row.set_subtitle("Up to date with latest release");
                             }
                             CheckOutcome::UpdateAvailable { commits, latest } => {
                                 check_row.set_subtitle(&format!(

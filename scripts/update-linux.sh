@@ -7,23 +7,25 @@
 #   1. Finds the git checkout the install came from — the one this script
 #      is running out of, or the path install-linux.sh recorded in
 #      /etc/supermgr/checkout-path.
-#   2. git fetch, and compares what is installed with origin.
-#   3. If there is anything new: fast-forwards, rebuilds, and re-runs
-#      install-linux.sh --no-deps --no-build --yes, which installs the
-#      binaries and restarts the daemon.
+#   2. Fetches tags from origin (refusing rewritten tags unless explicitly
+#      requested), resolves the latest annotated release tag (`v*`), and
+#      verifies its cryptographic SSH signature against the pinned signers in
+#      /etc/supermgr/release-signers.
+#   3. Fast-forwards/checks out the verified release tag and builds as the
+#      unprivileged invoking user (`cargo build --release --locked`).
+#   4. Elevates (`sudo` in a terminal, `pkexec` without one), re-verifies the
+#      release tag as root, extracts `scripts/` and `contrib/` from the
+#      verified tag into a `0700` root-owned staging directory alongside the
+#      built binaries, and runs `install-linux.sh --no-deps --no-build --yes`
+#      from that root-owned copy.
 #
-# Elevation: in a terminal the install phase asks via sudo, per step, the
-# same way install-linux.sh does. The GUI's Settings → Updates page runs this
-# on a terminal of its own and answers sudo from its dialog. With no terminal
-# at all (GUIs from before that) it asks through polkit (pkexec), which needs
-# a polkit authentication agent running in the session.
-#
-#   --check       Only report. Exit 0 = up to date, 10 = update available.
-#   --force       Rebuild + reinstall even when already up to date.
-#   --yes, -y     Don't ask before updating.
+#   --check              Only report. Exit 0 = up to date, 10 = update available.
+#   --force              Rebuild + reinstall even when already at the release tag.
+#   --yes, -y            Don't ask before updating.
+#   --allow-moved-tags   Allow `git fetch --force` if origin re-pointed a tag.
 #   --installed-commit SHA
-#                 Also compare the running GUI build (used by the GUI).
-#   --help, -h    This text.
+#                        Also compare the running GUI build (used by the GUI).
+#   --help, -h           This text.
 #
 # The GUI does not update itself in place: a running supermgr keeps the old
 # binary until you restart it. The daemon is restarted by the install step.
@@ -33,19 +35,21 @@ set -euo pipefail
 DO_CHECK=0
 FORCE=0
 ASSUME_YES=0
+ALLOW_MOVED_TAGS=0
 INSTALLED_COMMIT=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --check)   DO_CHECK=1 ;;
-        --force)   FORCE=1 ;;
-        -y|--yes)  ASSUME_YES=1 ;;
+        --check)            DO_CHECK=1 ;;
+        --force)            FORCE=1 ;;
+        -y|--yes)           ASSUME_YES=1 ;;
+        --allow-moved-tags) ALLOW_MOVED_TAGS=1 ;;
         --installed-commit)
             [ $# -ge 2 ] || { echo "--installed-commit requires a SHA" >&2; exit 2; }
             INSTALLED_COMMIT="$2"
             shift
             ;;
-        -h|--help) sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)         echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
     esac
     shift
@@ -55,9 +59,11 @@ say()  { printf '\n\033[1m→ %s\033[0m\n' "$*"; }
 note() { printf '  %s\n' "$*"; }
 warn() { printf '\033[33m  ! %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
-# set -e exits without a word, and the GUI dialog then says "see the output
-# above" about nothing. Name what failed.
 trap 'printf "\033[31merror: line %s: \`%s\` failed (exit %s)\033[0m\n" "$LINENO" "$BASH_COMMAND" "$?" >&2' ERR
+
+owner_uid() {
+    stat -c '%u' "$1" 2>/dev/null || stat -f '%u' "$1"
+}
 
 if [ -n "$INSTALLED_COMMIT" ] \
    && [[ ! "$INSTALLED_COMMIT" =~ ^[0-9a-fA-F]{40,64}$ ]]; then
@@ -69,12 +75,6 @@ fi
 
 # ---------------------------------------------------------------------------
 # Which checkout?
-#
-# Three answers, tried in order:
-#   1. $SUPERMGR_CHECKOUT       — explicit override, wins always.
-#   2. the checkout this script is inside — the ./scripts/update-linux.sh case.
-#   3. /etc/supermgr/checkout-path — written by install-linux.sh, which is how
-#      the installed /usr/bin/supermgr-update copy finds its way home.
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECKOUT=""
@@ -101,25 +101,63 @@ if ! { [ -f "$CHECKOUT/Cargo.toml" ] && git -C "$CHECKOUT" rev-parse --git-dir >
 fi
 
 # ---------------------------------------------------------------------------
-# What's new?
+# Pinned release-tag signers.
+#
+# Prefer the root-owned /etc/supermgr/release-signers installed by
+# install-linux.sh so a modified working tree cannot swap its own trust root.
+# SUPERMGR_TAG_SIGNERS overrides the path for offline/hermetic tests.
 # ---------------------------------------------------------------------------
+SIGNERS_FILE=""
+if [ -n "${SUPERMGR_TAG_SIGNERS:-}" ]; then
+    SIGNERS_FILE="$SUPERMGR_TAG_SIGNERS"
+elif [ -f /etc/supermgr/release-signers ]; then
+    [ "$(owner_uid /etc/supermgr/release-signers)" = 0 ] \
+        || die "/etc/supermgr/release-signers is not owned by root (uid 0)"
+    SIGNERS_FILE="/etc/supermgr/release-signers"
+elif [ -f "$SCRIPT_DIR/../contrib/release-signers" ]; then
+    SIGNERS_FILE="$(cd "$SCRIPT_DIR/.." && pwd)/contrib/release-signers"
+fi
 
-say "Checking origin for updates"
-# Tags only name the build (`git describe`), and origin has re-pointed one
-# before: v1.8.0 went through five commits. A checkout that fetched an earlier
-# one had `fetch --tags` refuse to clobber it on every run after, and each
-# update failed as "no network". Origin's tags win. When the fetch still fails,
-# git's own message is the answer; the old one was a guess, usually wrong.
-if ! fetch_output="$(git -C "$CHECKOUT" fetch --tags --force --quiet origin 2>&1)"; then
+[ -n "$SIGNERS_FILE" ] && [ -s "$SIGNERS_FILE" ] \
+    || die "release tag signers file not found (/etc/supermgr/release-signers).
+       Re-run ./scripts/install-linux.sh to install the pinned release keys."
+
+# ---------------------------------------------------------------------------
+# Fetch + verify latest signed annotated release tag
+# ---------------------------------------------------------------------------
+say "Checking origin for signed release tags"
+FETCH_ARGS=(fetch --tags --quiet origin)
+if [ "$ALLOW_MOVED_TAGS" = 1 ]; then
+    FETCH_ARGS=(fetch --tags --force --quiet origin)
+fi
+if ! fetch_output="$(git -C "$CHECKOUT" "${FETCH_ARGS[@]}" 2>&1)"; then
     die "git fetch from origin failed:
 $(printf '%s\n' "$fetch_output" | sed 's/^/       /')"
 fi
 
+TARGET_TAG="$(git -C "$CHECKOUT" for-each-ref \
+    --sort=-version:refname \
+    --format='%(objecttype) %(refname:strip=2)' \
+    'refs/tags/v[0-9]*' \
+    | awk '$1 == "tag" { print $2; exit }')"
+
+[ -n "$TARGET_TAG" ] \
+    || die "no annotated release tags (v*) found on origin — refusing to build untagged branch commits"
+
+if ! [[ "$TARGET_TAG" =~ ^v[0-9][0-9A-Za-z._-]*$ ]]; then
+    die "refusing malformed release tag name: $TARGET_TAG"
+fi
+
+if ! verify_output="$(git -C "$CHECKOUT" \
+    -c gpg.format=ssh \
+    -c "gpg.ssh.allowedSignersFile=$SIGNERS_FILE" \
+    verify-tag "$TARGET_TAG" 2>&1)"; then
+    die "signature verification failed for release tag $TARGET_TAG:
+$(printf '%s\n' "$verify_output" | sed 's/^/       /')"
+fi
+
 LOCAL="$(git -C "$CHECKOUT" rev-parse HEAD)"
-# Upstream of the current branch when it has one, origin/main otherwise —
-# a checkout deliberately sitting on a feature branch tracks that branch.
-REMOTE="$(git -C "$CHECKOUT" rev-parse '@{upstream}' 2>/dev/null \
-          || git -C "$CHECKOUT" rev-parse origin/main)"
+REMOTE="$(git -C "$CHECKOUT" rev-parse "$TARGET_TAG^{commit}")"
 
 STATE=""
 if [ "$LOCAL" = "$REMOTE" ]; then
@@ -133,34 +171,29 @@ else
 fi
 
 case "$STATE" in
-current) note "up to date ($(git -C "$CHECKOUT" rev-parse --short HEAD))" ;;
-ahead)   note "your checkout is ahead of origin — nothing to pull" ;;
+current) note "up to date at verified release $TARGET_TAG ($(git -C "$CHECKOUT" rev-parse --short HEAD))" ;;
+ahead)   note "your checkout is ahead of verified release $TARGET_TAG — nothing to pull" ;;
 behind)
     COUNT="$(git -C "$CHECKOUT" rev-list --count "$LOCAL..$REMOTE")"
-    note "$COUNT new commit(s) on origin:"
-    # -n, not `| head`: head closing the pipe early SIGPIPEs git log, and
-    # under pipefail that ended the script with 141 whenever >10 were new.
+    note "$COUNT new commit(s) in verified release $TARGET_TAG:"
     git -C "$CHECKOUT" log --oneline -n 10 "$LOCAL..$REMOTE" | sed 's/^/    /'
     [ "$COUNT" -le 10 ] || note "    … and $((COUNT - 10)) more"
     ;;
 diverged)
-    die "your checkout and origin have diverged — local commits exist that
-       origin does not have. Not something an updater should resolve for you:
+    die "your checkout and release $TARGET_TAG have diverged — local commits exist that
+       $TARGET_TAG does not have. Not something an updater should resolve for you:
        rebase or reset the checkout at $CHECKOUT by hand, then re-run."
     ;;
 esac
 
-# A checkout can already be at origin/main while the installed GUI still runs
-# an older build. This is common after a manual `git pull`; comparing only HEAD
-# would say "nothing to do" and leave the old binary installed.
 BINARY_STALE=0
 if [ -n "$INSTALLED_COMMIT" ] && [ "$INSTALLED_COMMIT" != "$REMOTE" ]; then
     if git -C "$CHECKOUT" cat-file -e "$INSTALLED_COMMIT^{commit}" 2>/dev/null \
        && git -C "$CHECKOUT" merge-base --is-ancestor "$INSTALLED_COMMIT" "$REMOTE"; then
         BINARY_STALE=1
-        note "installed GUI is older than origin ($(printf '%.7s' "$INSTALLED_COMMIT"))"
+        note "installed GUI ($(printf '%.7s' "$INSTALLED_COMMIT")) is older than $TARGET_TAG"
     else
-        warn "installed GUI commit is not an ancestor of origin; leaving source-state decision unchanged"
+        warn "installed GUI commit is not an ancestor of $TARGET_TAG; leaving source-state decision unchanged"
     fi
 fi
 
@@ -172,12 +205,10 @@ if [ "$DO_CHECK" = 1 ]; then
 fi
 
 if [ "$STATE" != behind ] && [ "$BINARY_STALE" != 1 ] && [ "$FORCE" != 1 ]; then
-    note "nothing to do (use --force to rebuild + reinstall anyway)"
+    note "nothing to do (use --force to rebuild + reinstall $TARGET_TAG anyway)"
     exit 0
 fi
 
-# A dirty tree makes --ff-only fail halfway with git's error instead of ours,
-# so say it in terms of what the user has to decide.
 if [ "$STATE" = behind ]; then
     if ! { git -C "$CHECKOUT" diff --quiet && git -C "$CHECKOUT" diff --cached --quiet; }; then
         die "the checkout at $CHECKOUT has uncommitted changes.
@@ -186,56 +217,121 @@ if [ "$STATE" = behind ]; then
 fi
 
 if [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; then
-    printf '\n  Update, rebuild, and reinstall now? [Y/n] '
+    printf '\n  Update to %s, rebuild, and reinstall now? [Y/n] ' "$TARGET_TAG"
     read -r reply </dev/tty || reply=y
     case "$reply" in [nN]*) die "cancelled" ;; esac
 fi
 
 # ---------------------------------------------------------------------------
-# Pull + build (as the invoking user, never root)
+# Fast-forward / checkout + build (as the invoking user, never root)
 # ---------------------------------------------------------------------------
-
 if [ "$STATE" = behind ]; then
-    say "Fast-forwarding to origin"
-    git -C "$CHECKOUT" merge --ff-only "$REMOTE"
+    say "Advancing checkout to verified release $TARGET_TAG"
+    if git -C "$CHECKOUT" symbolic-ref -q HEAD >/dev/null 2>&1; then
+        git -C "$CHECKOUT" merge --ff-only "$REMOTE"
+    else
+        git -C "$CHECKOUT" checkout --detach "$REMOTE"
+    fi
 fi
 
-say "Building (this can take a few minutes)"
-command -v cargo >/dev/null || die "cargo not found — install Rust, or re-run install-linux.sh"
-(cd "$CHECKOUT" && cargo build --release --locked -p supermgrd -p supermgr -p supermgr-mcp)
-
-# ---------------------------------------------------------------------------
-# Install + restart the daemon, via install-linux.sh so the two can't drift.
-#
-# The elevated environment is minimal (pkexec strips it), so a target
-# directory moved with CARGO_TARGET_DIR has to be handed over explicitly —
-# install-linux.sh falls back to exactly that variable when cargo isn't on
-# root's PATH.
-# ---------------------------------------------------------------------------
-
 BUILD_DIR=$(cd "$CHECKOUT" && cargo metadata --format-version 1 --no-deps 2>/dev/null \
-    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p') || BUILD_DIR=""
+[ -n "$BUILD_DIR" ] || BUILD_DIR="${CARGO_TARGET_DIR:-${CARGO_BUILD_TARGET_DIR:-$CHECKOUT/target}}"
 
-say "Installing"
-INSTALL=(bash "$CHECKOUT/scripts/install-linux.sh" --no-deps --no-build --yes)
+if [ "${SUPERMGR_TEST_SKIP_BUILD:-0}" != 1 ]; then
+    say "Building $TARGET_TAG (this can take a few minutes)"
+    command -v cargo >/dev/null || die "cargo not found — install Rust, or re-run install-linux.sh"
+    (cd "$CHECKOUT" && cargo build --release --locked -p supermgrd -p supermgr -p supermgr-mcp)
+fi
+
+# ---------------------------------------------------------------------------
+# Stage into a root-owned 0700 directory + run install-linux.sh from there.
+#
+# Never execute `$CHECKOUT/scripts/install-linux.sh` as root: `$CHECKOUT`
+# lives in the user's home directory and remains writable by any unprivileged
+# process in the session. Instead, root re-verifies `$TARGET_TAG` against the
+# root-owned `/etc/supermgr/release-signers` (when installed), extracts
+# `Cargo.toml`, `scripts/`, and `contrib/` straight from the verified Git tag
+# object into a `0700` `root:root` directory, copies the built binaries in as
+# `0755` `root:root` regular files, and runs `install-linux.sh` from there.
+# ---------------------------------------------------------------------------
+# shellcheck disable=SC2016  # Intentional: expanded by the elevated root bash, not the caller.
+ROOT_INSTALL_SCRIPT='
+set -euo pipefail
+checkout="$1"
+tag="$2"
+fallback_signers="$3"
+build_dir="$4"
+stage_only_dest="${5:-}"
+
+signers="$fallback_signers"
+if [ -z "$stage_only_dest" ] && [ -f /etc/supermgr/release-signers ]; then
+    uid="$(stat -c "%u" /etc/supermgr/release-signers 2>/dev/null || stat -f "%u" /etc/supermgr/release-signers)"
+    [ "$uid" = 0 ] || { echo "error: /etc/supermgr/release-signers is not owned by root" >&2; exit 1; }
+    signers="/etc/supermgr/release-signers"
+fi
+
+git -C "$checkout" \
+    -c "safe.directory=$checkout" \
+    -c gpg.format=ssh \
+    -c "gpg.ssh.allowedSignersFile=$signers" \
+    verify-tag "$tag" >/dev/null
+
+if [ -n "$stage_only_dest" ]; then
+    stage="$stage_only_dest"
+    mkdir -p "$stage"
+    chmod 0700 "$stage"
+else
+    umask 077
+    stage="$(mktemp -d /run/supermgr-stage.XXXXXX 2>/dev/null || mktemp -d /tmp/supermgr-stage.XXXXXX)"
+    trap '\''rm -rf "$stage"'\'' EXIT
+    chown 0:0 "$stage"
+    chmod 0700 "$stage"
+fi
+
+git -C "$checkout" -c "safe.directory=$checkout" \
+    archive --format=tar "$tag" Cargo.toml scripts contrib \
+    | tar -xf - -C "$stage"
+
+install -dm0755 "$stage/target/release"
+for bin in supermgrd supermgr supermgr-mcp; do
+    src="$build_dir/release/$bin"
+    if [ -L "$src" ] || [ ! -f "$src" ]; then
+        echo "error: expected regular binary at $src" >&2
+        exit 1
+    fi
+    install -m0755 "$src" "$stage/target/release/$bin"
+done
+
+if [ -n "$stage_only_dest" ]; then
+    exit 0
+fi
+
+chown -R 0:0 "$stage"
+CARGO_TARGET_DIR="$stage/target" \
+    bash "$stage/scripts/install-linux.sh" \
+    --no-deps --no-build --yes --record-checkout "$checkout"
+'
+
+if [ -n "${SUPERMGR_TEST_STAGE_DEST:-}" ]; then
+    bash -ceu "$ROOT_INSTALL_SCRIPT" -- \
+        "$CHECKOUT" "$TARGET_TAG" "$SIGNERS_FILE" "$BUILD_DIR" "$SUPERMGR_TEST_STAGE_DEST"
+    exit 0
+fi
+
+say "Installing $TARGET_TAG"
 rc=0
 if [ -t 0 ]; then
-    "${INSTALL[@]}" || rc=$?
+    sudo -- bash -ceu "$ROOT_INSTALL_SCRIPT" -- \
+        "$CHECKOUT" "$TARGET_TAG" "$SIGNERS_FILE" "$BUILD_DIR" || rc=$?
 else
     command -v pkexec >/dev/null \
         || die "no terminal to ask for sudo in, and pkexec is missing.
        Run supermgr-update from a terminal instead."
-    if [ -n "$BUILD_DIR" ]; then
-        pkexec env "CARGO_TARGET_DIR=$BUILD_DIR" "${INSTALL[@]}" || rc=$?
-    else
-        pkexec "${INSTALL[@]}" || rc=$?
-    fi
-    # pkexec's own 126: the password prompt was dismissed.
+    pkexec bash -ceu "$ROOT_INSTALL_SCRIPT" -- \
+        "$CHECKOUT" "$TARGET_TAG" "$SIGNERS_FILE" "$BUILD_DIR" || rc=$?
     [ "$rc" != 126 ] || die "authentication was cancelled, so nothing was installed.
        The build is done; running the update again only installs it."
-    # 127: pkexec found nobody to ask. With no polkit agent in the session it
-    # falls back to a text prompt, which fails without a terminal ("/dev/tty"
-    # above). Seen in a COSMIC session started from a tty, and over xrdp.
     [ "$rc" != 127 ] || die "pkexec could not ask for your password: no polkit authentication
        agent is answering in this session, so nothing was installed.
        The build is done. Install it from a terminal:
@@ -244,6 +340,6 @@ else
 fi
 [ "$rc" = 0 ] || die "the install step failed (exit $rc) — the new build is not installed"
 
-say "Updated to $(git -C "$CHECKOUT" rev-parse --short HEAD)"
+say "Updated to $TARGET_TAG ($(git -C "$CHECKOUT" rev-parse --short HEAD))"
 note "The daemon has been restarted with the new binary."
 note "Restart the GUI (supermgr) to run the new version yourself."

@@ -42,14 +42,14 @@ pub fn short_commit() -> &'static str {
 
 /// What the GitHub compare said about this build.
 pub enum CheckOutcome {
-    /// The build matches the tip of `origin/main` (or is ahead of it).
+    /// The build matches the latest published release tag (or is ahead of it).
     UpToDate,
-    /// `origin/main` has moved on: `commits` new commit(s), the newest
+    /// A newer published release tag exists on GitHub: `commits` new commit(s),
     /// summarised in `latest`.
     UpdateAvailable {
         /// How many commits behind this build is.
         commits: u64,
-        /// First line of the newest commit's message.
+        /// Release tag and first line of the release commit's message.
         latest: String,
     },
     /// The question could not be answered — no git info in the build, no
@@ -57,7 +57,15 @@ pub enum CheckOutcome {
     Unknown(String),
 }
 
-/// Ask GitHub how `main` relates to the commit this binary was built from.
+fn is_valid_release_tag(tag: &str) -> bool {
+    let mut chars = tag.chars();
+    matches!(chars.next(), Some('v'))
+        && matches!(chars.next(), Some(c) if c.is_ascii_digit())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// Ask GitHub how the latest published release tag relates to the commit this
+/// binary was built from.
 pub async fn check() -> CheckOutcome {
     if GIT_COMMIT == "unknown" {
         return CheckOutcome::Unknown(
@@ -66,8 +74,6 @@ pub async fn check() -> CheckOutcome {
         );
     }
 
-    let url =
-        format!("https://api.github.com/repos/franzjeger/SuperManager/compare/{GIT_COMMIT}...main");
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -75,6 +81,35 @@ pub async fn check() -> CheckOutcome {
         Ok(c) => c,
         Err(e) => return CheckOutcome::Unknown(format!("could not build HTTP client: {e}")),
     };
+
+    let release_resp = match client
+        .get("https://api.github.com/repos/franzjeger/SuperManager/releases/latest")
+        .header("User-Agent", "SuperManager-Update-Check")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return CheckOutcome::Unknown(format!("could not reach GitHub: {e}")),
+    };
+    if !release_resp.status().is_success() {
+        return CheckOutcome::Unknown(format!("GitHub answered {}", release_resp.status()));
+    }
+    let release_body: serde_json::Value = match release_resp.json().await {
+        Ok(v) => v,
+        Err(e) => return CheckOutcome::Unknown(format!("unreadable GitHub response: {e}")),
+    };
+    let Some(tag_name) = release_body
+        .get("tag_name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|t| is_valid_release_tag(t))
+    else {
+        return CheckOutcome::Unknown("GitHub returned no valid release tag".into());
+    };
+
+    let url = format!(
+        "https://api.github.com/repos/franzjeger/SuperManager/compare/{GIT_COMMIT}...{tag_name}"
+    );
     let resp = match client
         .get(&url)
         .header("User-Agent", "SuperManager-Update-Check")
@@ -100,7 +135,7 @@ pub async fn check() -> CheckOutcome {
         Err(e) => return CheckOutcome::Unknown(format!("unreadable GitHub response: {e}")),
     };
 
-    // compare/<built>...main: "ahead" means main is ahead of the build.
+    // compare/<built>...<tag>: "ahead" means the release tag is ahead of the build.
     match body.get("status").and_then(|s| s.as_str()) {
         Some("identical" | "behind") => CheckOutcome::UpToDate,
         Some("ahead") => {
@@ -108,7 +143,7 @@ pub async fn check() -> CheckOutcome {
                 .get("ahead_by")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
-            let latest = body
+            let summary = body
                 .get("commits")
                 .and_then(|c| c.as_array())
                 .and_then(|c| c.last())
@@ -116,10 +151,16 @@ pub async fn check() -> CheckOutcome {
                 .and_then(|m| m.as_str())
                 .map(|m| m.lines().next().unwrap_or("").to_owned())
                 .unwrap_or_default();
+            let latest = if summary.is_empty() {
+                tag_name.to_owned()
+            } else {
+                format!("{tag_name} ({summary})")
+            };
             CheckOutcome::UpdateAvailable { commits, latest }
         }
         Some("diverged") => CheckOutcome::Unknown(
-            "the checkout has local commits that are not on GitHub — update it by hand".into(),
+            "the checkout has local commits that are not in the latest release — update it by hand"
+                .into(),
         ),
         _ => CheckOutcome::Unknown("GitHub's answer had no comparison status".into()),
     }

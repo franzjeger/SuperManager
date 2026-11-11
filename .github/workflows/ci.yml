@@ -34,7 +34,7 @@ jobs:
   # only way it stays strict; a gate set to `error` would have passed all six
   # defects above.
   shell:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -213,12 +213,14 @@ jobs:
   # `supermgrd-mac` / `supermanager-helper` stay out: they need launchd and
   # the Apple SDKs, and the `mac` job below covers them.
   linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.99.1
+        with:
+          toolchain: "1.99.1"
       # Vendor pins first: it is seconds of curl, and it is the check most
       # likely to fail for reasons that have nothing to do with the commit
       # under test.
@@ -261,42 +263,15 @@ jobs:
           sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libssl-dev pkg-config tcpdump
       - name: Build
         run: |
-          cargo build --release \
+          cargo build --release --locked \
             -p supermgr-core \
             -p supermgr-engine \
             -p supermgr-mcp \
             -p supermgrd \
             -p supermgr
-      # `-D warnings` is what makes this step a gate rather than a report.
-      # It covers every rustc lint (unused imports and variables, dead
-      # code, unreachable patterns) plus clippy's correctness, suspicious
-      # and perf groups — the categories that catch defects. Two real bugs
-      # were sitting in that output while the step ran `-W warnings` and
-      # could never fail: a mail port reported as cleartext because its
-      # match arm was unreachable, and a kill switch whose two branches
-      # were identical.
-      #
-      # style, complexity and pedantic stay advisory. They are ~76 mostly
-      # cosmetic findings (doc-comment indentation is the bulk of it);
-      # gating on them would have meant a churn-heavy diff for no defect
-      # caught. Promote them once they're worked down.
-      #
-      # The toolchain above is `stable`, which floats. A new Rust can add
-      # or sharpen a lint and turn this step red on a PR that changed
-      # nothing related — that is not a mystery failure, it is the float.
-      # When it happens, fix the lint; reach for `#[allow]` only when the
-      # finding genuinely isn't worth acting on, and say why in the code.
-      # To reproduce a CI-only finding locally, match the version rather
-      # than guessing:
-      #
-      #   rustup toolchain install <version> --component clippy
-      #   rustup run <version> cargo clippy --all-targets -p ... -- -D warnings ...
-      #
-      # Pinning the toolchain instead would trade these surprises for
-      # manual bumps; that's a repo-wide policy call, not a clippy one.
       - name: Clippy
         run: |
-          cargo clippy --all-targets \
+          cargo clippy --locked --all-targets \
             -p supermgr-core \
             -p supermgr-engine \
             -p supermgr-mcp \
@@ -308,7 +283,7 @@ jobs:
                -A clippy::complexity
       - name: Tests
         run: |
-          cargo test \
+          cargo test --locked \
             -p supermgr-core \
             -p supermgr-engine \
             -p supermgr-mcp \
@@ -319,12 +294,14 @@ jobs:
   # the SwiftUI app via `xcodebuild test`. Signing is disabled
   # because GitHub-hosted runners have no Apple Developer identity.
   mac:
-    runs-on: macos-latest
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.99.1
+        with:
+          toolchain: "1.99.1"
 
       # The macOS installer, on macOS, under the interpreter it will actually
       # meet: Apple ships /bin/bash 3.2 and has since 2007, while the `shell`
@@ -373,7 +350,7 @@ jobs:
       # Same `-p <crate>` list the local `build.sh` uses.
       - name: Build (Mac crates)
         run: |
-          cargo build --release \
+          cargo build --release --locked \
             -p supermgr-core \
             -p supermgr-engine \
             -p supermgr-mcp \
@@ -382,7 +359,7 @@ jobs:
 
       - name: Clippy (Mac crates)
         run: |
-          cargo clippy --all-targets \
+          cargo clippy --locked --all-targets \
             -p supermgr-core \
             -p supermgr-engine \
             -p supermgr-mcp \
@@ -395,7 +372,7 @@ jobs:
 
       - name: Tests (Mac crates)
         run: |
-          cargo test \
+          cargo test --locked \
             -p supermgr-core \
             -p supermgr-engine \
             -p supermgr-mcp \
@@ -447,16 +424,18 @@ jobs:
   # The Linux daemon (supermgrd) and Mac stack are excluded because
   # their D-Bus / strongSwan / launchd deps don't exist on Windows.
   windows:
-    runs-on: windows-latest
+    runs-on: windows-2025
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # 1.99.1
+        with:
+          toolchain: "1.99.1"
 
       - name: Build (Windows crates)
         run: |
-          cargo build --release `
+          cargo build --release --locked `
             -p supermgr-core `
             -p supermgr-mcp `
             -p supermgrd-win `
@@ -464,7 +443,7 @@ jobs:
 
       - name: Clippy (Windows crates)
         run: |
-          cargo clippy --all-targets `
+          cargo clippy --locked --all-targets `
             -p supermgr-core `
             -p supermgr-mcp `
             -p supermgrd-win `
@@ -479,7 +458,7 @@ jobs:
       # `#[cfg(test)]` code, which a plain `cargo build` never does.
       - name: Tests (Windows + cross-platform crates)
         run: |
-          cargo test --release `
+          cargo test --release --locked `
             -p supermgr-core `
             -p supermgr-mcp `
             -p supermgrd-win `

@@ -1,0 +1,4 @@
+# Trusted SSH release-tag signers for SuperManager (`git verify-tag`).
+# Installed to /etc/supermgr/release-signers (root:root, 0644) by install-linux.sh.
+franzjeger@gmail.com namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEjw+TrJfFdNGExRMGGhdyduZ0tuPYgcCDZmQjQe25Mh
+franzjeger@gmail.com namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN2bfFexy6aMp/nMoOnqoMngmVd+pSZlH+Y+g9E6ePow
