@@ -4,6 +4,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_call:
 
 # Default to read-only. Individual jobs/steps can opt in to more.
 permissions:
@@ -12,11 +13,11 @@ permissions:
 # A newer push to the same branch or pull request supersedes a run still
 # going: only the latest commit's result decides anything, and the runners
 # are few. Eight merges in a row once queued eight full runs on main, and
-# the release waited behind them. Releases run in their own workflows, on
-# tags, and are never cancelled by this.
+# the release waited behind them. Tag / workflow_call runs gate releases and
+# must never be cancelled mid-flight.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'workflow_call' && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   # Shell scripts and packaging policy — the parts of the repo that ship
@@ -36,6 +37,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # `git ls-files` rather than a hardcoded list: a script added under a new
       # directory is exactly the one nobody remembers to add to CI, and a gate
@@ -213,6 +216,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       # Vendor pins first: it is seconds of curl, and it is the check most
       # likely to fail for reasons that have nothing to do with the commit
@@ -317,6 +322,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       # The macOS installer, on macOS, under the interpreter it will actually
@@ -443,6 +450,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Build (Windows crates)
