@@ -103,8 +103,8 @@ pub fn spawn_watchdog() -> Result<()> {
 
 /// Replace (or clear) the fallback list. Passing an empty list or `["empty"]`
 /// disables the DNS health watchdog and removes any active `"watchdog"` DNS key.
-pub fn set_fallbacks(list: Vec<String>) -> Result<()> {
-    let list = parse_requested_fallbacks(&list)?;
+pub fn set_fallbacks(list: &[String]) -> Result<()> {
+    let list = parse_requested_fallbacks(list)?;
     if let Some(parent) = Path::new(FALLBACK_PATH).parent() {
         fs::create_dir_all(parent).context("creating fallback dir")?;
     }
@@ -162,11 +162,11 @@ fn watchdog_loop() {
             consecutive_failures = 0;
             let (lock, cvar) = &WAKE_SIGNAL;
             let changed = lock.lock().unwrap_or_else(PoisonError::into_inner);
-            if !*changed {
-                let mut guard = cvar.wait(changed).unwrap_or_else(PoisonError::into_inner);
+            if *changed {
+                let mut guard = changed;
                 *guard = false;
             } else {
-                let mut guard = changed;
+                let mut guard = cvar.wait(changed).unwrap_or_else(PoisonError::into_inner);
                 *guard = false;
             }
             continue;
@@ -182,13 +182,13 @@ fn watchdog_loop() {
             consecutive_failures = 0;
             let (lock, cvar) = &WAKE_SIGNAL;
             let changed = lock.lock().unwrap_or_else(PoisonError::into_inner);
-            if !*changed {
+            if *changed {
+                let mut guard = changed;
+                *guard = false;
+            } else {
                 let (mut guard, _) = cvar
                     .wait_timeout(changed, Duration::from_secs(30))
                     .unwrap_or_else(PoisonError::into_inner);
-                *guard = false;
-            } else {
-                let mut guard = changed;
                 *guard = false;
             }
             continue;
@@ -246,53 +246,53 @@ fn watchdog_loop() {
             consecutive_failures * 10
         );
 
-        if consecutive_failures >= 3 && !already_forced {
-            let configured = FALLBACKS
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
-
-            // Only install fallbacks that actually answer *here*.
-            // The list is persisted across networks, so it happily
-            // contains a home-LAN resolver that is unreachable from a
-            // customer site — installing that unchecked replaces a
-            // dead primary with another dead primary, which is the
-            // exact failure we were called to repair.
-            let fallbacks: Vec<String> = configured
-                .iter()
-                .filter(|ip| probe_resolver(ip))
-                .cloned()
-                .collect();
-
-            if fallbacks.is_empty() {
-                tracing::error!(
-                    resolver = %primary,
-                    configured = ?configured,
-                    "DNS unhealthy 30s but no configured fallback answers here — \
-                     leaving DNS alone rather than making it worse"
-                );
-                // Don't set already_forced: if a fallback becomes
-                // reachable later (VPN comes up, network changes) we
-                // should still step in.
-                continue;
-            }
-            if fallbacks.len() != configured.len() {
-                tracing::warn!(
-                    skipped = ?configured.iter().filter(|ip| !fallbacks.contains(ip)).collect::<Vec<_>>(),
-                    "some configured DNS fallbacks are unreachable here — skipping them"
-                );
-            }
-            tracing::error!(
-                resolver = %primary,
-                fallbacks = ?fallbacks,
-                "DNS unhealthy 30s — installing supplemental fallback DNS via scutil"
-            );
-            // Install under SuperManager's own ephemeral State key rather than
-            // overwriting the primary network service's DHCP State:/.../DNS entry.
-            crate::dns::set_vpn_dns_for("watchdog", &fallbacks);
+        if consecutive_failures >= 3 && !already_forced && try_install_fallbacks(&primary) {
             already_forced = true;
         }
     }
+}
+
+/// Probe configured fallback resolvers and install the reachable ones under the
+/// `"watchdog"` State DNS key. Returns `true` when at least one fallback was
+/// installed.
+fn try_install_fallbacks(primary: &str) -> bool {
+    let configured = FALLBACKS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+
+    // Only install fallbacks that actually answer *here*. The list is persisted
+    // across networks, so it happily contains a home-LAN resolver that is
+    // unreachable from a customer site — installing that unchecked replaces a
+    // dead primary with another dead primary.
+    let fallbacks: Vec<String> = configured
+        .iter()
+        .filter(|ip| probe_resolver(ip))
+        .cloned()
+        .collect();
+
+    if fallbacks.is_empty() {
+        tracing::error!(
+            resolver = %primary,
+            configured = ?configured,
+            "DNS unhealthy 30s but no configured fallback answers here — \
+             leaving DNS alone rather than making it worse"
+        );
+        return false;
+    }
+    if fallbacks.len() != configured.len() {
+        tracing::warn!(
+            skipped = ?configured.iter().filter(|ip| !fallbacks.contains(ip)).collect::<Vec<_>>(),
+            "some configured DNS fallbacks are unreachable here — skipping them"
+        );
+    }
+    tracing::error!(
+        resolver = %primary,
+        fallbacks = ?fallbacks,
+        "DNS unhealthy 30s — installing supplemental fallback DNS via scutil"
+    );
+    crate::dns::set_vpn_dns_for("watchdog", &fallbacks);
+    true
 }
 
 /// Read every nameserver of `resolver #1` from `scutil --dns`, in
@@ -370,16 +370,20 @@ mod tests {
             stored_fallbacks(r#"["1.1.1.1", "resolver.example", "x", " 9.9.9.9 "]"#),
             ["1.1.1.1", "9.9.9.9"]
         );
-        assert!(stored_fallbacks("not json").is_empty());
+        assert_eq!(stored_fallbacks("not json"), Vec::<String>::new());
     }
 
     #[test]
     fn empty_or_clear_fallbacks_disable_watchdog() {
-        assert!(stored_fallbacks("[]").is_empty());
-        assert!(parse_requested_fallbacks(&[]).unwrap().is_empty());
-        assert!(parse_requested_fallbacks(&["empty".to_owned()])
-            .unwrap()
-            .is_empty());
+        assert_eq!(stored_fallbacks("[]"), Vec::<String>::new());
+        assert_eq!(
+            parse_requested_fallbacks(&[]).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            parse_requested_fallbacks(&["empty".to_owned()]).unwrap(),
+            Vec::<String>::new()
+        );
         assert_eq!(
             parse_requested_fallbacks(&["1.1.1.1".to_owned()]).unwrap(),
             vec!["1.1.1.1".to_owned()]
@@ -418,8 +422,11 @@ resolver #2
 
     #[test]
     fn handles_no_resolvers() {
-        assert!(parse_resolvers("DNS configuration\n\n").is_empty());
-        assert!(parse_resolvers("").is_empty());
+        assert_eq!(
+            parse_resolvers("DNS configuration\n\n"),
+            Vec::<String>::new()
+        );
+        assert_eq!(parse_resolvers(""), Vec::<String>::new());
     }
 
     #[test]

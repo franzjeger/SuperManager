@@ -2,46 +2,29 @@
 //!
 //! This crate contains the platform-independent business logic:
 //! SSH operations, state management, secrets, and the JSON-RPC server.
-//! It is used by both `supermgrd` (Linux) and `supermgrd-mac` (macOS).
+//! It is used by `supermgrd-mac` (macOS).
 
-pub mod activity_log;
-pub mod anomaly;
 pub mod asset_enrich;
 pub mod azure_oauth;
 pub mod azure_vpn;
 pub mod compliance;
-pub mod creds;
 pub mod customer;
 pub mod cve_feed;
 pub mod device_type_overrides;
 pub mod discovery;
-pub mod dns_axfr;
 pub mod dns_health;
-pub mod engagement;
 pub mod error;
 pub mod findings_store;
 pub mod fortigate;
 pub mod handlers;
-pub mod ldap_enum;
 pub mod netdetect;
 pub mod notify;
-pub mod operations;
-pub mod pcap_binary;
 pub mod probes;
 pub mod protocol;
 pub mod provisioning;
-pub mod remediation;
-pub mod report;
-pub mod risk;
-pub mod scheduler;
 pub mod secrets;
 pub mod server;
-pub mod smb_enum;
-pub mod snmp_walk;
 pub mod ssh;
-pub mod subdomain_enum;
-pub mod tools;
-pub mod traffic_sniff;
 /// The Linux CIS baseline, which lives in core now — nothing about running
 /// `sshd -T` over a closure is macOS-specific, and the Linux daemon needs the
 /// same check definitions rather than a second set. Re-exported so existing
@@ -50,9 +33,8 @@ pub mod ssh_compliance {
     pub use supermgr_core::ssh_compliance::*;
 }
 pub mod state;
+pub mod subdomain_enum;
 pub mod tls_pin;
+pub mod tools;
 pub mod unifi;
 pub mod unifi_controllers;
-pub mod vuln;
-pub mod waf_detect;
-pub mod web_paths;

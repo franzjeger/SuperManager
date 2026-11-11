@@ -104,27 +104,42 @@ fn classify_v4(addr: Ipv4Addr) -> Zone {
     Zone::Public
 }
 
-/// Reverse-DNS lookup using the OS resolver. Bounded timeout so a
-/// stalled DNS server doesn't block the whole enrichment pass; the
-/// `host` process is killed with it rather than left to finish alone.
+/// Reverse-DNS lookup using the OS resolver. Bounded timeout and bounded
+/// stdout buffer (`P3-11`) so a stalled or noisy DNS server doesn't block or
+/// bloat the enrichment pass; the `host` process is killed on drop.
 pub async fn reverse_dns(ip: &str) -> Option<String> {
+    use tokio::io::AsyncReadExt;
+
+    const MAX_HOST_STDOUT_BYTES: u64 = 16 * 1024;
     let parsed: IpAddr = ip.parse().ok()?;
     // std::net has no reverse DNS — shell out to `host` (BSD/macOS).
     // Falls back to None on any failure; not worth a hard error.
-    let out = tokio::time::timeout(
-        Duration::from_secs(2),
-        tokio::process::Command::new("host")
-            .kill_on_drop(true)
-            .arg(parsed.to_string())
-            .output(),
-    )
+    let mut child = tokio::process::Command::new("host")
+        .kill_on_drop(true)
+        .arg(parsed.to_string())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout_pipe = child.stdout.take();
+    let (status, stdout) = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut buf = Vec::new();
+        if let Some(ref mut out) = stdout_pipe {
+            out.take(MAX_HOST_STDOUT_BYTES)
+                .read_to_end(&mut buf)
+                .await?;
+            let _ = tokio::io::copy(out, &mut tokio::io::sink()).await;
+        }
+        let status = child.wait().await?;
+        Ok::<_, std::io::Error>((status, buf))
+    })
     .await
     .ok()?
     .ok()?;
-    if !out.status.success() {
+    if !status.success() {
         return None;
     }
-    let s = String::from_utf8_lossy(&out.stdout);
+    let s = String::from_utf8_lossy(&stdout);
     // Output: "1.0.168.192.in-addr.arpa domain name pointer foo.local."
     for line in s.lines() {
         if let Some(idx) = line.find(" domain name pointer ") {

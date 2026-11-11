@@ -13,7 +13,6 @@ use uuid::Uuid;
 use supermgr_core::host::Host;
 use supermgr_core::ssh::key::SshKey;
 use supermgr_core::vpn::profile::{Profile, ProfileConfig};
-use supermgr_core::vpn::state::VpnState;
 
 use crate::ssh::known_hosts::KnownHostsStore;
 
@@ -21,9 +20,6 @@ use crate::ssh::known_hosts::KnownHostsStore;
 pub struct DaemonState {
     /// All known VPN profiles, keyed by UUID.
     pub profiles: HashMap<Uuid, Profile>,
-
-    /// Current VPN state.
-    pub vpn_state: VpnState,
 
     /// Directory where VPN profile TOML files are persisted.
     pub profile_dir: PathBuf,
@@ -53,17 +49,8 @@ pub struct DaemonState {
     pub unifi_controllers: HashMap<Uuid, crate::unifi_controllers::UnifiController>,
     pub unifi_controller_dir: PathBuf,
 
-    /// Operator-set device-type overrides (per MAC). Used by
-    /// `active_scan` to override the OUI-based vendor sniffer
-    /// when the human knows better than our heuristics.
+    /// Operator-set device-type overrides (per MAC / OUI).
     pub device_type_overrides: crate::device_type_overrides::DeviceTypeOverrides,
-
-    /// Webhook URL for outgoing notifications.
-    pub webhook_url: String,
-    /// Fire a webhook when an SSH host goes down.
-    pub webhook_on_host_down: bool,
-    /// Fire a webhook when a VPN tunnel disconnects unexpectedly.
-    pub webhook_on_vpn_disconnect: bool,
 
     /// Persistent record of accepted SSH host keys. The SSH client handler
     /// consults this on every connection: TOFU on first sight, reject on
@@ -89,7 +76,6 @@ impl DaemonState {
         let known_hosts = Arc::new(KnownHostsStore::open(&data_dir)?);
         Ok(Self {
             profiles: HashMap::new(),
-            vpn_state: VpnState::Disconnected,
             profile_dir: data_dir.join("profiles"),
             ovpn_dir: data_dir.join("ovpn"),
             ssh_keys: HashMap::new(),
@@ -102,9 +88,6 @@ impl DaemonState {
             device_type_overrides: crate::device_type_overrides::DeviceTypeOverrides::open(
                 &data_dir,
             ),
-            webhook_url: String::new(),
-            webhook_on_host_down: true,
-            webhook_on_vpn_disconnect: false,
             known_hosts,
             load_errors: Vec::new(),
         })

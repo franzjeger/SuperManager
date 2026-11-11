@@ -443,8 +443,6 @@ async fn findings_handlers_surface_structured_errors_instead_of_zero_vulns() {
     for (method, params) in [
         ("findings_list", json!({ "scope": "../escape" })),
         ("findings_summary", json!({ "scope": "../escape" })),
-        ("findings_risk_hosts", json!({ "scope": "../escape" })),
-        ("remediation_script", json!({ "scope": "../escape" })),
     ] {
         let resp = rpc_call(&socket, method, params, 1).await;
         assert_eq!(
@@ -453,7 +451,7 @@ async fn findings_handlers_surface_structured_errors_instead_of_zero_vulns() {
         );
     }
 
-    // Corrupt findings JSON -> -32021 (FindingsParse) across findings & report RPCs.
+    // Corrupt findings JSON -> -32021 (FindingsParse) across findings RPCs.
     let scope = format!("test-corrupt-{}", uuid::Uuid::new_v4().simple());
     let mut store_dir = supermgr_engine::secrets::default_data_dir();
     store_dir.push("findings_store");
@@ -465,8 +463,6 @@ async fn findings_handlers_surface_structured_errors_instead_of_zero_vulns() {
     for (method, params) in [
         ("findings_list", json!({ "scope": &scope })),
         ("findings_summary", json!({ "scope": &scope })),
-        ("findings_risk_hosts", json!({ "scope": &scope })),
-        ("remediation_script", json!({ "scope": &scope })),
     ] {
         let resp = rpc_call(&socket, method, params, 2).await;
         assert_eq!(

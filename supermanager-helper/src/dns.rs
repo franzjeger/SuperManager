@@ -4,10 +4,10 @@
 //!
 //! macOS System Configuration has two layers:
 //!
-//!   Setup:/Network/Service/<uuid>/DNS  — persistent, survives reboot.
-//!                                        Written by `networksetup`.
-//!   State:/Network/Service/<uuid>/DNS  — ephemeral, cleared on reboot.
-//!                                        Written by scutil / VPN daemons.
+//!   `Setup:/Network/Service/<uuid>/DNS` — persistent, survives reboot.
+//!                                         Written by `networksetup`.
+//!   `State:/Network/Service/<uuid>/DNS` — ephemeral, cleared on reboot.
+//!                                         Written by scutil / VPN daemons.
 //!
 //! `networksetup -setdnsservers` writes to **Setup** — the user's saved
 //! preference. If a VPN sets DNS there and the cleanup step is skipped
@@ -20,6 +20,7 @@
 //! Disconnect removes only our key and flushes the resolver cache. Neither
 //! the user's saved DNS nor configd's derived Global/DNS is overwritten.
 
+use std::fmt::Write as _;
 use std::io::Write as _;
 // Every command here is bounded: see `proc::Bounded`.
 use crate::proc::Bounded as Command;
@@ -80,7 +81,7 @@ pub fn clear_vpn_dns_prefix(owner_prefix: &str) {
     }
     let mut script = String::from("open\n");
     for key in &keys {
-        script.push_str(&format!("remove {key}\n"));
+        let _ = writeln!(script, "remove {key}");
     }
     script.push_str("quit\n");
     run_scutil_script(&script, "scutil (clear prefix DNS)");
@@ -96,7 +97,7 @@ pub fn clear_vpn_dns() {
     }
     let mut script = String::from("open\n");
     for key in &keys {
-        script.push_str(&format!("remove {key}\n"));
+        let _ = writeln!(script, "remove {key}");
     }
     script.push_str("quit\n");
     run_scutil_script(&script, "scutil (clear all DNS)");
@@ -105,14 +106,13 @@ pub fn clear_vpn_dns() {
 }
 
 fn list_supermgr_dns_keys() -> Vec<String> {
-    let mut child = match std::process::Command::new("/usr/sbin/scutil")
+    let Ok(mut child) = std::process::Command::new("/usr/sbin/scutil")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
+    else {
+        return Vec::new();
     };
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(
@@ -394,7 +394,7 @@ mod tests {
             server_addresses(shown),
             vec!["8.8.8.8".to_owned(), "2001:4860:4860::8888".to_owned()]
         );
-        assert!(server_addresses("  No such key\n").is_empty());
+        assert_eq!(server_addresses("  No such key\n"), Vec::<String>::new());
     }
 
     /// This Mac on 2026-10-01: Wi-Fi is primary, and its DNS holds what DHCP
@@ -425,7 +425,7 @@ mod tests {
             own_resolvers(Some(manual), Some(state)),
             vec!["9.9.9.9".to_owned()]
         );
-        assert!(own_resolvers(None, None).is_empty());
+        assert_eq!(own_resolvers(None, None), Vec::<String>::new());
     }
 
     #[test]

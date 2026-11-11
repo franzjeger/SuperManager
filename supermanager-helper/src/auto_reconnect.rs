@@ -3,7 +3,7 @@
 //! For each registered profile, polls the backend's status every
 //! 30 seconds. If the tunnel is down, replays the last successful
 //! connect args to bring it back up. Works even when the GUI is
-//! closed because the helper is a system-level LaunchDaemon.
+//! closed because the helper is a system-level `LaunchDaemon`.
 //!
 //! ## State persistence
 //!
@@ -18,7 +18,7 @@
 //! ## Backends
 //!
 //! Three: `wireguard`, `openvpn`, `ikev2`. Tailscale isn't here
-//! because tailscaled is itself a LaunchDaemon and handles its
+//! because tailscaled is itself a `LaunchDaemon` and handles its
 //! own reconnect lifecycle (the daemon pref `WantRunning=true`
 //! plus tailscaled's own reconnect-on-network-change).
 
@@ -300,6 +300,7 @@ impl State {
 }
 
 static STATE: tokio::sync::OnceCell<Arc<Mutex<State>>> = tokio::sync::OnceCell::const_new();
+static SPAWNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 /// Spawn the watchdog. Idempotent. Pass in the helper's existing
 /// Arc<Mutex<>> backend handles so we don't fight the main RPC
@@ -348,7 +349,6 @@ pub async fn spawn_watchdog(
         .clone();
 
     // Avoid double-spawn — guard via a separate Once flag.
-    static SPAWNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     if SPAWNED.get().is_some() {
         return Ok(());
     }
@@ -488,7 +488,7 @@ pub async fn guard_routes(
     Ok(())
 }
 
-/// Drop a RouteGuard registration on manual disconnect. Leaves an Always-on
+/// Drop a `RouteGuard` registration on manual disconnect. Leaves an Always-on
 /// entry intact — that's the user's standing intent, not something a single
 /// disconnect revokes (matching the pre-existing Always-on contract).
 pub async fn unguard_routes(profile_id: &str) -> Result<()> {
@@ -648,6 +648,10 @@ async fn check_and_reconnect(
             return;
         }
     };
+    record_replay_outcome(&p, state, result).await;
+}
+
+async fn record_replay_outcome(p: &WatchedProfile, state: &Mutex<State>, result: Result<()>) {
     match result {
         Ok(()) => {
             tracing::info!(
@@ -668,7 +672,7 @@ async fn check_and_reconnect(
             if !g.watched.contains_key(&p.profile_id) {
                 return;
             }
-            let failing = g.replay_failed(&p, &err_str);
+            let failing = g.replay_failed(p, &err_str);
             let halted = g
                 .failures
                 .get(&p.profile_id)
@@ -781,7 +785,7 @@ fn carries_everything(selectors: &[String]) -> bool {
 }
 
 /// True if THIS profile's IKEv2 SA is ESTABLISHED, regardless of whether its
-/// full-tunnel routes are present. The RouteGuard branch uses this to tell the
+/// full-tunnel routes are present. The `RouteGuard` branch uses this to tell the
 /// route-less case (SA up + routes gone → heal) apart from a genuinely dead SA
 /// (leave a manually-connected profile down). It is deliberately the
 /// route-UNaware half of `sw_connected`.

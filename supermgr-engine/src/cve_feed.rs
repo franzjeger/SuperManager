@@ -32,7 +32,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::vuln::Severity;
+use supermgr_core::severity::Severity;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedEntry {
@@ -97,15 +97,19 @@ pub async fn refresh() -> Result<u32> {
         .user_agent("SuperManager/1.0 (+https://github.com/franzjeger/SuperManager)")
         .build()?;
 
-    let resp = client.get(url).send().await?;
+    let mut resp = client.get(url).send().await?;
     if !resp.status().is_success() {
         anyhow::bail!("NVD returned {}", resp.status());
     }
-    // Cap response at 100 MB so a malicious / corrupted upstream
-    // can't OOM the daemon. Real NVD pages are <5 MB.
-    let bytes = resp.bytes().await?;
-    if bytes.len() > 100 * 1024 * 1024 {
-        anyhow::bail!("NVD response too large: {} bytes", bytes.len());
+    // Stream response chunks up to 16 MiB so a malicious / corrupted upstream
+    // cannot OOM the daemon before checking length (`P3-11`). Real NVD pages are <5 MiB.
+    const MAX_NVD_BYTES: usize = 16 * 1024 * 1024;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_NVD_BYTES {
+            anyhow::bail!("NVD response exceeded {MAX_NVD_BYTES} bytes");
+        }
+        bytes.extend_from_slice(&chunk);
     }
     let body: serde_json::Value = serde_json::from_slice(&bytes)?;
     let vulnerabilities = body
@@ -502,7 +506,7 @@ mod tests {
             id: id.into(),
             product_keywords: keywords.iter().map(|s| (*s).into()).collect(),
             version_substrings: versions.iter().map(|s| (*s).into()).collect(),
-            severity: crate::vuln::Severity::High,
+            severity: Severity::High,
             cvss: 7.0,
             title: format!("{id}: test"),
             detail: "test".into(),

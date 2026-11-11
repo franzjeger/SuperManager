@@ -42,8 +42,7 @@ use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 use crate::client_auth::Policy;
-
-const BREW_PREFIXES: &[&str] = &["/opt/homebrew", "/usr/local"];
+use crate::vpn_runtime::BREW_PREFIXES;
 
 /// Known OpenVPN executable basenames, checked via `proc_pidpath` before
 /// signalling any PID or counting a PID file / `ps` row as our tunnel.
@@ -233,9 +232,403 @@ pub enum OvpnState {
     Disconnected,
 }
 
+struct OvpnFilesGuard {
+    config_path: PathBuf,
+    auth_path: Option<PathBuf>,
+    keep_config: bool,
+    keep_auth: bool,
+}
+
+impl Drop for OvpnFilesGuard {
+    fn drop(&mut self) {
+        if !self.keep_auth {
+            if let Some(ref auth) = self.auth_path {
+                let _ = std::fs::remove_file(auth);
+            }
+        }
+        if !self.keep_config {
+            let _ = std::fs::remove_file(&self.config_path);
+        }
+    }
+}
+
+/// Markers OpenVPN writes when it bails mid-handshake *unrecoverably*.
+/// Recoverable signals (`Connection reset`, soft restart) intentionally don't
+/// appear here — the daemon retries those by design.
+const POST_FORK_FATAL_MARKERS: &[&str] = &[
+    "AUTH_FAILED",
+    "auth-failure",
+    "Cannot resolve host",
+    "Fatal TLS error",
+    "Options error",
+    "Cannot load CA certificate",
+    "Cannot load private key",
+    "Cannot load inline certificate",
+    "process exiting",
+    "SIGTERM[soft,init_instance]",
+];
+
+fn prepare_auth_file(
+    safe: &str,
+    args: &OvpnConnectArgs,
+    is_v3: bool,
+) -> anyhow::Result<Option<PathBuf>> {
+    if is_v3 {
+        if args.username.is_some() || args.password.is_some() {
+            let u = args.username.as_deref().unwrap_or("AzureAD");
+            let p = args.password.as_deref().unwrap_or("");
+            validate_v3_credentials(u, p)?;
+            tracing::info!(
+                "ovpn_connect: writing 0600 auth file for openvpn3 (username={}, password={} chars)",
+                u,
+                p.len()
+            );
+            Ok(Some(write_auth_file(safe, u, p)?))
+        } else {
+            Ok(None)
+        }
+    } else if let (Some(u), Some(p)) = (args.username.as_deref(), args.password.as_deref()) {
+        tracing::info!(
+            "ovpn_connect: writing auth file (username={}, password={} chars)",
+            u,
+            p.len()
+        );
+        Ok(Some(write_auth_file(safe, u, p)?))
+    } else {
+        tracing::info!("ovpn_connect: no auth-user-pass (no username/password)");
+        Ok(None)
+    }
+}
+
+fn spawn_openvpn3_process(
+    openvpn: &Path,
+    config_body: &str,
+    config_path: &Path,
+    pid_path: &Path,
+    log_path: &Path,
+    auth_path: Option<&Path>,
+    files_guard: &mut OvpnFilesGuard,
+) -> anyhow::Result<std::process::Output> {
+    use std::os::unix::process::CommandExt as _;
+    // Open the log file for stdout+stderr redirection.
+    // ovpncli writes status to stderr; we merge both into one log.
+    let log_for_stdout = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(log_path)
+        .with_context(|| format!("open log {}", log_path.display()))?;
+    let log_for_stderr = log_for_stdout.try_clone().context("dup log fd")?;
+
+    let v3_args = build_v3_cli_args(config_body, config_path, auth_path);
+    let mut cmd = Command::new(openvpn);
+    cmd.args(&v3_args)
+        .stdin(std::process::Stdio::null())
+        .stdout(log_for_stdout)
+        .stderr(log_for_stderr);
+    unsafe {
+        cmd.as_std_mut().pre_exec(|| {
+            // New session — child won't get SIGHUP if the helper restarts.
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            if let Some(auth) = auth_path {
+                let _ = std::fs::remove_file(auth);
+            }
+            let _ = std::fs::remove_file(config_path);
+            return Err(e).with_context(|| format!("spawn {} (ovpncli)", openvpn.display()));
+        }
+    };
+    let pid = child
+        .id()
+        .ok_or_else(|| anyhow!("ovpncli spawn returned no pid"))?;
+    tracing::info!(
+        "ovpn_connect: ovpncli spawned pid={} log={}",
+        pid,
+        log_path.display()
+    );
+    if let Err(e) = crate::private_file::write(pid_path, format!("{pid}\n").as_bytes()) {
+        tracing::warn!(
+            "ovpn_connect: failed to write pid file {}: {e}",
+            pid_path.display()
+        );
+    }
+    // Reap the child asynchronously so it doesn't become a zombie,
+    // and wipe its 0600 credentials file as soon as the process exits.
+    files_guard.keep_auth = true;
+    let auth_for_exit = auth_path.map(Path::to_path_buf);
+    tokio::spawn(async move {
+        let mut child = child;
+        let _ = child.wait().await;
+        if let Some(auth) = auth_for_exit {
+            let _ = std::fs::remove_file(auth);
+        }
+    });
+    // Synthesize a "spawn succeeded" Output so the post-spawn diagnostic
+    // path covers the v3 case too.
+    Ok(std::process::Output {
+        status: std::process::ExitStatus::from_raw(0),
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    })
+}
+
+async fn spawn_openvpn2_daemon(
+    openvpn: &Path,
+    safe: &str,
+    config_path: &Path,
+    pid_path: &Path,
+    log_path: &Path,
+    status_path: &Path,
+    auth_path: Option<&Path>,
+) -> anyhow::Result<std::process::Output> {
+    let mut cli_args: Vec<String> = vec![
+        "--config".into(),
+        config_path.display().to_string(),
+        // After the configuration, so it wins: built-in commands only,
+        // never a script. `openvpn_config::check` allows no directive that names one either.
+        "--script-security".into(),
+        "1".into(),
+        "--daemon".into(),
+        format!("supermgr-ovpn-{safe}"),
+        "--writepid".into(),
+        pid_path.display().to_string(),
+        "--log".into(),
+        log_path.display().to_string(),
+        "--status".into(),
+        status_path.display().to_string(),
+        "5".into(),
+        "--verb".into(),
+        "3".into(),
+    ];
+    if let Some(auth) = auth_path {
+        cli_args.push("--auth-user-pass".into());
+        cli_args.push(auth.display().to_string());
+    }
+    tracing::info!(
+        "ovpn_connect: argv = {} {}",
+        openvpn.display(),
+        cli_args.join(" ")
+    );
+    let mut cmd = Command::new(openvpn);
+    cmd.args(&cli_args);
+    // `--daemon` forks and the parent exits right after option parsing,
+    // so this normally returns in well under a second.
+    crate::proc::bounded_async(&mut cmd, crate::proc::MUTATE)
+        .await
+        .with_context(|| {
+            format!(
+                "run {} --config {}",
+                openvpn.display(),
+                config_path.display()
+            )
+        })
+}
+
+fn format_refused_to_start(output: &std::process::Output, log_path: &Path) -> String {
+    tracing::error!(
+        "ovpn_connect: NON-ZERO exit, reading {}",
+        log_path.display()
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    let log_tail = {
+        let s = read_openvpn_log(log_path);
+        let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
+        let start = lines.len().saturating_sub(20);
+        lines[start..].join("\n")
+    };
+    let combined = match (stderr.is_empty(), log_tail.is_empty()) {
+        (false, false) => format!("{stderr}\n--- log ---\n{log_tail}"),
+        (true, false) => log_tail,
+        (false, true) => stderr,
+        (true, true) => "(no diagnostic output)".to_owned(),
+    };
+    tracing::error!("ovpn_connect: refused to start:\n{combined}");
+    combined
+}
+
+async fn verify_openvpn2_post_fork(
+    pid_path: &Path,
+    log_path: &Path,
+    config_path: &Path,
+) -> Option<OvpnConnectResult> {
+    // 5s settle window. For openvpn 2.x in `--daemon` mode, the parent exits 0
+    // the moment it forks, before TLS/auth completes. Only abort when openvpn
+    // writes an unrecoverable fatal marker or its PID disappears.
+    tracing::info!("ovpn_connect: waiting 5s for daemon child to settle…");
+    tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
+
+    let log_body = read_openvpn_log(log_path);
+    let pid_alive = read_pid_file(pid_path).is_some_and(is_live_openvpn_pid);
+    tracing::info!(
+        "ovpn_connect: post-spawn check pid_alive={} log_size={}",
+        pid_alive,
+        log_body.len()
+    );
+
+    let fatal_hit = POST_FORK_FATAL_MARKERS
+        .iter()
+        .find(|m| log_body.contains(*m));
+    if pid_alive && fatal_hit.is_none() {
+        return None;
+    }
+
+    let reason = fatal_hit.map_or_else(
+        || "openvpn died after fork (no PID, no fatal marker — see log)".to_owned(),
+        |m| format!("openvpn died after fork — {m}"),
+    );
+    let log_tail = {
+        let lines: Vec<&str> = log_body.lines().filter(|l| !l.trim().is_empty()).collect();
+        let start = lines.len().saturating_sub(25);
+        lines[start..].join("\n")
+    };
+    tracing::error!("ovpn_connect: post-fork failure: {reason}\n{log_tail}");
+    let _ = std::fs::remove_file(config_path);
+    Some(OvpnConnectResult {
+        success: false,
+        message: format!("{reason}\n\nLast 25 log lines:\n{log_tail}"),
+        interface: None,
+    })
+}
+
 impl OpenVpn {
     pub fn new(policy: Policy) -> Self {
         Self { policy }
+    }
+
+    async fn await_and_activate_kill_switch(
+        &mut self,
+        safe: &str,
+        endpoints: Vec<std::net::IpAddr>,
+        bound_iface: &mut Option<String>,
+    ) -> anyhow::Result<Option<OvpnConnectResult>> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(25);
+        while tokio::time::Instant::now() < deadline {
+            let status = self
+                .status(&OvpnStatusArgs {
+                    profile_id: safe.to_owned(),
+                })
+                .await?;
+            match status.state {
+                OvpnState::Connected => {
+                    *bound_iface = status.interface;
+                    break;
+                }
+                OvpnState::Disconnected => {
+                    let reason = status
+                        .error_reason
+                        .unwrap_or_else(|| "OpenVPN exited before establishing tunnel".into());
+                    let _ = self
+                        .disconnect(&OvpnDisconnectArgs {
+                            profile_id: safe.to_owned(),
+                        })
+                        .await;
+                    return Ok(Some(OvpnConnectResult {
+                        success: false,
+                        message: reason,
+                        interface: None,
+                    }));
+                }
+                OvpnState::Connecting | OvpnState::Reconnecting => {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+            }
+        }
+
+        let iface = bound_iface.clone().unwrap_or_default();
+        let safe_for_ks = safe.to_owned();
+        let ks_res = tokio::task::spawn_blocking(move || {
+            crate::kill_switch::activate_for_profile(
+                &safe_for_ks,
+                &iface,
+                endpoints,
+                crate::kill_switch::KillSwitchBackend::Openvpn,
+            )
+        })
+        .await
+        .context("kill-switch blocking task")?;
+        if let Err(e) = ks_res {
+            tracing::error!(
+                profile = %safe,
+                "ovpn_connect: kill-switch activation failed; tearing down tunnel: {e:#}"
+            );
+            let _ = self
+                .disconnect(&OvpnDisconnectArgs {
+                    profile_id: safe.to_owned(),
+                })
+                .await;
+            return Ok(Some(OvpnConnectResult {
+                success: false,
+                message: format!("Kill-switch activation failed (tunnel rolled back): {e:#}"),
+                interface: None,
+            }));
+        }
+        Ok(None)
+    }
+
+    async fn spawn_and_verify_openvpn(
+        openvpn: &Path,
+        is_v3: bool,
+        safe: &str,
+        config_body: &str,
+        files_guard: &mut OvpnFilesGuard,
+    ) -> anyhow::Result<Option<OvpnConnectResult>> {
+        let pid_path = pid_path_for(safe);
+        let log_path = log_path_for(safe);
+        let status_path = status_path_for(safe);
+        let config_path = files_guard.config_path.clone();
+        let auth_path = files_guard.auth_path.clone();
+
+        tracing::info!("ovpn_connect: spawning {} (v3={is_v3})", openvpn.display());
+        let output = if is_v3 {
+            spawn_openvpn3_process(
+                openvpn,
+                config_body,
+                &config_path,
+                &pid_path,
+                &log_path,
+                auth_path.as_deref(),
+                files_guard,
+            )?
+        } else {
+            spawn_openvpn2_daemon(
+                openvpn,
+                safe,
+                &config_path,
+                &pid_path,
+                &log_path,
+                &status_path,
+                auth_path.as_deref(),
+            )
+            .await?
+        };
+
+        if !output.status.success() {
+            if let Some(ref auth) = auth_path {
+                let _ = std::fs::remove_file(auth);
+            }
+            let combined = format_refused_to_start(&output, &log_path);
+            let _ = std::fs::remove_file(&config_path);
+            return Ok(Some(OvpnConnectResult {
+                success: false,
+                message: format!("openvpn refused to start:\n{combined}"),
+                interface: None,
+            }));
+        }
+        if !is_v3 {
+            if let Some(ref auth) = auth_path {
+                let _ = std::fs::remove_file(auth);
+            }
+            if let Some(failed) =
+                verify_openvpn2_post_fork(&pid_path, &log_path, &config_path).await
+            {
+                return Ok(Some(failed));
+            }
+        }
+        Ok(None)
     }
 
     /// Spin up an `openvpn` child for this profile. Daemon mode
@@ -248,45 +641,27 @@ impl OpenVpn {
         crate::kill_switch::sync_intent_opt(&safe, args.kill_switch)?;
         let want_kill_switch = crate::kill_switch::has_intent(&safe);
         let openvpn = locate_openvpn(self.policy, args.require_openvpn3)?;
-        tracing::info!(
-            "ovpn_connect: profile={} openvpn={}",
-            safe,
-            openvpn.display()
-        );
         let config_body = args.configuration()?;
         let endpoints = if want_kill_switch {
             crate::kill_switch::resolve_openvpn_endpoints(&config_body)
         } else {
             Vec::new()
         };
-
         // Suppress the connectivity watchdog during the connect/handshake window.
-        // A full-tunnel OpenVPN/Azure profile installs 0/1+128/1 and briefly has
-        // no working egress while TLS/auth/route-push complete; without this the
-        // watchdog would count that as an outage and fire panic_reset, ripping
-        // the just-installed split-defaults out from under the connecting tunnel.
-        // The reconciler arms the same pause around its own route work.
         crate::connectivity_watchdog::pause_for(45);
-
         tracing::info!(
-            "ovpn_connect: config bytes={} has_remote={} has_ca={} has_tls_auth={} has_tls_crypt={} has_auth_user_pass={} has_client_cert={}",
+            "ovpn_connect: profile={safe} openvpn={} bytes={} has_remote={} has_ca={} has_auth_user_pass={} has_client_cert={}",
+            openvpn.display(),
             config_body.len(),
             config_body.contains("\nremote ") || config_body.starts_with("remote "),
             config_body.contains("<ca>"),
-            config_body.contains("<tls-auth>"),
-            config_body.contains("<tls-crypt>"),
             config_body.contains("auth-user-pass"),
             has_client_certificate(&config_body),
         );
 
         let pid_path = pid_path_for(&safe);
         let log_path = log_path_for(&safe);
-        let status_path = status_path_for(&safe);
         let config_path = config_path_for(&safe);
-
-        // Stop any existing OpenVPN process for this profile before spawning a
-        // new one so reconnects / retries never accumulate duplicate root
-        // daemons (`P2-15`).
         let previous = stop_profile_processes(&safe).await;
         if !previous.is_empty() {
             tracing::info!(
@@ -297,422 +672,37 @@ impl OpenVpn {
         }
 
         ensure_private_dir()?;
-        struct OvpnFilesGuard {
-            config_path: PathBuf,
-            auth_path: Option<PathBuf>,
-            keep_config: bool,
-            keep_auth: bool,
-        }
-        impl Drop for OvpnFilesGuard {
-            fn drop(&mut self) {
-                if !self.keep_auth {
-                    if let Some(ref auth) = self.auth_path {
-                        let _ = std::fs::remove_file(auth);
-                    }
-                }
-                if !self.keep_config {
-                    let _ = std::fs::remove_file(&self.config_path);
-                }
-            }
-        }
         let mut files_guard = OvpnFilesGuard {
             config_path: config_path.clone(),
             auth_path: None,
             keep_config: false,
             keep_auth: false,
         };
-
         crate::private_file::write(&config_path, config_body.as_bytes())
             .with_context(|| format!("write {}", config_path.display()))?;
-        // Start the log empty. Otherwise our post-spawn diagnostic check
-        // (`FATAL.iter().find(|m| log_body.contains(m))`) sees stale
-        // errors from previous failed attempts — particularly when
-        // openvpn 2.x's `--daemon` retry loop keeps appending its own
-        // failures to the same path. Fresh log per spawn = unambiguous
-        // diagnostics.
         crate::private_file::write(&log_path, b"")
             .with_context(|| format!("create {}", log_path.display()))?;
-        // Same for the PID file — a stale PID from a previous
-        // attempt causes the post-spawn `kill(pid, 0)` aliveness
-        // check to spuriously claim a different process is "the
-        // daemon."
         let _ = std::fs::remove_file(&pid_path);
 
         let is_v3 = is_openvpn3(&openvpn);
-        let auth_path = if is_v3 {
-            if args.username.is_some() || args.password.is_some() {
-                let u = args.username.as_deref().unwrap_or("AzureAD");
-                let p = args.password.as_deref().unwrap_or("");
-                validate_v3_credentials(u, p)?;
-                tracing::info!(
-                    "ovpn_connect: writing 0600 auth file for openvpn3 (username={}, password={} chars)",
-                    u,
-                    p.len()
-                );
-                let p = write_auth_file(&safe, u, p)?;
-                files_guard.auth_path = Some(p.clone());
-                Some(p)
-            } else {
-                None
-            }
-        } else if let (Some(u), Some(p)) = (args.username.as_deref(), args.password.as_deref()) {
-            tracing::info!(
-                "ovpn_connect: writing auth file (username={}, password={} chars)",
-                u,
-                p.len()
-            );
-            let p = write_auth_file(&safe, u, p)?;
-            files_guard.auth_path = Some(p.clone());
-            Some(p)
-        } else {
-            tracing::info!("ovpn_connect: no auth-user-pass (no username/password)");
-            None
-        };
+        files_guard.auth_path = prepare_auth_file(&safe, args, is_v3)?;
 
-        // Build the argv. We dispatch on which binary we located:
-        //
-        //   2.x: `openvpn --config FILE --daemon NAME --writepid …`
-        //        (forks itself; we wait for the parent's exit code
-        //        and then poll the log for "Initialization Sequence
-        //        Completed".)
-        //
-        //   3.x: `openvpn3 [--no-cert] [--auth-user-pass AUTH_FILE] CONFIG`
-        //        (our `ovpncli` build; runs in FOREGROUND.
-        //        Credentials travel via a mode-0600 root-only file in
-        //        `PRIVATE_DIR` via its `--auth-user-pass` adapter, keeping
-        //        tokens out of `ps aux` / `KERN_PROCARGS2`.)
-        tracing::info!(
-            "ovpn_connect: spawning {} (v3={})",
-            openvpn.display(),
-            is_v3
-        );
-        let output = if is_v3 {
-            use std::os::unix::process::CommandExt as _;
-            // Open the log file for stdout+stderr redirection.
-            // ovpncli writes status to stderr; we merge both into
-            // one log.
-            let log_for_stdout = std::fs::OpenOptions::new()
-                .write(true)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(&log_path)
-                .with_context(|| format!("open log {}", log_path.display()))?;
-            let log_for_stderr = log_for_stdout.try_clone().context("dup log fd")?;
-
-            let v3_args = build_v3_cli_args(&config_body, &config_path, auth_path.as_deref());
-            let mut cmd = Command::new(&openvpn);
-            cmd.args(&v3_args)
-                .stdin(std::process::Stdio::null())
-                .stdout(log_for_stdout)
-                .stderr(log_for_stderr);
-            unsafe {
-                cmd.as_std_mut().pre_exec(|| {
-                    // New session — child won't get SIGHUP if the
-                    // helper restarts.
-                    libc::setsid();
-                    Ok(())
-                });
-            }
-            let child = match cmd.spawn() {
-                Ok(c) => c,
-                Err(e) => {
-                    if let Some(ref auth) = auth_path {
-                        let _ = std::fs::remove_file(auth);
-                    }
-                    let _ = std::fs::remove_file(&config_path);
-                    return Err(e)
-                        .with_context(|| format!("spawn {} (ovpncli)", openvpn.display()));
-                }
-            };
-            let pid = child
-                .id()
-                .ok_or_else(|| anyhow!("ovpncli spawn returned no pid"))?;
-            tracing::info!(
-                "ovpn_connect: ovpncli spawned pid={} log={}",
-                pid,
-                log_path.display()
-            );
-            if let Err(e) = crate::private_file::write(&pid_path, format!("{pid}\n").as_bytes()) {
-                tracing::warn!(
-                    "ovpn_connect: failed to write pid file {}: {e}",
-                    pid_path.display()
-                );
-            }
-            // Reap the child asynchronously so it doesn't become a zombie,
-            // and wipe its 0600 credentials file as soon as the process exits.
-            files_guard.keep_auth = true;
-            let auth_for_exit = auth_path.clone();
-            tokio::spawn(async move {
-                let mut child = child;
-                let _ = child.wait().await;
-                if let Some(auth) = auth_for_exit {
-                    let _ = std::fs::remove_file(auth);
-                }
-            });
-            // Synthesize a "spawn succeeded" Output so the
-            // post-spawn diagnostic path below covers the v3 case too.
-            std::process::Output {
-                status: std::process::ExitStatus::from_raw(0),
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            }
-        } else {
-            let mut argv: Vec<String> = vec![
-                "--config".into(),
-                config_path.display().to_string(),
-                // After the configuration, so it wins: built-in commands
-                // only, never a script. `openvpn_config::check` allows no
-                // directive that names one either.
-                "--script-security".into(),
-                "1".into(),
-                "--daemon".into(),
-                format!("supermgr-ovpn-{safe}"),
-                "--writepid".into(),
-                pid_path.display().to_string(),
-                "--log".into(),
-                log_path.display().to_string(),
-                "--status".into(),
-                status_path.display().to_string(),
-                "5".into(),
-                "--verb".into(),
-                "3".into(),
-            ];
-            if let Some(ref auth) = auth_path {
-                argv.push("--auth-user-pass".into());
-                argv.push(auth.display().to_string());
-            }
-            tracing::info!(
-                "ovpn_connect: argv = {} {}",
-                openvpn.display(),
-                argv.join(" ")
-            );
-            let mut cmd = Command::new(&openvpn);
-            cmd.args(&argv);
-            // `--daemon` forks and the parent exits right after option
-            // parsing, so this normally returns in well under a second.
-            crate::proc::bounded_async(&mut cmd, crate::proc::MUTATE)
-                .await
-                .with_context(|| {
-                    format!(
-                        "run {} --config {}",
-                        openvpn.display(),
-                        config_path.display()
-                    )
-                })?
-        };
-        tracing::info!(
-            "ovpn_connect: child exited code={:?} stdout={} bytes stderr={} bytes",
-            output.status.code(),
-            output.stdout.len(),
-            output.stderr.len()
-        );
-        if !output.stdout.is_empty() {
-            tracing::info!(
-                "ovpn_connect: stdout = {}",
-                String::from_utf8_lossy(&output.stdout).trim()
-            );
-        }
-        if !output.stderr.is_empty() {
-            tracing::info!(
-                "ovpn_connect: stderr = {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-
-        // openvpn returns 0 on successful daemonisation. Any non-zero
-        // exit means it bailed before going background — config
-        // error, port conflict, no TUN module, etc.
-        if !output.status.success() {
-            // Auth file is a transient credential — wipe it on failure.
-            if let Some(ref auth) = auth_path {
-                let _ = std::fs::remove_file(auth);
-            }
-            // Diagnostics: stderr is usually empty for openvpn 2.x
-            // because `--log <path>` redirects output to the log
-            // file before the parser even starts. Read whatever
-            // landed there so the GUI shows the real error
-            // (config parse fail, "Cannot load CA certificate",
-            // "Options error", etc.) instead of a bare "refused
-            // to start".
-            tracing::error!(
-                "ovpn_connect: NON-ZERO exit, reading {}",
-                log_path.display()
-            );
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            let log_tail = {
-                let s = read_openvpn_log(&log_path);
-                let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
-                let start = lines.len().saturating_sub(20);
-                lines[start..].join("\n")
-            };
-            let combined = match (stderr.is_empty(), log_tail.is_empty()) {
-                (false, false) => format!("{stderr}\n--- log ---\n{log_tail}"),
-                (true, false) => log_tail,
-                (false, true) => stderr,
-                (true, true) => "(no diagnostic output)".to_owned(),
-            };
-            tracing::error!("ovpn_connect: refused to start:\n{combined}");
-            let _ = std::fs::remove_file(&config_path);
-            return Ok(OvpnConnectResult {
-                success: false,
-                message: format!("openvpn refused to start:\n{combined}"),
-                interface: None,
-            });
-        }
-        tracing::info!(
-            "ovpn_connect: spawn succeeded for profile={}",
-            args.profile_id
-        );
-
-        // For OpenVPN 2.x, the auth file was loaded before daemonisation,
-        // so unlink its dirent now while the child keeps its open fd.
-        // For OpenVPN 3 (`ovpncli`), the child was spawned asynchronously
-        // and reads `--auth-user-pass` during startup; its auth file is
-        // cleaned up on process exit and on disconnect/sleep.
-        if !is_v3 {
-            if let Some(ref auth) = auth_path {
-                let _ = std::fs::remove_file(auth);
-            }
-        }
-
-        // For openvpn 2.x in --daemon mode: the parent exits 0
-        // the moment it forks, BEFORE the daemon child has done
-        // any of the actual work (config parse, TLS handshake,
-        // AAD token exchange). If anything fails after fork, we
-        // see exit code 0 here but the tunnel never comes up.
-        // Sleep briefly, then look at the log file — that's
-        // where mid-handshake errors land — and at the PID file,
-        // which the daemon writes once it's accepted the config.
-        // If we see a fatal marker, treat it as a failure with
-        // the log content even though the parent exited cleanly.
-        if !is_v3 {
-            // 5s settle window. We only abort when openvpn writes
-            // a TRULY fatal marker (AUTH_FAILED, "Cannot load CA",
-            // etc) or its PID disappears. Notably absent:
-            // "Connection reset, restarting" — that's openvpn's
-            // normal TCP-retry signal, NOT a fatal failure. The
-            // gateway commonly resets the first connect attempt
-            // and the daemon's retry succeeds; if we kill on the
-            // first reset we sabotage our own retry loop. The
-            // production Linux backend (`supermgrd/src/vpn/azure.rs`)
-            // waits 60s for "Initialization Sequence Completed"
-            // and only treats AUTH_FAILED as fatal — same idea.
-            tracing::info!("ovpn_connect: waiting 5s for daemon child to settle…");
-            tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
-
-            let log_body = read_openvpn_log(&log_path);
-            let pid_alive = read_pid_file(&pid_path).is_some_and(is_live_openvpn_pid);
-            tracing::info!(
-                "ovpn_connect: post-spawn check pid_alive={} log_size={}",
-                pid_alive,
-                log_body.len()
-            );
-
-            // Markers openvpn writes when it bails mid-handshake
-            // *unrecoverably*. Recoverable signals (Connection
-            // reset, soft restart) intentionally don't appear here
-            // — the daemon retries those by design.
-            const FATAL: &[&str] = &[
-                "AUTH_FAILED",
-                "auth-failure",
-                "Cannot resolve host",
-                "Fatal TLS error",
-                "Options error",
-                "Cannot load CA certificate",
-                "Cannot load private key",
-                "Cannot load inline certificate",
-                "process exiting",
-                "SIGTERM[soft,init_instance]",
-            ];
-            let fatal_hit = FATAL.iter().find(|m| log_body.contains(*m));
-
-            if !pid_alive || fatal_hit.is_some() {
-                let reason = fatal_hit
-                    .map(|m| format!("openvpn died after fork — {m}"))
-                    .unwrap_or_else(|| {
-                        "openvpn died after fork (no PID, no fatal marker — see log)".to_owned()
-                    });
-                let log_tail = {
-                    let lines: Vec<&str> =
-                        log_body.lines().filter(|l| !l.trim().is_empty()).collect();
-                    let start = lines.len().saturating_sub(25);
-                    lines[start..].join("\n")
-                };
-                tracing::error!("ovpn_connect: post-fork failure: {reason}\n{log_tail}");
-                let _ = std::fs::remove_file(&config_path);
-                return Ok(OvpnConnectResult {
-                    success: false,
-                    message: format!("{reason}\n\nLast 25 log lines:\n{log_tail}"),
-                    interface: None,
-                });
-            }
+        if let Some(failed) =
+            Self::spawn_and_verify_openvpn(&openvpn, is_v3, &safe, &config_body, &mut files_guard)
+                .await?
+        {
+            return Ok(failed);
         }
 
         files_guard.keep_config = true;
         files_guard.keep_auth = is_v3;
-
         let mut bound_iface: Option<String> = parse_tunnel_metadata(&read_openvpn_log(&log_path)).0;
-
         if want_kill_switch {
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(25);
-            while tokio::time::Instant::now() < deadline {
-                let status = self
-                    .status(&OvpnStatusArgs {
-                        profile_id: safe.clone(),
-                    })
-                    .await?;
-                match status.state {
-                    OvpnState::Connected => {
-                        bound_iface = status.interface;
-                        break;
-                    }
-                    OvpnState::Disconnected => {
-                        let reason = status
-                            .error_reason
-                            .unwrap_or_else(|| "OpenVPN exited before establishing tunnel".into());
-                        let _ = self
-                            .disconnect(&OvpnDisconnectArgs {
-                                profile_id: safe.clone(),
-                            })
-                            .await;
-                        return Ok(OvpnConnectResult {
-                            success: false,
-                            message: reason,
-                            interface: None,
-                        });
-                    }
-                    OvpnState::Connecting | OvpnState::Reconnecting => {
-                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                    }
-                }
-            }
-
-            let iface = bound_iface.clone().unwrap_or_default();
-            let safe_for_ks = safe.clone();
-            let ks_res = tokio::task::spawn_blocking(move || {
-                crate::kill_switch::activate_for_profile(
-                    &safe_for_ks,
-                    &iface,
-                    endpoints,
-                    crate::kill_switch::KillSwitchBackend::Openvpn,
-                )
-            })
-            .await
-            .context("kill-switch blocking task")?;
-            if let Err(e) = ks_res {
-                tracing::error!(
-                    profile = %safe,
-                    "ovpn_connect: kill-switch activation failed; tearing down tunnel: {e:#}"
-                );
-                let _ = self
-                    .disconnect(&OvpnDisconnectArgs {
-                        profile_id: safe.clone(),
-                    })
-                    .await;
-                return Ok(OvpnConnectResult {
-                    success: false,
-                    message: format!("Kill-switch activation failed (tunnel rolled back): {e:#}"),
-                    interface: None,
-                });
+            if let Some(failed) = self
+                .await_and_activate_kill_switch(&safe, endpoints, &mut bound_iface)
+                .await?
+            {
+                return Ok(failed);
             }
         }
         crate::dns_health_watchdog::notify_state_changed();
@@ -1136,15 +1126,14 @@ fn parse_tunnel_metadata(log: &str) -> (Option<String>, Option<String>, Option<S
     let (vip, vgw) = log
         .lines()
         .find_map(|l| l.split("/sbin/ifconfig ").nth(1))
-        .map(|s| s.split_whitespace().collect::<Vec<_>>())
-        .map(|toks| {
+        .map_or((None, None), |s| {
+            let toks: Vec<&str> = s.split_whitespace().collect();
             // `<iface> <vip> <vgw> netmask ...`
             (
-                toks.get(1).map(|s| s.to_string()),
-                toks.get(2).map(|s| s.to_string()),
+                toks.get(1).copied().map(str::to_owned),
+                toks.get(2).copied().map(str::to_owned),
             )
-        })
-        .unwrap_or((None, None));
+        });
     (iface, vip, vgw)
 }
 
@@ -1201,16 +1190,13 @@ fn netmask_to_prefix_len(mask: &str) -> Option<u8> {
     if octets.len() != 4 {
         return None;
     }
-    let bits = ((octets[0] as u32) << 24)
-        | ((octets[1] as u32) << 16)
-        | ((octets[2] as u32) << 8)
-        | (octets[3] as u32);
+    let bits = u32::from_be_bytes([octets[0], octets[1], octets[2], octets[3]]);
     let leading = bits.leading_ones();
     let trailing = bits.trailing_zeros();
     if leading + trailing != 32 {
         return None;
     }
-    Some(leading as u8)
+    u8::try_from(leading).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -1224,7 +1210,7 @@ fn netmask_to_prefix_len(mask: &str) -> Option<u8> {
 /// protocol, but the gateway's TLS channel layer rejects 2.x
 /// clients in the AAD/Entra ID flow — TLS handshake completes,
 /// then the gateway RSTs immediately after our auth payload
-/// without sending AUTH_FAILED. The same configuration on a 3.x
+/// without sending `AUTH_FAILED`. The same configuration on a 3.x
 /// client connects cleanly. MSP-Toolkit-V2 (the production
 /// reference) and Microsoft's own Azure VPN Client both use
 /// OpenVPN 3 for this reason.
@@ -1241,7 +1227,7 @@ fn locate_openvpn(policy: Policy, require_openvpn3: bool) -> anyhow::Result<Path
     select_openvpn_for_policy(
         policy,
         require_openvpn3,
-        |path| path.is_file(),
+        Path::is_file,
         crate::vpn_runtime::ensure_root_owned,
     )
 }
@@ -1460,6 +1446,47 @@ fn status_file_is_stale(path: &Path, max_age: std::time::Duration) -> bool {
         .is_ok_and(|age| age > max_age)
 }
 
+fn signal_openvpn_pid(pid: u32, sig: libc::c_int) {
+    if let Ok(raw_pid) = i32::try_from(pid) {
+        // SAFETY: callers first check `is_live_openvpn_pid`, which verifies `raw_pid > 1`
+        // and matches the kernel executable name against `OPENVPN_BIN_NAMES`.
+        unsafe {
+            libc::kill(raw_pid, sig);
+        }
+    }
+}
+
+struct TrackedPidEntry {
+    pid_path: PathBuf,
+    safe_id: String,
+    live_pid: Option<u32>,
+}
+
+/// Walk `PID_DIR` for valid `supermgr-ovpn-<uuid>.pid` files and check
+/// whether each recorded PID is a live OpenVPN process.
+fn tracked_pid_entries() -> impl Iterator<Item = TrackedPidEntry> {
+    std::fs::read_dir(PID_DIR)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let fname = entry.file_name();
+            let raw_id = fname
+                .to_str()?
+                .strip_prefix("supermgr-ovpn-")?
+                .strip_suffix(".pid")?;
+            let safe_id = validate_profile_id(raw_id).ok()?;
+            let pid_path = entry.path();
+            let live_pid = read_pid_file(&pid_path).filter(|&p| is_live_openvpn_pid(p));
+            Some(TrackedPidEntry {
+                pid_path,
+                safe_id,
+                live_pid,
+            })
+        })
+}
+
 /// Stop all live OpenVPN processes belonging to `safe` (`SIGTERM`, waiting up
 /// to 1.5 s before escalating to `SIGKILL`) and remove transient state files.
 async fn stop_profile_processes(safe: &str) -> Vec<u32> {
@@ -1467,10 +1494,7 @@ async fn stop_profile_processes(safe: &str) -> Vec<u32> {
     let mut killed: Vec<u32> = Vec::new();
 
     if let Some(pid) = read_pid_file(&pid_path).filter(|&p| is_live_openvpn_pid(p)) {
-        // SAFETY: `is_live_openvpn_pid` verified `pid > 1` and its kernel executable name.
-        unsafe {
-            libc::kill(pid as i32, libc::SIGTERM);
-        }
+        signal_openvpn_pid(pid, libc::SIGTERM);
         killed.push(pid);
     }
 
@@ -1478,10 +1502,7 @@ async fn stop_profile_processes(safe: &str) -> Vec<u32> {
         if killed.contains(&pid) || !is_live_openvpn_pid(pid) {
             continue;
         }
-        // SAFETY: `is_live_openvpn_pid` verified `pid > 1` and its kernel executable name.
-        unsafe {
-            libc::kill(pid as i32, libc::SIGTERM);
-        }
+        signal_openvpn_pid(pid, libc::SIGTERM);
         killed.push(pid);
     }
 
@@ -1494,10 +1515,7 @@ async fn stop_profile_processes(safe: &str) -> Vec<u32> {
         }
         for &pid in &killed {
             if is_live_openvpn_pid(pid) {
-                // SAFETY: `is_live_openvpn_pid` re-verified `pid > 1` and executable identity.
-                unsafe {
-                    libc::kill(pid as i32, libc::SIGKILL);
-                }
+                signal_openvpn_pid(pid, libc::SIGKILL);
             }
         }
     }
@@ -1522,48 +1540,27 @@ async fn stop_profile_processes(safe: &str) -> Vec<u32> {
 ///
 /// Returns the number of processes signalled.
 pub async fn terminate_all() -> usize {
+    let entries: Vec<TrackedPidEntry> = tracked_pid_entries().collect();
     let mut killed = 0usize;
-    let Ok(entries) = std::fs::read_dir(PID_DIR) else {
-        return 0;
-    };
-    for entry in entries.flatten() {
-        let fname = entry.file_name();
-        let Some(fname) = fname.to_str() else {
-            continue;
-        };
-        let Some(raw_id) = fname
-            .strip_prefix("supermgr-ovpn-")
-            .and_then(|s| s.strip_suffix(".pid"))
-        else {
-            continue;
-        };
-        let Ok(safe) = validate_profile_id(raw_id) else {
-            continue;
-        };
-        if let Some(pid) = read_pid_file(&entry.path()).filter(|&p| is_live_openvpn_pid(p)) {
+    for entry in entries {
+        if let Some(pid) = entry.live_pid {
             // SIGTERM lets openvpn flush its log and run its down script.
-            // SAFETY: `is_live_openvpn_pid` verified `pid > 1` and its kernel executable name.
-            unsafe {
-                libc::kill(pid as i32, libc::SIGTERM);
-            }
+            signal_openvpn_pid(pid, libc::SIGTERM);
             killed += 1;
         }
         // Belt-and-braces: ps-scan for stragglers carrying this profile's
         // exact config path or daemon-name fingerprint.
-        for pid in collect_openvpn_pids_for(&safe).await {
+        for pid in collect_openvpn_pids_for(&entry.safe_id).await {
             if is_live_openvpn_pid(pid) {
-                // SAFETY: `is_live_openvpn_pid` verified `pid > 1` and its kernel executable name.
-                unsafe {
-                    libc::kill(pid as i32, libc::SIGTERM);
-                }
+                signal_openvpn_pid(pid, libc::SIGTERM);
                 killed += 1;
             }
         }
-        let _ = std::fs::remove_file(entry.path());
-        let _ = std::fs::remove_file(log_path_for(&safe));
-        let _ = std::fs::remove_file(status_path_for(&safe));
-        let _ = std::fs::remove_file(config_path_for(&safe));
-        let _ = std::fs::remove_file(auth_path_for(&safe));
+        let _ = std::fs::remove_file(&entry.pid_path);
+        let _ = std::fs::remove_file(log_path_for(&entry.safe_id));
+        let _ = std::fs::remove_file(status_path_for(&entry.safe_id));
+        let _ = std::fs::remove_file(config_path_for(&entry.safe_id));
+        let _ = std::fs::remove_file(auth_path_for(&entry.safe_id));
     }
     crate::dns::clear_vpn_dns_prefix("ovpn-");
     crate::kill_switch::deactivate_backend(crate::kill_switch::KillSwitchBackend::Openvpn);
@@ -1580,38 +1577,15 @@ pub async fn terminate_all() -> usize {
 /// live OpenVPN session — those routes belong to whatever backend installed
 /// them, and OpenVPN's `redirect-gateway def1` uses the exact same pair.
 pub fn live_tunnel_interfaces() -> Vec<String> {
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(PID_DIR) else {
-        return out;
-    };
-    for entry in entries.flatten() {
-        let fname = entry.file_name();
-        let Some(fname) = fname.to_str() else {
-            continue;
-        };
-        let Some(raw_id) = fname
-            .strip_prefix("supermgr-ovpn-")
-            .and_then(|s| s.strip_suffix(".pid"))
-        else {
-            continue;
-        };
-        let Ok(safe) = validate_profile_id(raw_id) else {
-            continue;
-        };
-        let Some(pid) = read_pid_file(&entry.path()) else {
-            continue;
-        };
-        // Skip dead/recycled pidfiles — a stale full-tunnel route from a dead
-        // OpenVPN session SHOULD be swept, so we only protect live ones.
-        if !is_live_openvpn_pid(pid) {
-            continue;
-        }
-        let body = read_openvpn_log(&log_path_for(&safe));
-        if let (Some(iface), _, _) = parse_tunnel_metadata(&body) {
-            out.push(iface);
-        }
-    }
-    out
+    // Skip dead/recycled pidfiles — a stale full-tunnel route from a dead
+    // OpenVPN session SHOULD be swept, so we only protect live ones.
+    tracked_pid_entries()
+        .filter(|entry| entry.live_pid.is_some())
+        .filter_map(|entry| {
+            let body = read_openvpn_log(&log_path_for(&entry.safe_id));
+            parse_tunnel_metadata(&body).0
+        })
+        .collect()
 }
 
 /// True if ANY supermgr OpenVPN tunnel process is alive, REGARDLESS of whether
@@ -1623,28 +1597,7 @@ pub fn live_tunnel_interfaces() -> Vec<String> {
 /// parseable. This is the cheap liveness-only scan: a live pidfile is enough to
 /// say "a foreign full tunnel may own the split-default; do not steal it".
 pub fn has_live_tunnel() -> bool {
-    let Ok(entries) = std::fs::read_dir(PID_DIR) else {
-        return false;
-    };
-    for entry in entries.flatten() {
-        let fname = entry.file_name();
-        let Some(fname) = fname.to_str() else {
-            continue;
-        };
-        let Some(raw_id) = fname
-            .strip_prefix("supermgr-ovpn-")
-            .and_then(|s| s.strip_suffix(".pid"))
-        else {
-            continue;
-        };
-        if validate_profile_id(raw_id).is_err() {
-            continue;
-        }
-        if read_pid_file(&entry.path()).is_some_and(is_live_openvpn_pid) {
-            return true;
-        }
-    }
-    false
+    tracked_pid_entries().any(|entry| entry.live_pid.is_some())
 }
 
 fn log_path_for(safe: &str) -> PathBuf {
@@ -1959,7 +1912,10 @@ mod tests {
     fn profile_id_requires_canonical_uuid_and_ps_scan_never_matches_substrings() {
         for bad in ["", "1", "a", "abc/../etc/passwd", "not-a-uuid"] {
             assert!(validate_profile_id(bad).is_err(), "{bad:?}");
-            assert!(matching_openvpn_pids("  PID COMMAND\n    1 /sbin/launchd\n", bad).is_empty());
+            assert_eq!(
+                matching_openvpn_pids("  PID COMMAND\n    1 /sbin/launchd\n", bad),
+                Vec::<u32>::new()
+            );
         }
 
         let id = "26b4fcc6-097a-41e7-932e-9a6d2a4663e5";
@@ -2116,6 +2072,8 @@ SIGUSR1[soft,ping-restart] received, process restarting\n";
 
     #[test]
     fn bounded_log_reader_preserves_setup_header_and_latest_tail_events() {
+        use std::fmt::Write as _;
+
         let dir = std::env::temp_dir().join(format!("smgr-ovpn-log-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("test.log");
@@ -2125,9 +2083,7 @@ SIGUSR1[soft,ping-restart] received, process restarting\n";
              Initialization Sequence Completed\n",
         );
         for i in 0..1000 {
-            content.push_str(&format!(
-                "filler-line-{i:04}-xxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
-            ));
+            let _ = writeln!(content, "filler-line-{i:04}-xxxxxxxxxxxxxxxxxxxxxxxxxxxx");
         }
         content.push_str("SIGUSR1[soft,ping-restart] received, process restarting\n");
         std::fs::write(&log, &content).unwrap();

@@ -205,9 +205,7 @@ pub fn authorize_tool_call(policy: &McpPolicy, name: &str, args: &Value) -> Resu
         }
     }
 
-    if policy.require_confirmation
-        && args.get("confirm").and_then(Value::as_bool) != Some(true)
-    {
+    if policy.require_confirmation && args.get("confirm").and_then(Value::as_bool) != Some(true) {
         return Err(format!(
             "mutating tool '{name}' requires explicit confirmation (\"confirm\": true)"
         ));
@@ -927,12 +925,7 @@ mod tests {
         };
 
         // Unlisted mutating tool is denied.
-        assert!(authorize_tool_call(
-            &policy,
-            "add_host",
-            &json!({"confirm": true})
-        )
-        .is_err());
+        assert!(authorize_tool_call(&policy, "add_host", &json!({"confirm": true})).is_err());
 
         // Listed tool without confirm=true is denied.
         assert!(authorize_tool_call(

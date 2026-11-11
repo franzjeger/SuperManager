@@ -20,7 +20,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::vuln::{Finding, Severity};
+use supermgr_core::findings::Finding;
+use supermgr_core::severity::Severity;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsHealthReport {
@@ -388,21 +389,36 @@ async fn dig_txt(name: &str) -> Vec<String> {
 }
 
 async fn dig(name: &str, rrtype: &str) -> Vec<String> {
-    let res = tokio::time::timeout(
-        Duration::from_secs(4),
-        tokio::process::Command::new("dig")
-            .kill_on_drop(true)
-            .args(["+short", "+timeout=2", "+tries=1", rrtype, name])
-            .output(),
-    )
-    .await;
-    let Ok(Ok(out)) = res else {
+    use tokio::io::AsyncReadExt;
+
+    const MAX_DIG_STDOUT_BYTES: u64 = 64 * 1024;
+    let Ok(mut child) = tokio::process::Command::new("dig")
+        .kill_on_drop(true)
+        .args(["+short", "+timeout=2", "+tries=1", rrtype, name])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
         return Vec::new();
     };
-    if !out.status.success() {
+    let mut stdout_pipe = child.stdout.take();
+    let res = tokio::time::timeout(Duration::from_secs(4), async {
+        let mut buf = Vec::new();
+        if let Some(ref mut out) = stdout_pipe {
+            out.take(MAX_DIG_STDOUT_BYTES).read_to_end(&mut buf).await?;
+            let _ = tokio::io::copy(out, &mut tokio::io::sink()).await;
+        }
+        let status = child.wait().await?;
+        Ok::<_, std::io::Error>((status, buf))
+    })
+    .await;
+    let Ok(Ok((status, stdout))) = res else {
+        return Vec::new();
+    };
+    if !status.success() {
         return Vec::new();
     }
-    let s = String::from_utf8_lossy(&out.stdout);
+    let s = String::from_utf8_lossy(&stdout);
     s.lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
@@ -528,7 +544,7 @@ mod tests {
         );
         assert!(out.iter().any(|f| f.id == "dns.spf-missing"));
         let spf = out.iter().find(|f| f.id == "dns.spf-missing").unwrap();
-        assert_eq!(spf.severity, crate::vuln::Severity::High);
+        assert_eq!(spf.severity, Severity::High);
     }
 
     #[test]
@@ -548,7 +564,7 @@ mod tests {
             &mut out,
         );
         let spf = out.iter().find(|f| f.id == "dns.spf-permissive").unwrap();
-        assert_eq!(spf.severity, crate::vuln::Severity::Critical);
+        assert_eq!(spf.severity, Severity::Critical);
     }
 
     #[test]

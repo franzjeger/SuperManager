@@ -31,6 +31,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
@@ -198,21 +199,6 @@ pub async fn passive_scan(
         }
     }
 
-    // Append to engagement audit log if applicable.
-    if let Some(eid) = engagement_id {
-        let _ = crate::engagement::log_event(
-            eid,
-            crate::engagement::EngagementEvent {
-                at: chrono::Utc::now(),
-                technique: crate::engagement::Technique::Recon,
-                target: customer_slug.unwrap_or("local").to_owned(),
-                action: "passive_scan".to_owned(),
-                findings: result.hosts.len() as u32,
-                notes: format!("{} hosts discovered", result.hosts.len()),
-            },
-        );
-    }
-
     info!(
         "passive_scan: {} hosts ({} interfaces) in {}ms",
         result.hosts.len(),
@@ -223,29 +209,66 @@ pub async fn passive_scan(
     Ok(result)
 }
 
+/// Maximum subprocess stdout bytes buffered per passive-discovery command (`P3-11`).
+const MAX_DISCOVERY_STDOUT_BYTES: u64 = 1024 * 1024;
+/// Maximum `dns-sd -L` per-instance lookup stdout bytes (`P3-11`).
+const MAX_MDNS_LOOKUP_STDOUT_BYTES: u64 = 256 * 1024;
+
+/// Read up to `limit` bytes from an optional async stream, draining any
+/// remainder to sink so subprocesses never block or fail on `EPIPE` / `SIGPIPE`.
+async fn read_pipe_bounded<R>(pipe: Option<R>, limit: u64) -> std::io::Result<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let Some(mut reader) = pipe else {
+        return Ok(Vec::new());
+    };
+    let mut buf = Vec::new();
+    (&mut reader).take(limit).read_to_end(&mut buf).await?;
+    let _ = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await;
+    Ok(buf)
+}
+
 // ---------------------------------------------------------------------------
 // ARP cache parser
 // ---------------------------------------------------------------------------
 
 async fn scan_arp_cache() -> Result<Vec<DiscoveredHost>> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::process::Command::new("arp")
-            .kill_on_drop(true)
-            .args(["-an"])
-            .output(),
-    )
-    .await
-    .context("arp -an timed out")?
-    .context("run arp -an")?;
-    if !output.status.success() {
+    let mut child = tokio::process::Command::new("arp")
+        .kill_on_drop(true)
+        .args(["-an"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("spawn arp -an")?;
+
+    let stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let (stdout_bytes, stderr_bytes, status) =
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let out_fut = read_pipe_bounded(stdout_pipe, MAX_DISCOVERY_STDOUT_BYTES);
+            let err_fut = async {
+                let mut err = Vec::new();
+                if let Some(ref mut s) = stderr_pipe {
+                    let _ = s.take(8 * 1024).read_to_end(&mut err).await;
+                }
+                err
+            };
+            let (out_res, err_buf) = tokio::join!(out_fut, err_fut);
+            let status = child.wait().await?;
+            Ok::<_, std::io::Error>((out_res?, err_buf, status))
+        })
+        .await
+        .context("arp -an timed out")?
+        .context("run arp -an")?;
+
+    if !status.success() {
         return Err(anyhow::anyhow!(
-            "arp -an exited {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
+            "arp -an exited {status}: {}",
+            String::from_utf8_lossy(&stderr_bytes)
         ));
     }
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
     Ok(parse_arp(&stdout))
 }
 
@@ -437,11 +460,18 @@ async fn run_dns_sd_browse(
         .spawn()
         .context("spawn dns-sd")?;
 
+    let stdout_pipe = child.stdout.take();
+    let reader = tokio::spawn(read_pipe_bounded(stdout_pipe, MAX_DISCOVERY_STDOUT_BYTES));
+
     // Let it run briefly; mDNS responses arrive within ~200ms.
     tokio::time::sleep(Duration::from_millis(700)).await;
     let _ = child.start_kill();
-    let output = child.wait_with_output().await.context("dns-sd output")?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let _ = child.wait().await;
+    let stdout_bytes = reader
+        .await
+        .context("join dns-sd reader")?
+        .context("dns-sd output")?;
+    let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
 
     let instances: Vec<MdnsEntry> = browsed_instances(&stdout)
         .into_iter()
@@ -507,10 +537,17 @@ async fn resolve_mdns_instance(instance: &str, service_type: &str) -> Result<Mdn
         .spawn()
         .context("spawn dns-sd -L")?;
 
+    let stdout_pipe = child.stdout.take();
+    let reader = tokio::spawn(read_pipe_bounded(stdout_pipe, MAX_MDNS_LOOKUP_STDOUT_BYTES));
+
     tokio::time::sleep(Duration::from_millis(400)).await;
     let _ = child.start_kill();
-    let output = child.wait_with_output().await.context("dns-sd -L output")?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let _ = child.wait().await;
+    let stdout_bytes = reader
+        .await
+        .context("join dns-sd -L reader")?
+        .context("dns-sd -L output")?;
+    let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
 
     let mut entry = MdnsEntry {
         instance: instance.to_owned(),
@@ -564,16 +601,23 @@ async fn resolve_mdns_instance(instance: &str, service_type: &str) -> Result<Mdn
 // ---------------------------------------------------------------------------
 
 async fn list_local_interfaces() -> Result<Vec<LocalInterface>> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::process::Command::new("ifconfig")
-            .kill_on_drop(true)
-            .output(),
-    )
+    let mut child = tokio::process::Command::new("ifconfig")
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("spawn ifconfig")?;
+
+    let stdout_pipe = child.stdout.take();
+    let stdout_bytes = tokio::time::timeout(Duration::from_secs(5), async {
+        let bytes = read_pipe_bounded(stdout_pipe, MAX_DISCOVERY_STDOUT_BYTES).await?;
+        let _ = child.wait().await;
+        Ok::<_, std::io::Error>(bytes)
+    })
     .await
     .context("ifconfig timed out")?
     .context("run ifconfig")?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
     Ok(parse_ifconfig(&stdout))
 }
 
@@ -974,18 +1018,6 @@ fn lookup_oui(db: &HashMap<String, String>, mac: &str) -> Option<String> {
     db.get(&prefix).cloned()
 }
 
-/// Sort key that gives sane numerical ordering for IPv4
-/// addresses (so `192.168.1.10` sorts after `192.168.1.9`, not
-/// after `192.168.1.1`). Non-parseable strings fall back to
-/// lexical order via the unused octets being all-zero.
-fn ip_sort_key(s: &str) -> (u32, String) {
-    if let Ok(addr) = s.parse::<std::net::Ipv4Addr>() {
-        (u32::from(addr), String::new())
-    } else {
-        (0, s.to_owned())
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Inventory persistence
 // ---------------------------------------------------------------------------
@@ -1006,532 +1038,6 @@ fn persist_inventory(customer_slug: &str, hosts: &[DiscoveredHost]) -> Result<()
     let bytes = serde_json::to_vec_pretty(hosts).context("serialize inventory")?;
     std::fs::write(&path, bytes).with_context(|| format!("write {path:?}"))?;
     Ok(())
-}
-
-pub fn load_inventory(customer_slug: &str) -> Result<Vec<DiscoveredHost>> {
-    let mut path = inventory_dir(customer_slug)?;
-    path.push("inventory.json");
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let bytes = std::fs::read(&path).with_context(|| format!("read {path:?}"))?;
-    let hosts: Vec<DiscoveredHost> =
-        serde_json::from_slice(&bytes).context("deserialize inventory")?;
-    Ok(hosts)
-}
-
-// ---------------------------------------------------------------------------
-// Active scan
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActiveScanResult {
-    pub started_at: chrono::DateTime<chrono::Utc>,
-    pub finished_at: chrono::DateTime<chrono::Utc>,
-    pub hosts: Vec<ActiveHost>,
-    pub findings: Vec<crate::vuln::Finding>,
-    pub engagement_id: Option<String>,
-    /// Diff produced by `findings_store::reconcile`. None when the
-    /// scan ran without a persistence scope (no `customer_slug`
-    /// AND no `engagement_id`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diff: Option<crate::findings_store::ScanDiff>,
-    /// The persistence scope used for reconciliation — either the
-    /// customer slug or the engagement ID. Frontend uses this to
-    /// build subsequent `findings_list` / `findings_set_disposition`
-    /// calls.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub findings_scope: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActiveHost {
-    pub ip: String,
-    pub mac: Option<String>,
-    pub hostname: Option<String>,
-    pub vendor: Option<String>,
-    pub probes: Vec<crate::probes::PortProbe>,
-    pub finding_count: u32,
-    /// Controller cross-reference. Populated post-scan by
-    /// matching `mac` against every configured `UniFi`
-    /// controller's device inventory. Non-None means a
-    /// controller-API path is available for this host;
-    /// the GUI uses it to replace SSH-based actions with
-    /// controller-driven ones (locate / restart / forget /
-    /// re-adopt) and to render the controller-state badge.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub controller_state: Option<crate::unifi_controllers::ControllerStateRef>,
-
-    /// Operator-set device-type override for this host's MAC,
-    /// if any. When non-None the GUI shows a manual-override
-    /// badge and treats this value as authoritative over its
-    /// own OUI/banner heuristics. Engine doesn't compute the
-    /// override; it just echoes whatever's in the store so
-    /// the GUI can render it consistently.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub device_type_override: Option<String>,
-    /// RFC zone classification — drives the exposure pill in the
-    /// UI ("internal" vs. "public"). Computed pure-compute from
-    /// the IP at scan time, no I/O.
-    #[serde(default)]
-    pub zone: Option<String>,
-}
-
-/// Active scan against every host in `targets`. For each host:
-///   1. TCP connect-test against `ports`
-///   2. For each open port, run service-specific banner-grab
-///   3. Pass probes into `vuln::analyse_host` for findings
-///
-/// Concurrency capped at 32 hosts × 16 ports per host. Avoids
-/// blasting through scope at the cost of slightly slower scans.
-pub async fn active_scan(
-    targets: &[String],
-    ports: &[u16],
-    customer_slug: Option<&str>,
-    engagement_id: Option<&str>,
-    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
-) -> Result<ActiveScanResult> {
-    use std::sync::atomic::Ordering;
-
-    let started_at = chrono::Utc::now();
-
-    // ARP lookup runs in parallel with the host fan-out so it
-    // doesn't add to wall-clock. ARP gives us MAC + OUI vendor
-    // for every host on the local L2 segment — without this
-    // pre-pass the active-scan results would be MAC-blank, and
-    // the GUI's vendor-pill / device-type sniffing would have
-    // nothing to work with for devices like UniFi APs that
-    // disclose nothing about themselves over an open port.
-    let arp_lookup = tokio::spawn(async {
-        let cache = scan_arp_cache().await.unwrap_or_default();
-        let vendors = oui_database();
-        let mut by_ip: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
-        for h in cache {
-            let v = h.mac.as_deref().and_then(|m| lookup_oui(&vendors, m));
-            by_ip.insert(h.ip, (h.mac, v));
-        }
-        by_ip
-    });
-
-    let host_sema = Arc::new(tokio::sync::Semaphore::new(32));
-    let mut futs = Vec::new();
-    for ip in targets {
-        // Skip remaining targets if cancellation was requested
-        // before we even queued them. The fan-out loop is fast
-        // so this only matters when the user clicks Stop within
-        // the first few hundred ms.
-        if let Some(c) = &cancel {
-            if c.load(Ordering::Acquire) {
-                break;
-            }
-        }
-        let ip = ip.clone();
-        let ports: Vec<u16> = ports.to_vec();
-        let host_sema = Arc::clone(&host_sema);
-        let cancel_clone = cancel.clone();
-        futs.push(tokio::spawn(async move {
-            // Honour cancel at the front of the host scan so a
-            // mid-scan Stop short-circuits before opening any
-            // new TCP connections for this host.
-            if let Some(c) = &cancel_clone {
-                if c.load(Ordering::Acquire) {
-                    return None;
-                }
-            }
-            let _permit = host_sema.acquire_owned().await.ok()?;
-            // Pass cancel through so port-probe fan-out inside
-            // a host scan also honours the flag — without this,
-            // a host that's already started its 105-port sweep
-            // would run to completion even after cancellation.
-            scan_host_active(&ip, &ports, cancel_clone).await
-        }));
-    }
-    let mut hosts: Vec<ActiveHost> = Vec::new();
-    let mut findings: Vec<crate::vuln::Finding> = Vec::new();
-    let mut was_cancelled = false;
-    for f in futs {
-        // Don't `await` a join handle whose work we no longer
-        // want — abort it so the connection workers drop out
-        // immediately. New code below: track that we cancelled
-        // so the caller can distinguish "complete" from "cut
-        // short" in the audit log.
-        if let Some(c) = &cancel {
-            if c.load(Ordering::Acquire) {
-                was_cancelled = true;
-                f.abort();
-                continue;
-            }
-        }
-        if let Ok(Some(active)) = f.await {
-            findings.extend(crate::vuln::analyse_host(&active.ip, &active.probes));
-            hosts.push(active);
-        }
-    }
-    if was_cancelled {
-        tracing::info!(
-            "active_scan cancelled mid-flight after {} hosts",
-            hosts.len()
-        );
-    }
-
-    // Merge ARP data — every host we already collected via TCP
-    // probe gets its MAC + OUI vendor filled in. This is the
-    // single most important pass for the GUI: without it the
-    // "vendor pill" / "device-type" badges have nothing to
-    // chew on and every host renders as a grey Linux generic.
-    let arp_map: HashMap<String, (Option<String>, Option<String>)> =
-        arp_lookup.await.unwrap_or_else(|e| {
-            warn!("arp lookup task failed: {e:#}");
-            HashMap::new()
-        });
-    let scanned_ips: HashSet<String> = hosts.iter().map(|h| h.ip.clone()).collect();
-    for h in &mut hosts {
-        if let Some((mac, vendor)) = arp_map.get(&h.ip) {
-            if h.mac.is_none() {
-                h.mac = mac.clone();
-            }
-            if h.vendor.is_none() {
-                h.vendor = vendor.clone();
-            }
-        }
-    }
-
-    // Include ARP-only hosts. UniFi APs that are already
-    // adopted to a controller lock down EVERY listener except
-    // the inform channel (often only outbound), so the active
-    // TCP sweep returns zero probes — but the device is still
-    // very much on the network. Dropping them silently meant
-    // operators couldn't find their own adopted gear. We add
-    // these hosts with an empty `probes` vec and a synthetic
-    // `arp-only` zone hint so the GUI knows to render them
-    // with the "no open ports — discovered via ARP" treatment.
-    for ip in targets {
-        if scanned_ips.contains(ip) {
-            continue;
-        }
-        if let Some((mac, vendor)) = arp_map.get(ip) {
-            if mac.is_some() {
-                hosts.push(ActiveHost {
-                    ip: ip.clone(),
-                    mac: mac.clone(),
-                    hostname: None,
-                    vendor: vendor.clone(),
-                    probes: Vec::new(),
-                    finding_count: 0,
-                    zone: Some(crate::asset_enrich::classify(ip).label().to_owned()),
-                    controller_state: None,
-                    device_type_override: None,
-                });
-            }
-        }
-    }
-
-    // Reverse-DNS for every host that didn't already get a
-    // hostname from a probe. Same `enrich_many` the passive
-    // scan uses — bounded by internal concurrency + timeout
-    // so a slow resolver can't wedge results.
-    {
-        let ips: Vec<String> = hosts.iter().map(|h| h.ip.clone()).collect();
-        let enrichment = crate::asset_enrich::enrich_many(&ips).await;
-        let by_ip: HashMap<String, &crate::asset_enrich::AssetEnrichment> =
-            enrichment.iter().map(|e| (e.ip.clone(), e)).collect();
-        for h in &mut hosts {
-            if h.hostname.is_none() {
-                if let Some(en) = by_ip.get(&h.ip) {
-                    h.hostname = en.reverse_dns.clone();
-                }
-            }
-        }
-    }
-
-    // Sort by IP so the GUI's row order is stable across re-
-    // runs. Hosts with TCP probes are interleaved with ARP-only
-    // hosts in IP order — keeping the visual "this is what's
-    // on my network" view coherent.
-    hosts.sort_by(|a, b| ip_sort_key(&a.ip).cmp(&ip_sort_key(&b.ip)));
-    // Update finding-count on each host post-aggregation.
-    let mut by_ip: HashMap<String, u32> = HashMap::new();
-    for f in &findings {
-        *by_ip.entry(f.host_ip.clone()).or_insert(0) += 1;
-    }
-    for h in &mut hosts {
-        h.finding_count = by_ip.get(&h.ip).copied().unwrap_or(0);
-    }
-    let finished_at = chrono::Utc::now();
-
-    // Pick a persistence scope: customer slug if present, else
-    // fall back to engagement_id so ad-hoc engagements still get
-    // findings history. None only when neither is given.
-    let findings_scope: Option<String> = customer_slug
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .or_else(|| engagement_id.map(str::to_owned));
-
-    // Anomaly detection — per-host port-baseline reconciliation
-    // produces extra findings for "new port appeared" / "stable
-    // port missing". Run before findings_store reconcile so the
-    // anomaly findings flow through the same persistence + diff
-    // + notification pipeline as everything else.
-    let mut anomaly_findings: Vec<crate::vuln::Finding> = Vec::new();
-    if let Some(scope) = findings_scope.as_deref() {
-        for host in &hosts {
-            let observed_ports: Vec<u16> = host.probes.iter().map(|p| p.port).collect();
-            match crate::anomaly::reconcile_host(scope, &host.ip, &observed_ports) {
-                Ok(mut found) => anomaly_findings.append(&mut found),
-                Err(e) => warn!("anomaly reconcile failed for {}: {e:#}", host.ip),
-            }
-        }
-    }
-    findings.append(&mut anomaly_findings);
-
-    let mut result = ActiveScanResult {
-        started_at,
-        finished_at,
-        hosts,
-        findings,
-        engagement_id: engagement_id.map(str::to_owned),
-        diff: None,
-        findings_scope: findings_scope.clone(),
-    };
-
-    // Reconcile against persistent findings store + capture the
-    // diff. We do this even if customer_slug is None as long as
-    // we have an engagement_id, so each engagement maintains its
-    // own finding history.
-    if let Some(scope) = findings_scope.as_deref() {
-        match crate::findings_store::reconcile(scope, &result.findings) {
-            Ok(diff) => {
-                // Fire-and-forget Slack notification (no error if
-                // webhook isn't configured).
-                let scope_for_notify = scope.to_owned();
-                let diff_for_notify = diff.clone();
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        crate::notify::notify_scan_diff(&scope_for_notify, &diff_for_notify).await
-                    {
-                        warn!("notify_scan_diff failed: {e:#}");
-                    }
-                });
-                result.diff = Some(diff);
-            }
-            Err(e) => warn!("reconcile findings failed: {e:#}"),
-        }
-    }
-
-    // Persist findings + active hosts under customer (legacy
-    // path — frontend still reads this; redundant with the
-    // findings_store but kept for backward compatibility).
-    if let Some(slug) = customer_slug.filter(|s| !s.is_empty()) {
-        if let Err(e) = persist_active_scan(slug, &result) {
-            warn!("persist active_scan failed: {e:#}");
-        }
-    }
-    if let Some(eid) = engagement_id {
-        let diff_summary = result.diff.as_ref().map_or_else(
-            || "no diff".into(),
-            |d| {
-                format!(
-                    "{}new, {}regressed, {}still-open, {}auto-resolved",
-                    d.new_findings.len(),
-                    d.regressed.len(),
-                    d.still_open.len(),
-                    d.auto_resolved.len()
-                )
-            },
-        );
-        let _ = crate::engagement::log_event(
-            eid,
-            crate::engagement::EngagementEvent {
-                at: chrono::Utc::now(),
-                technique: crate::engagement::Technique::Discovery,
-                target: format!("{} hosts", targets.len()),
-                action: "active_scan".into(),
-                findings: result.findings.len() as u32,
-                notes: format!(
-                    "{} hosts × {} ports → {} findings ({})",
-                    result.hosts.len(),
-                    ports.len(),
-                    result.findings.len(),
-                    diff_summary
-                ),
-            },
-        );
-    }
-    info!(
-        "active_scan: {} hosts, {} findings, {}s",
-        result.hosts.len(),
-        result.findings.len(),
-        (result.finished_at - result.started_at).num_seconds()
-    );
-    Ok(result)
-}
-
-async fn scan_host_active(
-    ip: &str,
-    ports: &[u16],
-    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
-) -> Option<ActiveHost> {
-    use crate::probes::probe_port;
-    use std::sync::atomic::Ordering;
-
-    let port_sema = Arc::new(tokio::sync::Semaphore::new(16));
-    let mut futs = Vec::with_capacity(ports.len());
-    for port in ports {
-        // Cheap front-of-queue check so we don't even queue port
-        // futures for cancelled hosts.
-        if let Some(c) = &cancel {
-            if c.load(Ordering::Acquire) {
-                break;
-            }
-        }
-        let ip = ip.to_owned();
-        let port = *port;
-        let sema = Arc::clone(&port_sema);
-        let c = cancel.clone();
-        futs.push(tokio::spawn(async move {
-            if let Some(c) = &c {
-                if c.load(Ordering::Acquire) {
-                    return None;
-                }
-            }
-            let _permit = sema.acquire_owned().await.ok()?;
-            probe_port(&ip, port).await
-        }));
-    }
-    let mut probes: Vec<crate::probes::PortProbe> = Vec::new();
-    for f in futs {
-        // Bail out of joins once cancel fires — already-running
-        // probe_port calls finish, but pending ones get aborted.
-        if let Some(c) = &cancel {
-            if c.load(Ordering::Acquire) {
-                f.abort();
-                continue;
-            }
-        }
-        if let Ok(Some(p)) = f.await {
-            probes.push(p);
-        }
-    }
-    if probes.is_empty() {
-        // No open TCP port. Return None so this slot is filled
-        // — if at all — by the ARP-only pass in active_scan
-        // (which keeps the host visible when MAC was learned)
-        // and discarded otherwise. Most addresses in a /24 are
-        // unused so this keeps the response set tight.
-        return None;
-    }
-    let zone = Some(crate::asset_enrich::classify(ip).label().to_owned());
-    // mac / hostname / vendor are left None here on purpose —
-    // active_scan's post-pass fills them from the parallel ARP
-    // lookup + reverse-DNS enrichment so every probe-found
-    // host gets full identity without doing two DNS lookups
-    // per host or refetching the ARP cache for every host.
-    Some(ActiveHost {
-        ip: ip.to_owned(),
-        mac: None,
-        hostname: None,
-        vendor: None,
-        probes,
-        finding_count: 0,
-        zone,
-        controller_state: None,
-        device_type_override: None,
-    })
-}
-
-fn persist_active_scan(customer_slug: &str, result: &ActiveScanResult) -> Result<()> {
-    let dir = inventory_dir(customer_slug)?;
-    std::fs::create_dir_all(&dir).context("create discovery dir")?;
-    let mut path = dir.clone();
-    path.push("active_scan.json");
-    let bytes = serde_json::to_vec_pretty(result).context("serialize")?;
-    std::fs::write(&path, bytes).with_context(|| format!("write {path:?}"))?;
-    let mut findings_path = dir;
-    findings_path.push("findings.json");
-    let bytes = serde_json::to_vec_pretty(&result.findings).context("serialize findings")?;
-    std::fs::write(&findings_path, bytes).with_context(|| format!("write {findings_path:?}"))?;
-    Ok(())
-}
-
-pub fn load_findings(customer_slug: &str) -> Result<Vec<crate::vuln::Finding>> {
-    let mut path = inventory_dir(customer_slug)?;
-    path.push("findings.json");
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let bytes = std::fs::read(&path).with_context(|| format!("read {path:?}"))?;
-    let findings: Vec<crate::vuln::Finding> =
-        serde_json::from_slice(&bytes).context("deserialize findings")?;
-    Ok(findings)
-}
-
-/// Hard upper ceiling on expanded active-scan targets per request.
-pub const MAX_SCAN_TARGETS: usize = 4096;
-
-/// Hard upper ceiling on TCP ports probed per target in an active scan.
-pub const MAX_SCAN_PORTS: usize = 1024;
-
-/// Validate a single raw scan target (either a valid IPv4 CIDR or a valid
-/// hostname / IP address).
-pub fn validate_scan_target(raw: &str) -> std::result::Result<(), String> {
-    let t = raw.trim();
-    if t.is_empty() {
-        return Err("scan target must not be empty".into());
-    }
-    if t.contains('/') {
-        t.parse::<ipnet::Ipv4Net>()
-            .map(|_| ())
-            .map_err(|e| format!("invalid CIDR target '{t}': {e}"))
-    } else {
-        supermgr_core::sanitize::validate_host_or_ip(t)
-            .map_err(|e| format!("invalid target '{t}': {e}"))
-    }
-}
-
-/// Expand a list of targets (hosts and CIDRs) into a flat list
-/// of targets, enforcing a hard ceiling of [`MAX_SCAN_TARGETS`].
-#[must_use]
-pub fn expand_targets(targets: &[String], cap: usize) -> Vec<String> {
-    let cap = cap.min(MAX_SCAN_TARGETS);
-    if cap == 0 {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for t in targets {
-        let t = t.trim();
-        if t.is_empty() {
-            continue;
-        }
-        if t.contains('/') {
-            if let Some(expanded) = expand_cidr(t, cap.saturating_sub(out.len())) {
-                out.extend(expanded);
-                if out.len() >= cap {
-                    break;
-                }
-            }
-        } else if supermgr_core::sanitize::validate_host_or_ip(t).is_ok() {
-            out.push(t.to_owned());
-            if out.len() >= cap {
-                break;
-            }
-        }
-    }
-    out.truncate(cap);
-    out
-}
-
-fn expand_cidr(cidr: &str, cap: usize) -> Option<Vec<String>> {
-    let net: ipnet::Ipv4Net = cidr.parse().ok()?;
-    let prefix = u32::from(net.prefix_len());
-    let host_count = if prefix >= 31 {
-        1u64 << (32 - prefix)
-    } else {
-        (1u64 << (32 - prefix)) - 2
-    };
-    if host_count > cap as u64 {
-        return Some(Vec::new());
-    }
-    Some(net.hosts().take(cap).map(|ip| ip.to_string()).collect())
 }
 
 #[cfg(test)]
@@ -1557,28 +1063,13 @@ Timestamp     A/R    Flags  if Domain               Service Type         Instanc
         );
     }
 
-    #[test]
-    fn scan_target_validation_rejects_malformed_cidrs_and_hosts() {
-        assert!(super::validate_scan_target("10.0.0.1").is_ok());
-        assert!(super::validate_scan_target("10.0.0.0/24").is_ok());
-        assert!(super::validate_scan_target("router.internal").is_ok());
-        assert!(super::validate_scan_target("").is_err());
-        assert!(super::validate_scan_target("999.999.999.999/24").is_err());
-        assert!(super::validate_scan_target("10.0.0.0/33").is_err());
-        assert!(super::validate_scan_target("-oProxyCommand=evil").is_err());
-        assert!(super::validate_scan_target("host with spaces").is_err());
-    }
-
-    #[test]
-    fn expand_targets_enforces_hard_ceiling_and_validates_octets() {
-        assert!(super::expand_targets(&["999.999.999.999/24".to_owned()], 512).is_empty());
-        assert_eq!(
-            super::expand_targets(&["10.0.0.0/30".to_owned()], 512),
-            vec!["10.0.0.1".to_owned(), "10.0.0.2".to_owned()]
-        );
-        // Even if caller passes a huge cap, MAX_SCAN_TARGETS (4096) clamps expansion.
-        assert!(super::expand_targets(&["10.0.0.0/16".to_owned()], 100_000).is_empty());
-        let within_ceiling = super::expand_targets(&["10.0.0.0/20".to_owned()], 100_000);
-        assert_eq!(within_ceiling.len(), 4094);
+    #[tokio::test]
+    async fn read_pipe_bounded_caps_noisy_stream_output() {
+        let oversized = vec![b'x'; 4096];
+        let cursor = std::io::Cursor::new(oversized);
+        let got = super::read_pipe_bounded(Some(cursor), 512)
+            .await
+            .expect("bounded read succeeds");
+        assert_eq!(got.len(), 512);
     }
 }
