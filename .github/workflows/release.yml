@@ -1,75 +1,61 @@
 name: Release
-# Triggered when a `v*` tag is pushed. Builds the Release config,
-# signs it with the Developer ID Application certificate, submits
-# to Apple's notary, staples the ticket, signs the artifact with
-# Sparkle's EdDSA key, generates an appcast entry, and uploads
-# everything to the matching GitHub Release.
+# Triggered when a `v*.*.*` tag is pushed.
+#
+# Pipeline order:
+#   1. `ci` runs the full cross-platform CI matrix (`shell`, `linux`, `mac`,
+#      `windows`) on the tagged commit before any signing keys or release
+#      environments are entered.
+#   2. `build-macos` and `build-windows` build, test, sign/notarise, and upload
+#      immutable build artifacts without `contents: write` or persisted git
+#      credentials.
+#   3. `publish` collects both platform artifact sets, stages a single draft
+#      GitHub Release with every asset attached, publishes the release once all
+#      uploads succeed, and finally updates `appcast.xml` / `appcast-beta.xml`
+#      on `main`.
 #
 # Required repository secrets (Settings → Secrets and variables →
 # Actions → Repository secrets):
 #
-#   MACOS_CERTIFICATE              — Developer ID Application .p12,
-#                                    base64-encoded. Export from Keychain
-#                                    Access ("My Certificates" → cert →
-#                                    right-click → Export → .p12 →
-#                                    `base64 -i cert.p12 -o cert.b64`)
-#   MACOS_CERTIFICATE_PASSWORD     — Password you chose when exporting
-#   MACOS_DEV_ID_APP               — Common Name from `security find-identity`,
-#                                    e.g. "Developer ID Application: Your Name (TEAM_ID)"
-#   MACOS_INSTALLER_CERT           — Developer ID Installer .p12, base64-encoded.
-#                                    (separate cert type from Application cert)
-#                                    Export the same way as MACOS_CERTIFICATE.
-#                                    OPTIONAL: if absent the .pkg ships unsigned.
-#   MACOS_INSTALLER_CERT_PASSWORD  — Password for the Installer .p12 export.
-#                                    Required when MACOS_INSTALLER_CERT is set.
-#   MACOS_DEV_ID_INSTALLER         — Common Name of the installer cert, e.g.
-#                                    "Developer ID Installer: Your Name (TEAM_ID)"
-#                                    Required when MACOS_INSTALLER_CERT is set.
-#   AC_API_KEY_BASE64              — `base64 -i AuthKey_XXXXXX.p8 -o key.b64`
-#                                    Team key with Certificates, Identifiers & Profiles access.
-#                                    Also retrieves/renews the Developer ID profile automatically.
+#   MACOS_CERTIFICATE              — Developer ID Application .p12, base64
+#   MACOS_CERTIFICATE_PASSWORD     — Password for MACOS_CERTIFICATE
+#   MACOS_DEV_ID_APP               — Common Name from `security find-identity`
+#   MACOS_INSTALLER_CERT           — Optional Developer ID Installer .p12, base64
+#   MACOS_INSTALLER_CERT_PASSWORD  — Password for MACOS_INSTALLER_CERT
+#   MACOS_DEV_ID_INSTALLER         — Common Name of the installer cert
+#   AC_API_KEY_BASE64              — App Store Connect AuthKey_XXXXXX.p8, base64
 #   AC_API_KEY_ID                  — 10-char key id from App Store Connect
 #   AC_API_ISSUER_ID               — UUID from App Store Connect → Integrations
-#   SPARKLE_PRIVATE_KEY            — Sparkle EdDSA private key (base64).
-#                                Export with:
-#                                  `security find-generic-password
-#                                     -a ed25519 -s 'https://sparkle-project.org'
-#                                     -w | tr -d '\n'`
-#                                Note: this is the most sensitive secret.
-#                                Compromise = ability to push malicious
-#                                updates to all installed copies. Rotate
-#                                via `sparkle-keygen.sh --force` if
-#                                ever exposed.
+#   SPARKLE_PRIVATE_KEY            — Sparkle EdDSA private key (base64)
 
 on:
   push:
     tags:
       - 'v*.*.*'
 
-# Serialize provisioning and appcast publication across release tags.
+# Serialize provisioning, release publication, and appcast commits across tags.
 concurrency:
-  group: macos-release
+  group: release-pipeline
   cancel-in-progress: false
 
-# Tighten workflow default to read-only — only the release job
-# opts in to `contents: write` for the GitHub Release upload.
 permissions:
   contents: read
 
 jobs:
-  release:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  build-macos:
+    needs: [ci]
     runs-on: macos-latest
-    # Manual approval gate. Configure the `release` environment in
-    # repo Settings → Environments with at least one required
-    # reviewer. A stolen push token can push a tag but can't bypass
-    # the reviewer prompt — which is the only thing between a tag
-    # push and a Sparkle-signed update shipping to every install.
     environment: release
     permissions:
-      # Required for `softprops/action-gh-release` to attach assets.
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
@@ -78,9 +64,7 @@ jobs:
           brew update
           brew install xcodegen pandoc xcbeautify tailscale wireguard-go cmake
 
-      # Set up a *temporary* keychain just for this run. We import
-      # the Developer ID cert into it, then nuke the keychain at
-      # the end. Avoids leaving build credentials on the runner.
+      # Temporary per-run keychain destroyed in the `always()` teardown step.
       - name: Set up signing keychain
         env:
           MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
@@ -90,34 +74,30 @@ jobs:
           MACOS_DEV_ID_INSTALLER: ${{ secrets.MACOS_DEV_ID_INSTALLER }}
         run: |
           set -euo pipefail
-          # Random one-shot keychain password
           KCHAIN_PW=$(openssl rand -hex 16)
           echo "::add-mask::$KCHAIN_PW"
-          echo "KCHAIN_PW=$KCHAIN_PW" >> "$GITHUB_ENV"
           security create-keychain -p "$KCHAIN_PW" build.keychain
           security default-keychain -s build.keychain
           security unlock-keychain -p "$KCHAIN_PW" build.keychain
           security set-keychain-settings -lut 21600 build.keychain
 
-          # Developer ID Application cert (required — for .app signing)
-          echo "$MACOS_CERTIFICATE" | base64 --decode > /tmp/cert.p12
-          security import /tmp/cert.p12 \
+          printf '%s' "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" \
             -k build.keychain \
             -P "$MACOS_CERTIFICATE_PASSWORD" \
             -T /usr/bin/codesign \
             -T /usr/bin/security
-          rm -f /tmp/cert.p12
+          rm -f "$RUNNER_TEMP/cert.p12"
 
-          # Developer ID Installer cert (optional — for .pkg signing)
           if [ -n "$MACOS_INSTALLER_CERT" ]; then
-            echo "$MACOS_INSTALLER_CERT" | base64 --decode > /tmp/installer-cert.p12
-            security import /tmp/installer-cert.p12 \
+            printf '%s' "$MACOS_INSTALLER_CERT" | base64 --decode > "$RUNNER_TEMP/installer-cert.p12"
+            security import "$RUNNER_TEMP/installer-cert.p12" \
               -k build.keychain \
               -P "$MACOS_INSTALLER_CERT_PASSWORD" \
               -T /usr/bin/pkgbuild \
               -T /usr/bin/productsign \
               -T /usr/bin/security
-            rm -f /tmp/installer-cert.p12
+            rm -f "$RUNNER_TEMP/installer-cert.p12"
             echo "DEVELOPER_ID_INSTALLER=$MACOS_DEV_ID_INSTALLER" >> "$GITHUB_ENV"
             echo "Installer cert imported: $MACOS_DEV_ID_INSTALLER"
           else
@@ -130,22 +110,18 @@ jobs:
             build.keychain
           security find-identity -p codesigning -v build.keychain
 
-      # Stage the App Store Connect API key for notarytool.
       - name: Stage AC API key
         env:
           AC_API_KEY_BASE64: ${{ secrets.AC_API_KEY_BASE64 }}
           AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
-          AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
         run: |
           set -euo pipefail
-          mkdir -p ~/.appstoreconnect
-          chmod 700 ~/.appstoreconnect
-          echo "$AC_API_KEY_BASE64" | base64 --decode > "$HOME/.appstoreconnect/AuthKey_${AC_API_KEY_ID}.p8"
+          mkdir -p "$HOME/.appstoreconnect"
+          chmod 700 "$HOME/.appstoreconnect"
+          printf '%s' "$AC_API_KEY_BASE64" | base64 --decode > "$HOME/.appstoreconnect/AuthKey_${AC_API_KEY_ID}.p8"
           chmod 600 "$HOME/.appstoreconnect/AuthKey_${AC_API_KEY_ID}.p8"
           echo "AC_API_KEY_PATH=$HOME/.appstoreconnect/AuthKey_${AC_API_KEY_ID}.p8" >> "$GITHUB_ENV"
 
-      # Pre-resolve SwiftPM packages so `release.sh` can find
-      # `generate_keys`/`sign_update` inside DerivedData.
       - name: Resolve SwiftPM packages
         run: |
           cd SuperManagerMac
@@ -157,35 +133,184 @@ jobs:
       - name: Build, sign, notarise, staple, Sparkle-sign
         env:
           DEVELOPER_ID_APP: ${{ secrets.MACOS_DEV_ID_APP }}
-          # DEVELOPER_ID_INSTALLER is written to GITHUB_ENV by the keychain step
-          # when MACOS_INSTALLER_CERT is present; empty string otherwise.
-          # release.sh treats empty DEVELOPER_ID_INSTALLER as "build unsigned pkg".
           AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
           AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
-          # release.sh pipes this to sign_update via --ed-key-file -.
-          # Reading it back from Keychain can hang on a headless runner.
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-          # AC_API_KEY_PATH set by the earlier step via GITHUB_ENV
         run: |
           set -euo pipefail
-          # Extract version from tag — `v1.2.3` → `1.2.3`
           VERSION="${GITHUB_REF_NAME#v}"
           echo "Releasing v$VERSION"
           ./scripts/release.sh "$VERSION"
 
-      - name: Attach artifacts to GitHub Release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+      - name: Upload macOS release artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          files: |
+          name: macos-release-dist
+          path: |
             dist/SuperManager-*.zip
+            !dist/*-notarize.zip
             dist/SuperManager-vpn-dns-cleanup-*.pkg
             dist/appcast*.xml
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Tear down keychain
+        if: always()
+        run: |
+          security delete-keychain build.keychain || true
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/installer-cert.p12" || true
+          rm -f "$HOME/.appstoreconnect/AuthKey_"*.p8 || true
+
+  build-windows:
+    needs: [ci]
+    runs-on: windows-latest
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cargo build (release)
+        env:
+          SUPERMGR_RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          cargo build --release --locked `
+            -p supermgrd-win `
+            -p supermgr-win `
+            -p supermgr-mcp
+
+      - name: Test Windows daemon
+        run: cargo test --release --locked -p supermgr-core -p supermgrd-win -p supermgr-win -p supermgr-mcp
+
+      - name: Install WiX v5
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add WixToolset.UI.wixext/5.0.2 --global
+          wix extension add WixToolset.Util.wixext/5.0.2 --global
+          wix extension add WixToolset.BootstrapperApplications.wixext/5.0.2 --global
+
+      - name: Stage vendor binaries
+        run: .\scripts\windows\Get-VendorFiles.ps1
+
+      - name: Build MSI + Burn bundle
+        run: .\installer\wix\build-msi.ps1 -SkipBuild -Bundle
+
+      - name: Test complete Windows installation
+        run: .\scripts\windows\test-installer.ps1
+
+      - name: Upload installer test logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-installer-test-logs
+          path: ${{ runner.temp }}/supermanager-installer-test/
+          if-no-files-found: ignore
+
+      - name: Stage and hash Windows release artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = "$env:GITHUB_REF_NAME".TrimStart('v')
+          New-Item -ItemType Directory -Force -Path "dist-win" | Out-Null
+          $msi = "dist-win\SuperManager-$version.msi"
+          $exe = "dist-win\SuperManager-Setup-$version.exe"
+          Move-Item "installer\wix\SuperManager.msi"       $msi
+          Move-Item "installer\wix\SuperManager-Setup.exe" $exe
+          foreach ($p in @($msi, $exe)) {
+              $hash = (Get-FileHash $p -Algorithm SHA256).Hash
+              "$hash  $(Split-Path -Leaf $p)" |
+                  Out-File -FilePath "$p.sha256" -Encoding ascii
+              Write-Host "SHA-256 $(Split-Path -Leaf $p): $hash"
+          }
+          $stableExe = "dist-win\SuperManager-Setup.exe"
+          Copy-Item $exe $stableExe
+          $stableHash = (Get-FileHash $stableExe -Algorithm SHA256).Hash
+          "$stableHash  SuperManager-Setup.exe" |
+              Out-File -FilePath "$stableExe.sha256" -Encoding ascii
+
+      - name: Upload Windows release artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-release-dist
+          path: dist-win/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download macOS release artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: macos-release-dist
+          path: release-assets/macos
+
+      - name: Download Windows release artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: windows-release-dist
+          path: release-assets/windows
+
+      - name: Verify complete cross-platform artifact set
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            FEED_FILE="appcast-beta.xml"
+          else
+            FEED_FILE="appcast.xml"
+          fi
+          for required in \
+            "release-assets/macos/SuperManager-${VERSION}.zip" \
+            "release-assets/macos/SuperManager-vpn-dns-cleanup-${VERSION}.pkg" \
+            "release-assets/macos/${FEED_FILE}" \
+            "release-assets/windows/SuperManager-${VERSION}.msi" \
+            "release-assets/windows/SuperManager-${VERSION}.msi.sha256" \
+            "release-assets/windows/SuperManager-Setup-${VERSION}.exe" \
+            "release-assets/windows/SuperManager-Setup-${VERSION}.exe.sha256" \
+            "release-assets/windows/SuperManager-Setup.exe" \
+            "release-assets/windows/SuperManager-Setup.exe.sha256"
+          do
+            [ -s "$required" ] || { echo "missing or empty release asset: $required" >&2; exit 1; }
+          done
+          command -v xmllint >/dev/null \
+            || { sudo apt-get update -qq && sudo apt-get install -y -qq libxml2-utils; }
+          xmllint --noout "release-assets/macos/${FEED_FILE}"
+
+      - name: Stage draft GitHub Release with all assets
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          draft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
           fail_on_unmatched_files: true
+          files: |
+            release-assets/macos/SuperManager-*.zip
+            release-assets/macos/SuperManager-vpn-dns-cleanup-*.pkg
+            release-assets/macos/appcast*.xml
+            release-assets/windows/SuperManager-*.msi
+            release-assets/windows/SuperManager-*.msi.sha256
+            release-assets/windows/SuperManager-Setup-*.exe
+            release-assets/windows/SuperManager-Setup-*.exe.sha256
+            release-assets/windows/SuperManager-Setup.exe
+            release-assets/windows/SuperManager-Setup.exe.sha256
 
-      # Stable builds poll main/appcast.xml; beta-opted-in builds poll
-      # main/appcast-beta.xml. Keeping separate files keeps stable users off
-      # pre-releases while preventing 404s on the beta channel.
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release edit "$GITHUB_REF_NAME" --draft=false
+
       - name: Publish appcast to main
         run: |
           set -euo pipefail
@@ -194,7 +319,7 @@ jobs:
           else
             FEED_FILE="appcast.xml"
           fi
-          cp "dist/$FEED_FILE" "$RUNNER_TEMP/$FEED_FILE"
+          cp "release-assets/macos/$FEED_FILE" "$RUNNER_TEMP/$FEED_FILE"
           git fetch origin main
           git checkout --detach origin/main
           cp "$RUNNER_TEMP/$FEED_FILE" "$FEED_FILE"
@@ -211,12 +336,3 @@ jobs:
             git rebase origin/main
             git push origin HEAD:main
           }
-
-      # Always clean up the temporary keychain so a failed run
-      # doesn't leave the signing identity sitting on the runner
-      # (GitHub-hosted runners are ephemeral but defence in depth).
-      - name: Tear down keychain
-        if: always()
-        run: |
-          security delete-keychain build.keychain || true
-          rm -f "$HOME/.appstoreconnect/AuthKey_"*.p8 || true
