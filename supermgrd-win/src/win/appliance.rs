@@ -9,11 +9,9 @@
 //!
 //! # TLS verification
 //!
-//! Each host record carries `api_verify_tls` (defaulting to `false`, matching
-//! [`supermgr_core::host::Host`]) because most FortiGate / UniFi / OPNsense /
-//! Sophos deployments present a self-signed certificate during initial
-//! provisioning. Setting `"api_verify_tls": true` on a host opts into strict
-//! CA verification via the Windows system trust store.
+//! Each host record carries `api_verify_tls` (defaulting to `true`, matching
+//! [`supermgr_core::host::Host`]). Operators working against a self-signed
+//! lab or factory appliance must explicitly set `"api_verify_tls": false`.
 
 use std::{path::Path, sync::Arc, time::Duration};
 
@@ -53,12 +51,12 @@ fn read_key(root: &Path, key_id: &str) -> Result<Value, RpcError> {
         .map_err(|e| RpcError::Other(format!("parse key json: {e}")))
 }
 
-/// Extract `api_verify_tls` from the host record, defaulting to `false` to
+/// Extract `api_verify_tls` from the host record, defaulting to `true` to
 /// match [`supermgr_core::host::Host`].
 fn host_verify_tls(meta: &Value) -> bool {
     meta.get("api_verify_tls")
         .and_then(Value::as_bool)
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 /// Build a reqwest client honoring the host's `api_verify_tls` flag,
@@ -798,7 +796,7 @@ mod tests {
 
     #[test]
     fn host_verify_tls_matches_core_host_default() {
-        assert!(!host_verify_tls(&json!({})));
+        assert!(host_verify_tls(&json!({})));
         assert!(!host_verify_tls(&json!({ "api_verify_tls": false })));
         assert!(host_verify_tls(&json!({ "api_verify_tls": true })));
     }

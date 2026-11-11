@@ -40,6 +40,7 @@ use chrono::{DateTime, Utc};
 use reqwest::cookie::Jar;
 use serde::{Deserialize, Serialize};
 use supermgr_core::keyring::SecretStore;
+use supermgr_core::ssh::known_hosts::KnownHostsStore;
 use supermgr_core::vpn::profile::SecretRef;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -68,6 +69,10 @@ pub enum UnifiAuthMethod {
     Password,
 }
 
+const fn default_true() -> bool {
+    true
+}
+
 /// A configured `UniFi` controller. The struct is the canonical
 /// on-disk record (one TOML file per controller); the
 /// credential (API key OR password) is stored separately in
@@ -93,6 +98,10 @@ pub struct UnifiController {
     /// For API-key auth this stays empty.
     #[serde(default)]
     pub username: String,
+    /// Verify the controller's TLS certificate chain and hostname. Defaults to
+    /// `true`; when `false`, the leaf certificate is pinned on first use.
+    #[serde(default = "default_true")]
+    pub verify_tls: bool,
     /// Keychain reference for the credential. For
     /// `auth_method == Password` this resolves to the user's
     /// password. For `auth_method == ApiKey` it resolves to
@@ -214,11 +223,12 @@ const TWO_FACTOR_REFUSED: &str = "this UniFi account uses two-factor \
 ///     directions to an API key (see `password_login`).
 async fn login_client(
     secrets: &Arc<dyn SecretStore>,
+    known_hosts: &KnownHostsStore,
     controller: &UnifiController,
 ) -> Result<reqwest::Client> {
     match controller.auth_method {
-        UnifiAuthMethod::ApiKey => api_key_client(secrets, controller).await,
-        UnifiAuthMethod::Password => password_login(secrets, controller).await,
+        UnifiAuthMethod::ApiKey => api_key_client(secrets, known_hosts, controller).await,
+        UnifiAuthMethod::Password => password_login(secrets, known_hosts, controller).await,
     }
 }
 
@@ -228,8 +238,12 @@ async fn login_client(
 /// Admins → API, pastes it into the GUI add sheet, done.
 async fn api_key_client(
     secrets: &Arc<dyn SecretStore>,
+    known_hosts: &KnownHostsStore,
     controller: &UnifiController,
 ) -> Result<reqwest::Client> {
+    if !controller.verify_tls {
+        crate::tls_pin::verify_or_enroll_url(known_hosts, &controller.url).await?;
+    }
     let secret = secrets
         .retrieve(&controller.creds_ref.0)
         .await
@@ -251,7 +265,7 @@ async fn api_key_client(
     );
     reqwest::Client::builder()
         .default_headers(headers)
-        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_certs(!controller.verify_tls)
         .timeout(HTTP_TIMEOUT)
         .build()
         .context("build api-key client")
@@ -262,8 +276,12 @@ async fn api_key_client(
 /// factor on each of the logins made here.
 pub async fn password_login(
     secrets: &Arc<dyn SecretStore>,
+    known_hosts: &KnownHostsStore,
     controller: &UnifiController,
 ) -> Result<reqwest::Client> {
+    if !controller.verify_tls {
+        crate::tls_pin::verify_or_enroll_url(known_hosts, &controller.url).await?;
+    }
     let secret = secrets
         .retrieve(&controller.creds_ref.0)
         .await
@@ -275,7 +293,7 @@ pub async fn password_login(
     let jar = Arc::new(Jar::default());
     let client = reqwest::Client::builder()
         .cookie_provider(jar)
-        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_certs(!controller.verify_tls)
         .timeout(HTTP_TIMEOUT)
         .build()
         .context("build reqwest client")?;
@@ -322,19 +340,21 @@ pub async fn password_login(
 /// provenance.
 pub async fn list_devices(
     secrets: &Arc<dyn SecretStore>,
+    known_hosts: &KnownHostsStore,
     controller: &UnifiController,
 ) -> Result<Vec<UnifiManagedDevice>> {
     match controller.auth_method {
-        UnifiAuthMethod::ApiKey => list_devices_integration(secrets, controller).await,
-        UnifiAuthMethod::Password => list_devices_classic(secrets, controller).await,
+        UnifiAuthMethod::ApiKey => list_devices_integration(secrets, known_hosts, controller).await,
+        UnifiAuthMethod::Password => list_devices_classic(secrets, known_hosts, controller).await,
     }
 }
 
 async fn list_devices_classic(
     secrets: &Arc<dyn SecretStore>,
+    known_hosts: &KnownHostsStore,
     controller: &UnifiController,
 ) -> Result<Vec<UnifiManagedDevice>> {
-    let client = login_client(secrets, controller).await?;
+    let client = login_client(secrets, known_hosts, controller).await?;
     let url = controller.site_url("stat/device");
     let resp = client
         .get(&url)
@@ -407,9 +427,10 @@ async fn list_devices_classic(
 /// added / renamed and we don't want stale data.
 async fn list_devices_integration(
     secrets: &Arc<dyn SecretStore>,
+    known_hosts: &KnownHostsStore,
     controller: &UnifiController,
 ) -> Result<Vec<UnifiManagedDevice>> {
-    let client = api_key_client(secrets, controller).await?;
+    let client = api_key_client(secrets, known_hosts, controller).await?;
     let site_id = resolve_integration_site_id(&client, controller).await?;
 
     let mut out: Vec<UnifiManagedDevice> = Vec::new();
@@ -623,13 +644,14 @@ pub fn validate_devmgr_command(cmd: &str) -> Result<&str> {
 /// `site_id`).
 pub async fn devmgr_command(
     secrets: &Arc<dyn SecretStore>,
+    known_hosts: &KnownHostsStore,
     controller: &UnifiController,
     cmd: &str,
     mac: &str,
     extra: serde_json::Value,
 ) -> Result<serde_json::Value> {
     let validated = validate_devmgr_command(cmd)?;
-    let client = login_client(secrets, controller).await?;
+    let client = login_client(secrets, known_hosts, controller).await?;
     let url = controller.site_url("cmd/devmgr");
     let mac_lower = mac.to_ascii_lowercase();
     let mut body = serde_json::json!({
@@ -677,19 +699,21 @@ pub async fn devmgr_command(
 ///                 logged-in cookie session.
 pub async fn test_connection(
     secrets: &Arc<dyn SecretStore>,
+    known_hosts: &KnownHostsStore,
     controller: &UnifiController,
 ) -> Result<UnifiSysInfo> {
     match controller.auth_method {
-        UnifiAuthMethod::ApiKey => test_via_integration_api(secrets, controller).await,
-        UnifiAuthMethod::Password => test_via_classic_api(secrets, controller).await,
+        UnifiAuthMethod::ApiKey => test_via_integration_api(secrets, known_hosts, controller).await,
+        UnifiAuthMethod::Password => test_via_classic_api(secrets, known_hosts, controller).await,
     }
 }
 
 async fn test_via_classic_api(
     secrets: &Arc<dyn SecretStore>,
+    known_hosts: &KnownHostsStore,
     controller: &UnifiController,
 ) -> Result<UnifiSysInfo> {
-    let client = login_client(secrets, controller).await?;
+    let client = login_client(secrets, known_hosts, controller).await?;
     let url = format!(
         "{}/api/s/{}/stat/sysinfo",
         controller.url.trim_end_matches('/'),
@@ -723,9 +747,10 @@ async fn test_via_classic_api(
 
 async fn test_via_integration_api(
     secrets: &Arc<dyn SecretStore>,
+    known_hosts: &KnownHostsStore,
     controller: &UnifiController,
 ) -> Result<UnifiSysInfo> {
-    let client = api_key_client(secrets, controller).await?;
+    let client = api_key_client(secrets, known_hosts, controller).await?;
     let info_url = format!(
         "{}/proxy/network/integration/v1/info",
         controller.url.trim_end_matches('/')
@@ -797,6 +822,7 @@ pub struct UnifiSysInfo {
 /// block every scan from completing.
 pub async fn cross_reference(
     secrets: &Arc<dyn SecretStore>,
+    known_hosts: &Arc<KnownHostsStore>,
     controllers: &[UnifiController],
     macs: &[String],
 ) -> HashMap<String, ControllerStateRef> {
@@ -806,11 +832,12 @@ pub async fn cross_reference(
     for ctrl in controllers {
         let ctrl = ctrl.clone();
         let secrets = Arc::clone(secrets);
+        let known_hosts = Arc::clone(known_hosts);
         handles.push(tokio::spawn(async move {
             (
                 ctrl.id,
                 ctrl.label.clone(),
-                list_devices(&secrets, &ctrl).await,
+                list_devices(&secrets, &known_hosts, &ctrl).await,
             )
         }));
     }
@@ -887,6 +914,7 @@ mod tests {
         )
         .await;
         let dir = tempfile::tempdir().unwrap();
+        let known_hosts = KnownHostsStore::open(dir.path()).unwrap();
         let secrets: Arc<dyn SecretStore> = Arc::new(crate::secrets::file::FileSecretStore::new(
             dir.path().join("secrets.json"),
         ));
@@ -899,13 +927,14 @@ mod tests {
             site_id: "default".into(),
             auth_method: UnifiAuthMethod::Password,
             username: "admin".into(),
+            verify_tls: true,
             creds_ref: SecretRef::new("unifi/test"),
             customer_slug: None,
             verified_at: None,
             created_at: now,
             updated_at: now,
         };
-        let error = password_login(&secrets, &controller)
+        let error = password_login(&secrets, &known_hosts, &controller)
             .await
             .expect_err("a two-factor account signed in with its password")
             .to_string();

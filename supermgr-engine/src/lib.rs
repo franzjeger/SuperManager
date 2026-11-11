@@ -50,6 +50,7 @@ pub mod ssh_compliance {
     pub use supermgr_core::ssh_compliance::*;
 }
 pub mod state;
+pub mod tls_pin;
 pub mod unifi;
 pub mod unifi_controllers;
 pub mod vuln;

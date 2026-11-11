@@ -19,6 +19,7 @@ struct SshHostSummary: Codable, Identifiable, Hashable {
     let hasCertificate: Bool
     let hasApi: Bool
     let apiPort: UInt16?
+    let apiVerifyTls: Bool
     let hasUnifiController: Bool
     let pinned: Bool
 
@@ -39,6 +40,7 @@ struct SshHostSummary: Codable, Identifiable, Hashable {
         case hasCertificate = "has_certificate"
         case hasApi = "has_api"
         case apiPort = "api_port"
+        case apiVerifyTls = "api_verify_tls"
         case hasUnifiController = "has_unifi_controller"
     }
 
@@ -110,6 +112,7 @@ struct SshHostSummary: Codable, Identifiable, Hashable {
         hasCertificate = (try? c.decode(Bool.self, forKey: .hasCertificate)) ?? false
         hasApi = (try? c.decode(Bool.self, forKey: .hasApi)) ?? false
         apiPort = try? c.decode(UInt16.self, forKey: .apiPort)
+        apiVerifyTls = (try? c.decode(Bool.self, forKey: .apiVerifyTls)) ?? true
         hasUnifiController = (try? c.decode(Bool.self, forKey: .hasUnifiController)) ?? false
         pinned = (try? c.decode(Bool.self, forKey: .pinned)) ?? false
 

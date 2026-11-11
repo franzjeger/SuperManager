@@ -48,6 +48,68 @@ use crate::state::DaemonState;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Validate a controller base URL and safely join an API path starting with `/`,
+/// guaranteeing that the scheme, host, and port remain unchanged.
+fn join_controller_url(base_url: &str, api_path: &str) -> Result<String> {
+    if !api_path.starts_with('/') || api_path.starts_with("//") {
+        return Err(anyhow!("API path must start with a single '/'"));
+    }
+    if api_path
+        .bytes()
+        .any(|b| b.is_ascii_control() || b == b' ' || b == b'\\')
+    {
+        return Err(anyhow!("API path contains forbidden characters"));
+    }
+    if api_path.contains('#') {
+        return Err(anyhow!("API path must not contain a URL fragment"));
+    }
+
+    let mut parsed =
+        url::Url::parse(base_url.trim()).with_context(|| format!("invalid controller URL: {base_url}"))?;
+    match parsed.scheme() {
+        "https" | "http" => {}
+        other => return Err(anyhow!("unsupported controller URL scheme: {other}")),
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(anyhow!("controller URL must not embed credentials"));
+    }
+    let expected_host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("controller URL missing host"))?
+        .to_owned();
+    let expected_port = parsed.port_or_known_default();
+
+    let (raw_path, raw_query) = match api_path.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (api_path, None),
+    };
+    if raw_path
+        .split('/')
+        .any(|seg| seg == ".." || seg.eq_ignore_ascii_case("%2e%2e"))
+    {
+        return Err(anyhow!("API path must not contain '..' traversal segments"));
+    }
+
+    let prefix = parsed.path().trim_end_matches('/').to_owned();
+    let combined_path = if prefix.is_empty() {
+        raw_path.to_owned()
+    } else {
+        format!("{prefix}{raw_path}")
+    };
+    parsed.set_path(&combined_path);
+    parsed.set_query(raw_query);
+
+    if parsed.host_str() != Some(expected_host.as_str())
+        || parsed.port_or_known_default() != expected_port
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err(anyhow!("API path altered URL authority"));
+    }
+
+    Ok(parsed.into())
+}
+
 /// Cheap reachability check before we open a full SSH session.
 /// Tries to TCP-connect twice with a 300 ms gap on the first
 /// failure — covers the cold-ARP-cache case where the kernel
@@ -181,16 +243,20 @@ pub async fn set_controller(
     username: &str,
     password: &str,
 ) -> Result<()> {
-    // Sanity-check the URL parses.
-    let _parsed: reqwest::Url = url.parse().context("invalid controller URL")?;
+    let login_url = join_controller_url(url, "/api/auth/login")?;
 
-    let verify_tls = {
+    let (verify_tls, known_hosts) = {
         let st = state.lock().await;
-        st.ssh_hosts
+        let host = st
+            .ssh_hosts
             .get(&host_id)
-            .map(|h| h.api_verify_tls)
-            .ok_or_else(|| anyhow!("host not found: {host_id}"))?
+            .ok_or_else(|| anyhow!("host not found: {host_id}"))?;
+        (host.api_verify_tls, Arc::clone(&st.known_hosts))
     };
+
+    if !verify_tls {
+        crate::tls_pin::verify_or_enroll_url(&known_hosts, &login_url).await?;
+    }
 
     // Validate by attempting login. UniFi controllers redirect
     // browser hits to /manage/ but the API endpoint is stable
@@ -201,7 +267,6 @@ pub async fn set_controller(
         .timeout(HTTP_TIMEOUT)
         .build()
         .context("build HTTP client")?;
-    let login_url = format!("{url}/api/auth/login");
     let body = serde_json::json!({
         "username": username,
         "password": password,
@@ -292,7 +357,7 @@ pub async fn api_request(
     path: &str,
     body: &str,
 ) -> Result<ApiResponse> {
-    let (controller_url, creds_label, verify_tls) = {
+    let (controller_url, creds_label, verify_tls, known_hosts) = {
         let st = state.lock().await;
         let host = st
             .ssh_hosts
@@ -308,8 +373,15 @@ pub async fn api_request(
             .ok_or_else(|| anyhow!("no UniFi credentials configured"))?
             .0
             .clone();
-        (url, label, host.api_verify_tls)
+        (url, label, host.api_verify_tls, Arc::clone(&st.known_hosts))
     };
+
+    let login_url = join_controller_url(&controller_url, "/api/auth/login")?;
+    let url = join_controller_url(&controller_url, path)?;
+
+    if !verify_tls {
+        crate::tls_pin::verify_or_enroll_url(&known_hosts, &login_url).await?;
+    }
 
     let creds_bytes = secrets
         .retrieve(&creds_label)
@@ -332,7 +404,6 @@ pub async fn api_request(
         .context("build HTTP client")?;
 
     // Login first.
-    let login_url = format!("{controller_url}/api/auth/login");
     let login_body = serde_json::json!({
         "username": username,
         "password": password,
@@ -349,7 +420,6 @@ pub async fn api_request(
         return Err(anyhow!("UniFi login failed ({login_status}): {text}"));
     }
 
-    let url = format!("{controller_url}{path}");
     info!("unifi_api: {method} {url}");
 
     let mut req = match method.to_uppercase().as_str() {
@@ -457,4 +527,34 @@ async fn open_session(
     crate::server::connect_to_host_owned(state, secrets, host_id)
         .await
         .map_err(|e| anyhow!("ssh connect: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn join_controller_url_preserves_authority_and_rejects_injection() {
+        assert_eq!(
+            join_controller_url("https://unifi.example.com:8443/", "/api/s/default/stat/device?limit=10")
+                .unwrap(),
+            "https://unifi.example.com:8443/api/s/default/stat/device?limit=10"
+        );
+        for bad_path in [
+            "@evil.tld/api",
+            "//evil.tld/api",
+            "/api/../etc/passwd",
+            "/api/%2e%2e/secret",
+            "/api/self#frag",
+            "/api/self with space",
+        ] {
+            assert!(
+                join_controller_url("https://unifi.example.com:8443", bad_path).is_err(),
+                "accepted malicious path {bad_path:?}"
+            );
+        }
+        assert!(
+            join_controller_url("https://admin:secret@unifi.example.com:8443", "/api/self").is_err()
+        );
+    }
 }

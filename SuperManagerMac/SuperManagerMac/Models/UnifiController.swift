@@ -22,6 +22,7 @@ struct UnifiController: Codable, Identifiable, Hashable {
     var siteId: String
     var authMethod: UnifiAuthMethod
     var username: String
+    var verifyTls: Bool
     /// Reference into the keychain; the password / api key
     /// itself never appears in this struct. The engine
     /// resolves it during every API call.
@@ -38,6 +39,7 @@ struct UnifiController: Codable, Identifiable, Hashable {
         case id, label, url, username
         case siteId = "site_id"
         case authMethod = "auth_method"
+        case verifyTls = "verify_tls"
         case credsRef = "creds_ref"
         case customerSlug = "customer_slug"
         case verifiedAt = "verified_at"
@@ -55,6 +57,7 @@ struct UnifiController: Codable, Identifiable, Hashable {
         // serialised before the auth_method field existed.
         authMethod = (try? c.decode(UnifiAuthMethod.self, forKey: .authMethod)) ?? .password
         username = (try? c.decode(String.self, forKey: .username)) ?? ""
+        verifyTls = (try? c.decode(Bool.self, forKey: .verifyTls)) ?? true
 
         // SecretRef serialises as a single-string tuple struct
         // on the Rust side via serde's default representation —

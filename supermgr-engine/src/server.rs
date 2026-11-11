@@ -212,6 +212,10 @@ impl EngineServer {
             "ssh_host_health" => self.handle_ssh_host_health(id).await,
             "ssh_set_api_token" => self.handle_ssh_set_api_token(id, req.params).await,
             "ssh_clear_api_token" => self.handle_ssh_clear_api_token(id, req.params).await,
+            "ssh_list_known_hosts" => self.handle_ssh_list_known_hosts(id).await,
+            "ssh_forget_host_key" | "ssh_forget_known_host" => {
+                self.handle_ssh_forget_host_key(id, req.params).await
+            }
 
             // -- FortiGate REST API methods --
             "fortigate_api" => self.handle_fortigate_api(id, req.params).await,
@@ -625,6 +629,23 @@ pub fn merge_host_update(host: &mut Host, incoming: &serde_json::Value) {
     }
     if let Some(v) = incoming.get("vpn_profile_id") {
         host.vpn_profile_id = serde_json::from_value(v.clone()).ok();
+    }
+    if let Some(b) = incoming
+        .get("api_verify_tls")
+        .and_then(serde_json::Value::as_bool)
+    {
+        host.api_verify_tls = b;
+    }
+    if let Some(v) = incoming.get("api_port") {
+        if v.is_null() {
+            host.api_port = None;
+        } else if let Some(n) = v
+            .as_u64()
+            .and_then(|n| u16::try_from(n).ok())
+            .filter(|&p| p > 0)
+        {
+            host.api_port = Some(n);
+        }
     }
 }
 

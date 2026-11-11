@@ -77,7 +77,7 @@ pub async fn api_request(
 ) -> Result<ApiResponse> {
     // Snapshot connection params under lock; never call out to the
     // network with the state mutex held.
-    let (hostname, api_port, verify_tls, token_label) = {
+    let (hostname, api_port, verify_tls, token_label, known_hosts) = {
         let st = state.lock().await;
         let host = st
             .ssh_hosts
@@ -92,11 +92,16 @@ pub async fn api_request(
             host.api_port.unwrap_or(443),
             host.api_verify_tls,
             token_ref.0.clone(),
+            Arc::clone(&st.known_hosts),
         )
     };
 
     let url = supermgr_core::sanitize::build_https_api_url(&hostname, api_port, path)
         .map_err(|e| anyhow!("{e}"))?;
+
+    if !verify_tls {
+        crate::tls_pin::verify_or_enroll_endpoint(&known_hosts, &hostname, api_port).await?;
+    }
 
     let token_bytes = secrets
         .retrieve(&token_label)
@@ -107,9 +112,9 @@ pub async fn api_request(
 
     info!("fortigate_api: {method} {url}");
 
-    // FortiGate appliances ship a self-signed cert by default (`api_verify_tls`
-    // defaults to false), while still honouring `api_verify_tls = true` when
-    // the operator has installed a CA-signed certificate on the appliance.
+    // Strict TLS verification is enabled by default (`api_verify_tls = true`);
+    // when an operator explicitly disables CA chain checks for a self-signed
+    // appliance, the leaf certificate was already verified/pinned above.
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(!verify_tls)
         .timeout(HTTP_TIMEOUT)

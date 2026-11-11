@@ -166,9 +166,27 @@ impl EngineServer {
             _ => return Response::err(id, protocol::INVALID_PARAMS, "missing label".to_owned()),
         };
         let url = match params.get("url").and_then(|v| v.as_str()) {
-            Some(s) if !s.is_empty() => s.trim_end_matches('/').to_owned(),
+            Some(s) if !s.trim().is_empty() => s.trim().trim_end_matches('/').to_owned(),
             _ => return Response::err(id, protocol::INVALID_PARAMS, "missing url".to_owned()),
         };
+        let parsed_url = match url::Url::parse(&url) {
+            Ok(u) if matches!(u.scheme(), "https" | "http")
+                && u.host_str().is_some()
+                && u.username().is_empty()
+                && u.password().is_none() =>
+            {
+                u
+            }
+            _ => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "invalid controller url (expected http(s)://host[:port] without embedded credentials)"
+                        .to_owned(),
+                )
+            }
+        };
+        let _ = parsed_url;
         let auth_method = match params.get("auth_method").and_then(|v| v.as_str()) {
             Some("api_key") => UnifiAuthMethod::ApiKey,
             _ => UnifiAuthMethod::Password,
@@ -191,7 +209,21 @@ impl EngineServer {
             .get("site_id")
             .and_then(|v| v.as_str())
             .unwrap_or("default")
+            .trim()
             .to_owned();
+        if site_id.is_empty()
+            || site_id.len() > 64
+            || !site_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                "invalid site_id (must be 1..=64 ASCII alphanumeric, '-', or '_' characters)"
+                    .to_owned(),
+            );
+        }
         let customer_slug = params
             .get("customer_slug")
             .and_then(|v| v.as_str())
@@ -209,23 +241,42 @@ impl EngineServer {
             .and_then(|v| v.as_str())
             .or_else(|| params.get("api_key").and_then(|v| v.as_str()));
 
+        let verify_tls_param = params
+            .get("verify_tls")
+            .and_then(serde_json::Value::as_bool);
+
         // Distinguish "fresh save" from "update existing".
         let now = chrono::Utc::now();
-        let (controller_id, created_at, existing_label) = {
+        let (controller_id, created_at, existing_label, verify_tls, known_hosts) = {
             let st = self.state.lock().await;
+            let kh = std::sync::Arc::clone(&st.known_hosts);
             if let Some(id) = supplied_id {
                 if let Some(existing) = st.unifi_controllers.get(&id) {
                     (
                         existing.id,
                         existing.created_at,
                         existing.creds_ref.0.clone(),
+                        verify_tls_param.unwrap_or(existing.verify_tls),
+                        kh,
                     )
                 } else {
-                    (id, now, format!("unifi/controller/{}", id.simple()))
+                    (
+                        id,
+                        now,
+                        format!("unifi/controller/{}", id.simple()),
+                        verify_tls_param.unwrap_or(true),
+                        kh,
+                    )
                 }
             } else {
                 let new_id = uuid::Uuid::new_v4();
-                (new_id, now, format!("unifi/controller/{}", new_id.simple()))
+                (
+                    new_id,
+                    now,
+                    format!("unifi/controller/{}", new_id.simple()),
+                    verify_tls_param.unwrap_or(true),
+                    kh,
+                )
             }
         };
 
@@ -252,6 +303,7 @@ impl EngineServer {
             site_id,
             auth_method,
             username,
+            verify_tls,
             creds_ref: SecretRef::new(existing_label),
             customer_slug,
             verified_at: None,
@@ -262,7 +314,7 @@ impl EngineServer {
         // One sysinfo round trip verifies either kind of credential. A
         // password account with a second factor fails here, with
         // directions to an API key.
-        match test_connection(&self.secrets, &controller).await {
+        match test_connection(&self.secrets, &known_hosts, &controller).await {
             Ok(sysinfo) => self.persist_verified(id, controller, sysinfo).await,
             Err(e) => Response::err(
                 id,
@@ -334,10 +386,10 @@ impl EngineServer {
             Ok(id) => id,
             Err(r) => return r,
         };
-        let controller = {
+        let (controller, known_hosts) = {
             let st = self.state.lock().await;
             match st.unifi_controllers.get(&cid).cloned() {
-                Some(c) => c,
+                Some(c) => (c, std::sync::Arc::clone(&st.known_hosts)),
                 None => {
                     return Response::err(
                         id,
@@ -347,7 +399,9 @@ impl EngineServer {
                 }
             }
         };
-        match crate::unifi_controllers::test_connection(&self.secrets, &controller).await {
+        match crate::unifi_controllers::test_connection(&self.secrets, &known_hosts, &controller)
+            .await
+        {
             Ok(sysinfo) => {
                 // Bump verified_at on success.
                 let mut st = self.state.lock().await;
@@ -371,10 +425,10 @@ impl EngineServer {
             Ok(id) => id,
             Err(r) => return r,
         };
-        let controller = {
+        let (controller, known_hosts) = {
             let st = self.state.lock().await;
             match st.unifi_controllers.get(&cid).cloned() {
-                Some(c) => c,
+                Some(c) => (c, std::sync::Arc::clone(&st.known_hosts)),
                 None => {
                     return Response::err(
                         id,
@@ -384,7 +438,8 @@ impl EngineServer {
                 }
             }
         };
-        match crate::unifi_controllers::list_devices(&self.secrets, &controller).await {
+        match crate::unifi_controllers::list_devices(&self.secrets, &known_hosts, &controller).await
+        {
             Ok(devices) => match serde_json::to_value(&devices) {
                 Ok(v) => Response::ok(id, v),
                 Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
@@ -414,10 +469,10 @@ impl EngineServer {
             .get("extra")
             .cloned()
             .unwrap_or(serde_json::json!({}));
-        let controller = {
+        let (controller, known_hosts) = {
             let st = self.state.lock().await;
             match st.unifi_controllers.get(&cid).cloned() {
-                Some(c) => c,
+                Some(c) => (c, std::sync::Arc::clone(&st.known_hosts)),
                 None => {
                     return Response::err(
                         id,
@@ -429,6 +484,7 @@ impl EngineServer {
         };
         match crate::unifi_controllers::devmgr_command(
             &self.secrets,
+            &known_hosts,
             &controller,
             &cmd,
             &mac,

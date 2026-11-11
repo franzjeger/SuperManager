@@ -463,6 +463,9 @@ impl EngineServer {
                 )
             }
         };
+        let old_hostname = host.hostname.clone();
+        let old_port = host.port;
+        let old_api_port = host.api_port;
 
         merge_host_update(&mut host, &incoming);
         if let Err(e) = supermgr_core::sanitize::validate_host_or_ip(&host.hostname) {
@@ -471,12 +474,30 @@ impl EngineServer {
         if let Err(e) = supermgr_core::sanitize::validate_ssh_username(&host.username) {
             return Response::err(id, protocol::INVALID_PARAMS, e.to_string());
         }
+
+        // Retargeting a host's endpoint must not silently send previously
+        // stored passwords/tokens to the new address.
+        let mut stale_labels = Vec::new();
+        if host.hostname != old_hostname || host.port != old_port || host.api_port != old_api_port {
+            stale_labels = host.secret_labels();
+            host.auth_password_ref = None;
+            host.auth_cert_ref = None;
+            host.api_token_ref = None;
+            host.unifi_api_token_ref = None;
+        }
         host.updated_at = chrono::Utc::now();
 
         if let Err(e) = state.save_ssh_host(&host) {
             return Response::err(id, protocol::INTERNAL_ERROR, format!("save host: {e}"));
         }
         state.ssh_hosts.insert(p.host_id, host);
+        drop(state);
+
+        for label in stale_labels {
+            if let Err(e) = self.secrets.delete(&label).await {
+                tracing::warn!("clearing stale secret {label} after endpoint update: {e}");
+            }
+        }
 
         Response::ok(id, serde_json::json!(null))
     }
@@ -581,11 +602,14 @@ impl EngineServer {
         };
 
         let secret_label = format!("supermgr/ssh/host/{host_id}/password");
+        let mut state = self.state.lock().await;
+        if !state.ssh_hosts.contains_key(&host_id) {
+            return Response::err(id, protocol::INVALID_PARAMS, format!("host not found: {host_id}"));
+        }
         if let Err(e) = self.secrets.store(&secret_label, password.as_bytes()).await {
             return Response::err(id, protocol::INTERNAL_ERROR, format!("store secret: {e}"));
         }
 
-        let mut state = self.state.lock().await;
         if let Some(host) = state.ssh_hosts.get_mut(&host_id) {
             host.auth_password_ref = Some(supermgr_core::vpn::profile::SecretRef(secret_label));
             host.updated_at = chrono::Utc::now();
@@ -1189,6 +1213,78 @@ impl EngineServer {
             .collect();
         match serde_json::to_value(&health) {
             Ok(v) => Response::ok(id, v),
+            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
+        }
+    }
+
+    /// Return all recorded SSH host-key and self-signed TLS pins as a JSON
+    /// object `{"host:port": "sha256hex"}`.
+    pub(crate) async fn handle_ssh_list_known_hosts(&self, id: u64) -> Response {
+        let known_hosts = {
+            let state = self.state.lock().await;
+            Arc::clone(&state.known_hosts)
+        };
+        let entries: HashMap<String, String> = known_hosts.entries().into_iter().collect();
+        match serde_json::to_value(&entries) {
+            Ok(v) => Response::ok(id, v),
+            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
+        }
+    }
+
+    /// Drop a recorded SSH host key (or `tls:<host>` certificate pin) so the
+    /// next connection re-enrolls on first sight.
+    pub(crate) async fn handle_ssh_forget_host_key(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
+        let raw_host = match params
+            .get("hostname")
+            .or_else(|| params.get("host"))
+            .and_then(|v| v.as_str())
+        {
+            Some(h) if !h.trim().is_empty() => h.trim(),
+            _ => return Response::err(id, protocol::INVALID_PARAMS, "missing hostname"),
+        };
+
+        let host_to_validate = raw_host.strip_prefix("tls:").unwrap_or(raw_host);
+        if let Err(e) = supermgr_core::sanitize::validate_host_or_ip(host_to_validate) {
+            return Response::err(id, protocol::INVALID_PARAMS, format!("invalid hostname: {e}"));
+        }
+
+        let port = match params
+            .get("port")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| u16::try_from(n).ok())
+            .filter(|&p| p > 0)
+        {
+            Some(p) => p,
+            None => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "port must be between 1 and 65535",
+                )
+            }
+        };
+
+        let normalized_key = if raw_host.starts_with("tls:") {
+            format!("tls:{}", crate::tls_pin::normalize_tls_pin_host(host_to_validate))
+        } else {
+            raw_host.to_owned()
+        };
+
+        let known_hosts = {
+            let state = self.state.lock().await;
+            Arc::clone(&state.known_hosts)
+        };
+        match known_hosts.forget(&normalized_key, port) {
+            Ok(removed) => {
+                if removed {
+                    tracing::info!("forgot pinned key for {normalized_key}:{port}");
+                }
+                Response::ok(id, serde_json::json!({ "removed": removed }))
+            }
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
         }
     }

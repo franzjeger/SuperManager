@@ -26,6 +26,7 @@ struct EditHostSheet: View {
     /// password field above has. Never pre-filled: the certificate lives
     /// in the keychain and the summary only carries a presence flag.
     @State private var certificate: String = ""
+    @State private var apiVerifyTls: Bool = true
     @State private var showingNewCustomer = false
     @State private var slugsBeforeAdd: Set<String> = []
     @FocusState private var firstFieldFocused: Bool
@@ -84,6 +85,13 @@ struct EditHostSheet: View {
                 if authMethod == .password {
                     SecureField("Password (leave empty to keep current)", text: $password)
                 }
+
+                Toggle("Verify HTTPS API certificate", isOn: $apiVerifyTls)
+                if !apiVerifyTls {
+                    Text("Self-signed appliance certificates are pinned on first connection (TOFU).")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
             .formStyle(.grouped)
 
@@ -105,7 +113,8 @@ struct EditHostSheet: View {
                             authMethod: authMethod,
                             authKeyId: authMethod.requiresKey ? selectedKeyId : nil,
                             password: authMethod == .password ? password : nil,
-                            certificate: authMethod == .certificate ? certificate : nil
+                            certificate: authMethod == .certificate ? certificate : nil,
+                            apiVerifyTls: apiVerifyTls
                         )
                         dismiss()
                     }
@@ -126,6 +135,7 @@ struct EditHostSheet: View {
             unrecognizedDeviceTypeRaw = host.unrecognizedDeviceTypeRawValue
             authMethod = host.authMethod
             selectedKeyId = host.authKeyId
+            apiVerifyTls = host.apiVerifyTls
         }
         .task {
             try? await Task.sleep(for: .milliseconds(100))
