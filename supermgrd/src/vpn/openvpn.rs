@@ -67,10 +67,12 @@ async fn iface_virtual_ip(iface: &str) -> String {
     if iface.is_empty() {
         return String::new();
     }
-    let Ok(out) = tokio::process::Command::new("ip")
-        .args(["addr", "show", "dev", iface])
-        .output()
-        .await
+    let Ok(out) = crate::subprocess::run_system_cmd(
+        &["ip"],
+        &["addr", "show", "dev", iface],
+        std::time::Duration::from_secs(5),
+    )
+    .await
     else {
         return String::new();
     };
@@ -93,10 +95,12 @@ async fn iface_routes(iface: &str) -> Vec<String> {
     if iface.is_empty() {
         return Vec::new();
     }
-    let Ok(out) = tokio::process::Command::new("ip")
-        .args(["route", "show", "dev", iface])
-        .output()
-        .await
+    let Ok(out) = crate::subprocess::run_system_cmd(
+        &["ip"],
+        &["route", "show", "dev", iface],
+        std::time::Duration::from_secs(5),
+    )
+    .await
     else {
         return Vec::new();
     };
@@ -110,18 +114,18 @@ async fn iface_routes(iface: &str) -> Vec<String> {
 
 /// Run an `openvpn3` subcommand and return (stdout, stderr, success).
 async fn run_openvpn3(args: &[&str]) -> Result<(String, String, bool), BackendError> {
-    let out_future = tokio::process::Command::new("openvpn3").args(args).output();
-
-    let out = tokio::time::timeout(std::time::Duration::from_secs(15), out_future)
-        .await
-        .map_err(|_| BackendError::Interface("openvpn3 command timed out after 15 seconds".into()))?
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                BackendError::Interface("openvpn3 not found — please install openvpn3".into())
-            } else {
-                BackendError::Io(e)
-            }
-        })?;
+    let out =
+        crate::subprocess::run_system_cmd(&["openvpn3"], args, std::time::Duration::from_secs(15))
+            .await
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::TimedOut => {
+                    BackendError::Interface("openvpn3 command timed out after 15 seconds".into())
+                }
+                std::io::ErrorKind::NotFound => {
+                    BackendError::Interface("openvpn3 not found — please install openvpn3".into())
+                }
+                _ => BackendError::Io(e),
+            })?;
     Ok((
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -213,9 +217,7 @@ impl VpnBackend for OpenVpnBackend {
         let prepared = prepare_ovpn_config(
             &base,
             profile.full_tunnel,
-            creds_pair
-                .as_ref()
-                .map(|(u, p)| (u.as_str(), p.as_str())),
+            creds_pair.as_ref().map(|(u, p)| (u.as_str(), p.as_str())),
         )?;
 
         let id_prefix = profile.id.simple().to_string();
@@ -649,7 +651,9 @@ fn prepare_ovpn_config(
                 "invalid OpenVPN credentials: username/password must not contain control characters or closing tags".into(),
             ));
         }
-        out.push_str(&format!("\n<auth-user-pass>\n{user}\n{pw}\n</auth-user-pass>\n"));
+        out.push_str(&format!(
+            "\n<auth-user-pass>\n{user}\n{pw}\n</auth-user-pass>\n"
+        ));
     }
 
     supermgr_core::vpn::openvpn_config::check(&out)
@@ -688,12 +692,9 @@ MIIB...
         )
         .is_err());
 
-        assert!(prepare_ovpn_config(
-            VALID_OVPN,
-            true,
-            Some(("alice", "pw</AUTH-USER-PASS>")),
-        )
-        .is_err());
+        assert!(
+            prepare_ovpn_config(VALID_OVPN, true, Some(("alice", "pw</AUTH-USER-PASS>")),).is_err()
+        );
     }
 
     #[test]

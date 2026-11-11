@@ -52,10 +52,30 @@ pub fn backend_for_profile(
     profile: &Profile,
     auth_tx: Option<tokio::sync::mpsc::UnboundedSender<(String, String)>>,
 ) -> Result<Arc<dyn VpnBackend>, CoreError> {
+    backend_for_profile_with_endpoints(profile, auth_tx, std::collections::HashMap::new())
+}
+
+/// Return the appropriate backend for a profile, supplying pre-resolved
+/// WireGuard peer endpoints so connect/reconnect never performs redundant DNS
+/// lookups while a kill switch is active (`P2-35`).
+///
+/// # Errors
+///
+/// Returns [`CoreError::Internal`] if no backend is registered for the
+/// profile's [`supermgr_core::vpn::profile::ProfileConfig`] variant.
+pub fn backend_for_profile_with_endpoints(
+    profile: &Profile,
+    auth_tx: Option<tokio::sync::mpsc::UnboundedSender<(String, String)>>,
+    wg_endpoints: std::collections::HashMap<String, std::net::SocketAddr>,
+) -> Result<Arc<dyn VpnBackend>, CoreError> {
     use supermgr_core::vpn::profile::ProfileConfig;
 
     match &profile.config {
-        ProfileConfig::WireGuard(_) => Ok(Arc::new(wireguard::WireGuardBackend::new())),
+        ProfileConfig::WireGuard(_) => Ok(Arc::new(if wg_endpoints.is_empty() {
+            wireguard::WireGuardBackend::new()
+        } else {
+            wireguard::WireGuardBackend::with_resolved_endpoints(wg_endpoints)
+        })),
         ProfileConfig::FortiGate(_) => Ok(Arc::new(fortigate::FortiGateBackend::new())),
         ProfileConfig::OpenVpn(_) => {
             Ok(Arc::new(openvpn::OpenVpnBackend::new()) as Arc<dyn VpnBackend>)

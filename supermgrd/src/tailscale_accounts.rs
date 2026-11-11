@@ -176,8 +176,16 @@ pub async fn start(expected: &str, uid: u32) -> Result<TailscaleLoginAttempt, St
         None,
     )
     .map_err(|e| format!("Cannot save previous account for recovery: {e}"))?;
-    let mut child = match tokio::process::Command::new("tailscale")
+    let tailscale_bin = match crate::subprocess::resolve_system_bin(&["tailscale"]) {
+        Ok(bin) => bin,
+        Err(e) => {
+            let _ = std::fs::remove_file(JOURNAL);
+            return Err(format!("Cannot start Tailscale sign-in: {e}"));
+        }
+    };
+    let mut child = match tokio::process::Command::new(&tailscale_bin)
         .args(["login", "--timeout=180s"])
+        .env("PATH", "/usr/sbin:/sbin:/usr/bin:/bin")
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

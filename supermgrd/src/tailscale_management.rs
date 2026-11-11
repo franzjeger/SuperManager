@@ -7,12 +7,9 @@ use supermgr_core::tailscale::{
 pub static CONTROL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub(crate) async fn cli(args: &[String]) -> Result<String, String> {
-    run_cli(
-        std::path::Path::new("tailscale"),
-        args,
-        Duration::from_secs(20),
-    )
-    .await
+    let bin = crate::subprocess::resolve_system_bin(&["tailscale"])
+        .map_err(|e| format!("Could not run Tailscale: {e}"))?;
+    run_cli(&bin, args, Duration::from_secs(20)).await
 }
 
 async fn run_cli(
@@ -25,12 +22,9 @@ async fn run_cli(
 }
 
 pub(crate) async fn mutate(args: &[String]) -> Result<String, String> {
-    let output = run_cli_output(
-        std::path::Path::new("tailscale"),
-        args,
-        Duration::from_secs(20),
-    )
-    .await?;
+    let bin = crate::subprocess::resolve_system_bin(&["tailscale"])
+        .map_err(|e| format!("Could not run Tailscale: {e}"))?;
+    let output = run_cli_output(&bin, args, Duration::from_secs(20)).await?;
     Ok(format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
@@ -45,17 +39,15 @@ pub(crate) async fn run_cli_output(
     args: &[String],
     timeout: Duration,
 ) -> Result<std::process::Output, String> {
-    let output = tokio::time::timeout(
-        timeout,
-        tokio::process::Command::new(binary)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .map_err(|_| "Tailscale command timed out".to_owned())?
-    .map_err(|e| format!("Could not run Tailscale: {e}"))?;
+    let output = crate::subprocess::run_exact_bin(binary, args, timeout)
+        .await
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::TimedOut {
+                "Tailscale command timed out".to_owned()
+            } else {
+                format!("Could not run Tailscale: {e}")
+            }
+        })?;
     if !output.status.success() {
         return Err(format!(
             "Tailscale command failed ({}): {}",

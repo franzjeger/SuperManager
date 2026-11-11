@@ -786,7 +786,19 @@ impl VpnBackend for AzureBackend {
         info!("Azure: temp files written to {}", tmp_dir.display());
 
         // ── Step 3: Launch openvpn ────────────────────────────────────────────
-        let mut child = tokio::process::Command::new("openvpn")
+        let openvpn_bin = crate::subprocess::resolve_system_bin(&["openvpn"]).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                BackendError::Interface(
+                    "openvpn not found — install the 'openvpn' package \
+                     (Azure VPN requires the classic openvpn binary, not openvpn3)"
+                        .into(),
+                )
+            } else {
+                BackendError::Io(e)
+            }
+        })?;
+        let mut child = tokio::process::Command::new(&openvpn_bin)
+            .env("PATH", "/usr/sbin:/sbin:/usr/bin:/bin")
             .arg("--config")
             .arg(&ovpn_path)
             .arg("--script-security")
@@ -795,8 +807,10 @@ impl VpnBackend for AzureBackend {
             // read-only; point openvpn at our already-writable run directory.
             .arg("--tmp-dir")
             .arg(&tmp_dir)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {

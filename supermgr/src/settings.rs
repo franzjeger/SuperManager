@@ -306,7 +306,10 @@ impl SecretStore for UnsupportedStore {
             "Linux Secret Service unavailable on this platform".into(),
         ))
     }
-    async fn retrieve(&self, label: &str) -> Result<supermgr_core::keyring::ZeroizingSecret, SecretError> {
+    async fn retrieve(
+        &self,
+        label: &str,
+    ) -> Result<supermgr_core::keyring::ZeroizingSecret, SecretError> {
         Err(SecretError::NotFound {
             label: label.to_owned(),
         })
@@ -455,9 +458,9 @@ impl AppSettings {
         let store = default_secret_store();
         let path_clone = path.clone();
         match run_secret_op(move || {
-            Box::pin(async move {
-                Self::try_load_from_with_store(&path_clone, store.as_ref()).await
-            })
+            Box::pin(
+                async move { Self::try_load_from_with_store(&path_clone, store.as_ref()).await },
+            )
         }) {
             Ok(s) => s,
             Err(e) => {
@@ -569,8 +572,7 @@ mod model_tests {
     #[test]
     fn legacy_settings_recover_retired_or_empty_models_without_losing_other_settings() {
         for model in ["", "  ", "claude-sonnet-4-20250514", " claude-sonnet-4-0 "] {
-            let saved =
-                serde_json::json!({"anthropic_model":model,"use_claude_subscription":true,"opacity":0.8});
+            let saved = serde_json::json!({"anthropic_model":model,"use_claude_subscription":true,"opacity":0.8});
             let settings: AppSettings = serde_json::from_value(saved).unwrap();
             assert_eq!(settings.anthropic_model, "claude-sonnet-5");
             assert!(settings.use_claude_subscription);

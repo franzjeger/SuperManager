@@ -3,15 +3,21 @@
 //! # Startup sequence
 //!
 //! 1. Initialise `tracing` subscriber (log to stdout / journald).
-//! 2. Select the profile directory based on effective UID (root -> system path,
-//!    non-root -> XDG user path for development).
-//! 3. Load VPN profiles from the selected directory (TOML files).
-//! 4. Load SSH keys and hosts from the SSH data directories.
-//! 5. Clean up any stale WireGuard interfaces left by a previous crash.
-//! 6. Acquire the D-Bus well-known name `org.supermgr.Daemon` on the **system** bus.
-//! 7. Register the `DaemonService` object at `/org/supermgr/Daemon`.
-//! 8. Spawn the background monitoring task.
-//! 9. Block on the `zbus` connection loop until SIGTERM / SIGINT.
+//! 2. Connect to the system D-Bus and acquire `org.supermgr.Daemon` exclusively
+//!    (`DoNotQueue`, without replacement) so duplicate instances exit immediately
+//!    before touching any network interfaces, routes, or nftables (`P2-33`).
+//! 3. Select the profile directory based on effective UID (root -> system path,
+//!    non-root -> XDG user path for development) and load profiles, customers,
+//!    SSH keys, and SSH hosts.
+//! 4. Restore any persisted active kill-switch rules BEFORE cleaning stale
+//!    interfaces or removing stale nftables tables (`P2-30`).
+//! 5. Clean up any stale WireGuard interfaces, policy routing rules (`P2-31`),
+//!    strongSwan SAs, and DNS dummy devices left by a previous crash.
+//! 6. Register the `DaemonService` object at `/org/supermgr/Daemon`.
+//! 7. Spawn background monitoring, auto-connect, sleep-resume (`P2-39`),
+//!    health-check, and backup scheduler tasks.
+//! 8. Block on the `zbus` connection loop until SIGTERM / SIGINT, preserving
+//!    active persisted kill-switch rules across daemon shutdown (`P2-30`).
 //!
 //! # Privilege requirements
 //!
@@ -36,6 +42,7 @@ mod secrets;
 mod secure_file;
 mod sophos;
 mod ssh;
+mod subprocess;
 mod tailscale;
 mod tailscale_accounts;
 mod tailscale_diagnostics;
@@ -122,7 +129,21 @@ async fn main() -> anyhow::Result<()> {
     info!(version = env!("CARGO_PKG_VERSION"), "supermgrd starting");
 
     // -----------------------------------------------------------------------
-    // 2. Profile store
+    // 2. Singleton D-Bus bus name acquisition FIRST (`P2-33`)
+    // -----------------------------------------------------------------------
+    // Acquire `org.supermgr.Daemon` on the system bus with queueing and
+    // replacement disabled BEFORE touching any network interfaces, routing
+    // rules, strongSwan SAs, or nftables tables.  If another `supermgrd`
+    // instance is already running (e.g. a duplicate `pkexec supermgrd`
+    // invocation), exit immediately without disrupting active tunnels.
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection failed")?;
+
+    acquire_singleton_bus_name(&conn).await?;
+
+    // -----------------------------------------------------------------------
+    // 3. Profile & SSH data stores
     // -----------------------------------------------------------------------
     // `SUPERMGRD_PROFILE_DIR` always wins; otherwise the directory is chosen
     // based on effective UID so the daemon works for both production (root,
@@ -151,7 +172,7 @@ async fn main() -> anyhow::Result<()> {
     info!("loaded {} customer(s)", daemon_state.customers.len());
 
     // -----------------------------------------------------------------------
-    // 2b. SSH data (keys and hosts)
+    // 3b. SSH data (keys and hosts)
     // -----------------------------------------------------------------------
     daemon_state
         .load_ssh_keys()
@@ -173,38 +194,33 @@ async fn main() -> anyhow::Result<()> {
     daemon::audit_orphaned_secrets(&daemon_state).await;
 
     // -----------------------------------------------------------------------
-    // 3. Stale interface cleanup + kill-switch teardown from any previous crash
+    // 4. Persisted kill-switch recovery BEFORE stale interface cleanup (`P2-30`)
+    // -----------------------------------------------------------------------
+    // Re-apply persisted active kill-switch rules atomically before tearing
+    // down stale interfaces or removing any orphan nftables table so crash
+    // recovery never opens an unencrypted traffic window.
+    daemon::restore_or_cleanup_kill_switch(&mut daemon_state).await;
+
+    // -----------------------------------------------------------------------
+    // 5. Stale interface, policy routing, and SA cleanup from previous crash
     // -----------------------------------------------------------------------
     cleanup_stale_interfaces().await;
     cleanup_stale_strongswan().await;
     // Remove any leftover FortiGate DNS dummy from a previous crash so
     // systemd-resolved doesn't keep stale state pinned to a dead link.
     crate::vpn::fortigate::remove_dns_dummy().await;
-    // If a previous daemon run was killed without a clean disconnect the
-    // nftables supermgr_killswitch table will still be active in the kernel,
-    // blocking all non-VPN traffic.  Remove it unconditionally on startup
-    // (the call is a no-op if the table does not exist).
-    daemon::remove_kill_switch().await;
+
+    if let Err(error) = tailscale_accounts::recover().await {
+        tracing::warn!("Tailscale account recovery: {error}");
+    }
 
     let state = Arc::new(Mutex::new(daemon_state));
 
     // -----------------------------------------------------------------------
-    // 4. D-Bus connection — always the system bus
-    // -----------------------------------------------------------------------
-    // The daemon runs as root and must use the system bus.  Root has no session
-    // bus; using the session bus here would cause the GUI (running as a normal
-    // user on the system bus) to be unable to reach the daemon.
-    let conn = zbus::Connection::system()
-        .await
-        .context("D-Bus system connection failed")?;
-
-    // -----------------------------------------------------------------------
-    // 5. Recover an interrupted account login, then register D-Bus service.
+    // 6. Register D-Bus object on the already-owned bus connection
     // -----------------------------------------------------------------------
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    if let Err(error) = tailscale_accounts::recover().await {
-        tracing::warn!("Tailscale account recovery: {error}");
-    }
+    let sleep_shutdown_rx = shutdown_tx.subscribe();
 
     let service = DaemonService {
         state: Arc::clone(&state),
@@ -218,17 +234,13 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("failed to register D-Bus object")?;
 
-    conn.request_name(DBUS_SERVICE)
-        .await
-        .context(format!("failed to acquire D-Bus name '{DBUS_SERVICE}'"))?;
-
     info!(
         "D-Bus service '{}' registered at '{}'",
         DBUS_SERVICE, DBUS_OBJECT_PATH
     );
 
     // -----------------------------------------------------------------------
-    // 6. Background monitoring task
+    // 7. Background tasks
     // -----------------------------------------------------------------------
     daemon::spawn_monitor_task(
         Arc::clone(&state),
@@ -237,34 +249,27 @@ async fn main() -> anyhow::Result<()> {
         STATS_POLL_INTERVAL,
     );
 
-    // -----------------------------------------------------------------------
-    // 6b. Auto-reconnect task (watches NetworkManager for network-up events)
-    // -----------------------------------------------------------------------
+    // 7b. Auto-reconnect task (queries initial NM state + watches StateChanged, `P2-32`)
     daemon::spawn_autoconnect_task(Arc::clone(&state), conn.clone());
 
-    // -----------------------------------------------------------------------
-    // 6c. SSH host health-check task (TCP-probes hosts every 60 s)
-    // -----------------------------------------------------------------------
+    // 7c. Suspend/resume recovery task (`org.freedesktop.login1.Manager.PrepareForSleep`, `P2-39`)
+    daemon::spawn_sleep_monitor_task(Arc::clone(&state), conn.clone(), sleep_shutdown_rx);
+
+    // 7d. SSH host health-check task (TCP-probes hosts every 60 s)
     daemon::spawn_health_check_task(Arc::clone(&state), conn.clone());
 
-    // -----------------------------------------------------------------------
-    // 6d. Scheduled FortiGate config backup task (daily)
-    // -----------------------------------------------------------------------
+    // 7e. Scheduled FortiGate config backup task (daily)
     daemon::spawn_backup_scheduler(Arc::clone(&state), conn.clone());
 
     // -----------------------------------------------------------------------
-    // 7. Run until SIGTERM / SIGINT
+    // 8. Run until SIGTERM / SIGINT
     // -----------------------------------------------------------------------
     wait_for_signal().await;
     info!("supermgrd shutting down");
 
     // -----------------------------------------------------------------------
-    // 8. Shutdown cleanup — disconnect active backend and remove kill switch
+    // 9. Shutdown cleanup — disconnect active backend & preserve persisted kill switch (`P2-30`)
     // -----------------------------------------------------------------------
-    // This ensures that if the daemon is stopped via SIGTERM (e.g. by systemd
-    // on reboot/restart) the kill-switch nftables table is removed and the VPN
-    // tunnel is torn down gracefully, rather than leaving the system with all
-    // traffic blocked and an orphaned tunnel.
     {
         let backend = {
             let mut s = state.lock().await;
@@ -279,51 +284,50 @@ async fn main() -> anyhow::Result<()> {
             if let Err(e) = b.disconnect().await {
                 warn!("supermgrd shutdown: disconnect error: {e}");
             }
-            daemon::remove_kill_switch().await;
-        } else {
-            // No active backend — still remove any stale kill-switch table in
-            // case it was left over from a previous abnormal exit.
-            daemon::remove_kill_switch().await;
         }
+        daemon::shutdown_kill_switch(&state).await;
     }
 
     Ok(())
 }
 
-/// Scan `/sys/class/net/` for stale WireGuard interfaces left by a previous
-/// crash and remove them.
-///
-/// Our interfaces follow the pattern `wg[0-9a-f]{8}` — exactly 10 characters,
-/// the prefix `wg` followed by the first 8 hex digits of a profile UUID
-/// (e.g. `wg7e59fe75`).
-///
-/// For each matching interface:
-/// 1. `resolvectl revert <iface>` — remove any per-link DNS state from
-///    systemd-resolved before the interface disappears.
-/// 2. `ip link delete <iface>` — tear down the WireGuard interface; the kernel
-///    automatically removes all routes whose `dev` is that interface.
-/// 3. Check whether a default IPv4 route still exists; if not, log a warning
-///    that manual route restoration may be needed (we cannot know the original
-///    gateway after a crash).
-///
-/// All errors are logged but do not abort startup.
+/// Acquire `org.supermgr.Daemon` on the system bus with queueing and owner
+/// replacement disabled (`P2-33`).
+async fn acquire_singleton_bus_name(conn: &zbus::Connection) -> anyhow::Result<()> {
+    let reply = conn
+        .request_name_with_flags(
+            DBUS_SERVICE,
+            zbus::fdo::RequestNameFlags::DoNotQueue.into(),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to acquire D-Bus name '{DBUS_SERVICE}' — another supermgrd instance may already be running"
+            )
+        })?;
+
+    match reply {
+        zbus::fdo::RequestNameReply::PrimaryOwner
+        | zbus::fdo::RequestNameReply::AlreadyOwner => Ok(()),
+        other => anyhow::bail!(
+            "another supermgrd instance already owns '{DBUS_SERVICE}' ({other:?}); exiting without touching network state"
+        ),
+    }
+}
+
+/// Terminate any stale strongSwan IKE SAs (`supermgr-*`) left by a previous crash.
 async fn cleanup_stale_strongswan() {
-    // Terminate any strongSwan IKE SAs left by a previous daemon instance.
-    // Our connections use the naming convention `supermgr-<hex>`.
-    let out = tokio::process::Command::new("swanctl")
-        .args(["--list-sas", "--raw"])
-        .output()
-        .await;
+    let cmd_timeout = Duration::from_secs(10);
+    let out =
+        crate::subprocess::run_system_cmd(&["swanctl"], &["--list-sas", "--raw"], cmd_timeout)
+            .await;
 
     let stdout = match out {
         Ok(ref o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
         Ok(ref o) => {
-            // swanctl may not be installed — that's fine.
+            // swanctl may not be installed or charon may be stopped — that's fine.
             let stderr = String::from_utf8_lossy(&o.stderr);
             if crate::vpn::fortigate::charon_unreachable(&stderr) {
-                // An installed but stopped strongSwan is normal when the user
-                // does not use IPsec. There cannot be stale SAs to clean up,
-                // so keep the expected condition out of the warning log.
                 debug!("startup cleanup: strongSwan/charon is not running");
             } else if !stderr.contains("command not found") {
                 let message = crate::vpn::fortigate::strip_usage_block(&stderr);
@@ -332,7 +336,6 @@ async fn cleanup_stale_strongswan() {
             return;
         }
         Err(e) => {
-            // swanctl binary not found — no strongSwan SAs to clean.
             if e.kind() != std::io::ErrorKind::NotFound {
                 warn!("swanctl --list-sas: {e}");
             }
@@ -340,7 +343,6 @@ async fn cleanup_stale_strongswan() {
         }
     };
 
-    // Find our connection names (supermgr-*) and terminate them.
     for line in stdout.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("supermgr-") && trimmed.contains(':') {
@@ -349,10 +351,12 @@ async fn cleanup_stale_strongswan() {
                 continue;
             }
             info!("terminating stale strongSwan SA: {name}");
-            let term = tokio::process::Command::new("swanctl")
-                .args(["--terminate", "--ike", name])
-                .output()
-                .await;
+            let term = crate::subprocess::run_system_cmd(
+                &["swanctl"],
+                &["--terminate", "--ike", name],
+                cmd_timeout,
+            )
+            .await;
             match term {
                 Ok(o) if o.status.success() => {
                     info!("terminated stale SA: {name}");
@@ -367,16 +371,21 @@ async fn cleanup_stale_strongswan() {
     }
 }
 
+/// Scan `/sys/class/net/` for stale WireGuard interfaces (`wg[0-9a-f]{8}`) left
+/// by a previous crash, remove them, and clean up policy-routing rules (`P2-31`).
 async fn cleanup_stale_interfaces() {
+    let cmd_timeout = Duration::from_secs(10);
     let stale = match find_stale_interfaces() {
         Ok(v) => v,
         Err(e) => {
             error!("stale interface scan failed: {e}");
+            crate::vpn::wireguard::cleanup_policy_rules(true, true).await;
             return;
         }
     };
 
     if stale.is_empty() {
+        crate::vpn::wireguard::cleanup_policy_rules(true, true).await;
         return;
     }
 
@@ -388,10 +397,9 @@ async fn cleanup_stale_interfaces() {
 
     for iface in &stale {
         // ---- Step 1: revert systemd-resolved DNS state ---------------------
-        let revert_out = tokio::process::Command::new("resolvectl")
-            .args(["revert", iface])
-            .output()
-            .await;
+        let revert_out =
+            crate::subprocess::run_system_cmd(&["resolvectl"], &["revert", iface], cmd_timeout)
+                .await;
 
         match revert_out {
             Ok(out) if out.status.success() => {
@@ -405,14 +413,13 @@ async fn cleanup_stale_interfaces() {
                     stderr.trim()
                 );
             }
-            Err(e) => warn!("resolvectl revert {iface}: spawn failed: {e} (continuing)"),
+            Err(e) => warn!("resolvectl revert {iface}: failed: {e} (continuing)"),
         }
 
         // ---- Step 2: delete the interface ----------------------------------
-        let del_out = tokio::process::Command::new("ip")
-            .args(["link", "delete", iface])
-            .output()
-            .await;
+        let del_out =
+            crate::subprocess::run_system_cmd(&["ip"], &["link", "delete", iface], cmd_timeout)
+                .await;
 
         match del_out {
             Ok(out) if out.status.success() => {
@@ -426,9 +433,12 @@ async fn cleanup_stale_interfaces() {
                     stderr.trim()
                 );
             }
-            Err(e) => error!("ip link delete {iface}: spawn failed: {e}"),
+            Err(e) => error!("ip link delete {iface}: failed: {e}"),
         }
     }
+
+    // ---- Step 2b: clean up any leftover WireGuard policy-routing rules -----
+    crate::vpn::wireguard::cleanup_policy_rules(true, true).await;
 
     // ---- Step 3: check whether a default IPv4 route survived ---------------
     check_default_route_after_cleanup().await;
@@ -464,15 +474,14 @@ fn is_our_wg_interface(name: &str) -> bool {
 }
 
 /// After deleting stale interfaces, verify that an IPv4 default route still
-/// exists.  If the machine was left without one (because supermgrd crashed while
-/// a full-tunnel connection was active and had displaced the original default),
-/// log a prominent warning — we cannot reconstruct the original gateway, so
-/// the operator must restore routing manually or reboot / re-run DHCP.
+/// exists in the main table.
 async fn check_default_route_after_cleanup() {
-    let out = tokio::process::Command::new("ip")
-        .args(["route", "show", "exact", "0.0.0.0/0"])
-        .output()
-        .await;
+    let out = crate::subprocess::run_system_cmd(
+        &["ip"],
+        &["route", "show", "exact", "0.0.0.0/0"],
+        Duration::from_secs(5),
+    )
+    .await;
 
     match out {
         Ok(out) => {
@@ -480,9 +489,6 @@ async fn check_default_route_after_cleanup() {
             if stdout.trim().is_empty() {
                 warn!(
                     "no default IPv4 route found after stale interface cleanup — \
-                     the previous daemon may have crashed while a full-tunnel \
-                     connection was active and the original default route was \
-                     not restored. Manual intervention may be required: \
                      check `ip route` and restore the gateway, or run \
                      `systemctl restart systemd-networkd` to re-acquire \
                      the route via DHCP."
@@ -631,5 +637,61 @@ async fn wait_for_signal() {
     tokio::select! {
         _ = sigterm.recv() => info!("received SIGTERM"),
         _ = sigint.recv()  => info!("received SIGINT"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wg_interface_name_matcher_is_strict() {
+        assert!(is_our_wg_interface("wg7e59fe75"));
+        assert!(is_our_wg_interface("wg00000000"));
+        assert!(!is_our_wg_interface("wg0"));
+        assert!(!is_our_wg_interface("wg7E59FE75"));
+        assert!(!is_our_wg_interface("wg7e59fe750"));
+        assert!(!is_our_wg_interface("eth0"));
+    }
+
+    #[test]
+    fn startup_acquires_dbus_name_before_kill_switch_and_interface_cleanup() {
+        let src = include_str!("main.rs");
+        let fn_main = src
+            .split("async fn main()")
+            .nth(1)
+            .and_then(|rest| rest.split("\nasync fn acquire_singleton_bus_name").next())
+            .expect("main() body");
+
+        let acquire_pos = fn_main
+            .find("acquire_singleton_bus_name(&conn).await?")
+            .expect("singleton D-Bus name acquisition in main()");
+        let ks_restore_pos = fn_main
+            .find("daemon::restore_or_cleanup_kill_switch(&mut daemon_state).await")
+            .expect("persisted kill-switch recovery in main()");
+        let stale_cleanup_pos = fn_main
+            .find("cleanup_stale_interfaces().await")
+            .expect("stale interface cleanup in main()");
+        let sleep_monitor_pos = fn_main
+            .find("daemon::spawn_sleep_monitor_task(")
+            .expect("PrepareForSleep monitor spawn in main()");
+        let shutdown_ks_pos = fn_main
+            .find("daemon::shutdown_kill_switch(&state).await")
+            .expect("shutdown kill-switch preservation in main()");
+
+        assert!(
+            acquire_pos < ks_restore_pos,
+            "D-Bus singleton name MUST be acquired before touching kill-switch state"
+        );
+        assert!(
+            ks_restore_pos < stale_cleanup_pos,
+            "persisted kill-switch MUST be restored before tearing down stale interfaces"
+        );
+        assert!(stale_cleanup_pos < sleep_monitor_pos);
+        assert!(sleep_monitor_pos < shutdown_ks_pos);
+        assert!(
+            !fn_main.contains("daemon::remove_kill_switch()"),
+            "main() must not unconditionally wipe active persisted kill-switch rules"
+        );
     }
 }

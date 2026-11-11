@@ -1,52 +1,36 @@
-//! SSH audit log — append-only plaintext log of push/revoke/connect operations.
-//!
-//! The log file location depends on whether the daemon is running as root:
-//! - Root: `/etc/supermgrd/ssh-audit.log`
-//! - User: `$XDG_DATA_HOME/supermgrd/ssh-audit.log` (or `~/.local/share/…`)
+//! SSH audit façade routing all key push/revoke events and log queries through
+//! the daemon's single authoritative [`crate::audit`] log.
 
-use std::path::PathBuf;
+use std::io;
 
-use supermgr_core::ssh::audit::AuditEntry;
+use supermgr_core::ssh::audit::{AuditAction, AuditEntry};
 
-/// Determine the path to the SSH audit log file.
-fn audit_log_path() -> Option<PathBuf> {
-    supermgr_core::paths::try_default_data_dir()
-        .ok()
-        .map(|dir| dir.join("ssh-audit.log"))
+use crate::audit::AuditCaller;
+
+/// Record an SSH key push/revoke [`AuditEntry`] in the unified daemon audit log.
+///
+/// # Errors
+///
+/// Propagates any underlying [`crate::audit::record_event`] I/O error (already
+/// logged at `ERROR` level).
+pub fn append_audit(caller: &AuditCaller, entry: &AuditEntry) -> io::Result<()> {
+    let action = match entry.action {
+        AuditAction::Push => "SSH_KEY_PUSH",
+        AuditAction::Revoke => "SSH_KEY_REVOKE",
+    };
+    let target = format!(
+        "key={} ({}) -> {} ({}:{})",
+        entry.key_name, entry.key_fingerprint, entry.host_label, entry.hostname, entry.port
+    );
+    let outcome = if entry.success { "ok" } else { "failed" };
+    crate::audit::record_event(caller, action, &target, outcome)
 }
 
-/// Append an audit entry to the log file.
+/// Read the last `max_lines` entries from the unified daemon audit log.
 ///
-/// Creates the parent directory if it does not exist. Errors are silently
-/// ignored — audit logging should never cause an operation to fail.
-pub fn append_audit(entry: &AuditEntry) {
-    use std::io::Write;
-
-    let Some(path) = audit_log_path() else {
-        return;
-    };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        let _ = writeln!(f, "{entry}");
-    }
-}
-
-/// Read the last `max_lines` entries from the audit log.
+/// # Errors
 ///
-/// Returns an empty vector if the log file does not exist or cannot be read.
-pub fn read_audit(max_lines: usize) -> Vec<String> {
-    let path = audit_log_path();
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(_) => return Vec::new(),
-    };
-    let lines: Vec<&str> = text.lines().collect();
-    let start = lines.len().saturating_sub(max_lines);
-    lines[start..].iter().map(|s| (*s).to_owned()).collect()
+/// Propagates any [`crate::audit::read_events`] read error.
+pub fn read_audit(max_lines: usize) -> io::Result<Vec<String>> {
+    crate::audit::read_events(max_lines)
 }
