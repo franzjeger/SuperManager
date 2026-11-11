@@ -36,6 +36,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RECORD_CHECKOUT="$REPO_ROOT"
 
 ASSUME_YES=0
 DO_DEPS=1
@@ -50,6 +51,11 @@ while [ $# -gt 0 ]; do
         --no-build)   DO_BUILD=0 ;;
         --print-deps) PRINT_DEPS=1 ;;
         --uninstall)  DO_UNINSTALL=1 ;;
+        --record-checkout)
+            [ $# -ge 2 ] || { echo "--record-checkout requires an absolute path" >&2; exit 2; }
+            RECORD_CHECKOUT="$2"
+            shift
+            ;;
         -h|--help)    sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)            echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
     esac
@@ -132,6 +138,7 @@ FILES=(
     "contrib/icons/hicolor/256.png|/usr/share/icons/hicolor/256x256/apps/org.supermgr.SuperManager.png|644"
     "contrib/man/supermgr.1|/usr/share/man/man1/supermgr.1|644"
     "contrib/man/supermgrd.8|/usr/share/man/man8/supermgrd.8|644"
+    "contrib/release-signers|/etc/supermgr/release-signers|644"
     "scripts/update-linux.sh|/usr/bin/supermgr-update|755"
 )
 
@@ -439,7 +446,7 @@ note "all required VPN, discovery, capture, and report tools present"
 
 if [ "$DO_BUILD" = 1 ]; then
     say "Building (this takes a few minutes the first time)"
-    cargo build --release -p supermgrd -p supermgr -p supermgr-mcp
+    cargo build --release --locked -p supermgrd -p supermgr -p supermgr-mcp
 fi
 
 for entry in "${FILES[@]}"; do
@@ -515,8 +522,15 @@ sudo install -dm750 /etc/supermgrd
 # way back without guessing. Kept apart from /etc/supermgrd on purpose:
 # that directory is the daemon's state and survives an uninstall, this one
 # is ours and does not.
+case "$RECORD_CHECKOUT" in
+    /*) ;;
+    *)  die "--record-checkout must be an absolute path: $RECORD_CHECKOUT" ;;
+esac
+case "$RECORD_CHECKOUT" in
+    *$'\n'*|*$'\r'*) die "--record-checkout must not contain newlines" ;;
+esac
 sudo install -dm755 /etc/supermgr
-printf '%s\n' "$REPO_ROOT" | sudo tee /etc/supermgr/checkout-path >/dev/null
+printf '%s\n' "$RECORD_CHECKOUT" | sudo tee /etc/supermgr/checkout-path >/dev/null
 
 if command -v update-desktop-database >/dev/null; then
     sudo update-desktop-database /usr/share/applications 2>/dev/null || true
