@@ -7857,7 +7857,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "which",
  "windows-service",
  "windows-sys 0.61.2",
  "winres",
@@ -9166,15 +9165,6 @@ dependencies = [
  "naga-types",
  "raw-window-handle",
  "static_assertions",
-]
-
-[[package]]
-name = "which"
-version = "8.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bae2f2b2b816647a1cab1acc91f5bd20812d53cb344382635ec2181940c8034f"
-dependencies = [
- "libc",
 ]
 
 [[package]]

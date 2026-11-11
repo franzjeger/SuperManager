@@ -96,58 +96,29 @@ impl WireGuardBackend {
         self.active.lock().await.is_some()
     }
 
-    /// Load `wireguard.dll`. Surfaces a typed [`VpnError::MissingDependency`]
-    /// when the driver isn't installed so the GUI can prompt the user.
+    /// Load `wireguard.dll` strictly from a signed `%ProgramFiles%` location.
+    /// Surfaces a typed [`VpnError::MissingDependency`] when the driver isn't
+    /// installed so the GUI can prompt the user.
     fn ensure_lib() -> Result<wireguard_nt::Wireguard, VpnError> {
         if let Some(lib) = WG_LIB.get() {
             return Ok(lib.clone());
         }
-        // Probe the DLL in order of preference:
-        //  1. Same directory as the daemon binary
-        //  2. WIREGUARD_DLL env var override (developer/testing)
-        //  3. System PATH — a full WireGuard-for-Windows install
-        //
-        // Today only (3) finds anything on a normal machine: nothing ships
-        // `wireguard.dll` beside the daemon yet. (1) is here because the
-        // installer is meant to grow that — bundling WireGuardNT rather than
-        // requiring the full WireGuard-for-Windows MSI — and the probe order
-        // is what makes landing it a pure installer change with no daemon
-        // edit. Until then this costs one `exists()` call and falls through.
-        //
-        // `unsafe` is unavoidable: dynamic library loading can never be
-        // safe in the Rust sense. What limits the risk is *where* we load
-        // from — our own install directory, or a path the operator set
-        // deliberately — never a working directory or a search path an
-        // unprivileged process can seed.
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let dll_path = super::trust::resolve_trusted_program_files_binary(
+            Some("wireguard.dll"),
+            &[
+                r"SuperManager\bin\wireguard.dll",
+                r"WireGuard\wireguard.dll",
+            ],
+            "wireguard.dll not found in %ProgramFiles%\\SuperManager\\bin or %ProgramFiles%\\WireGuard. \
+             Re-run the SuperManager installer to restore it.",
+        )?;
 
-        let loaded: wireguard_nt::Wireguard = (|| {
-            // 1. Bundled in the SuperManager bin\ directory.
-            if let Some(ref dir) = exe_dir {
-                let bundled = dir.join("wireguard.dll");
-                if bundled.exists() {
-                    // SAFETY: path points to our own install directory.
-                    if let Ok(lib) = unsafe { wireguard_nt::load_from_path(&bundled) } {
-                        return Ok(lib);
-                    }
-                }
-            }
-            // 2. Env var override.
-            if let Ok(path) = std::env::var("WIREGUARD_DLL") {
-                if let Ok(lib) = unsafe { wireguard_nt::load_from_path(path.as_str()) } {
-                    return Ok(lib);
-                }
-            }
-            // 3. Fallback to PATH / default search.
-            unsafe { wireguard_nt::load() }
-        })()
-        .map_err(|e| {
+        // SAFETY: `dll_path` has been canonicalised under `%ProgramFiles%` and
+        // its Authenticode signature verified via `WinVerifyTrust`.
+        let loaded = unsafe { wireguard_nt::load_from_path(&dll_path) }.map_err(|e| {
             VpnError::MissingDependency(format!(
-                "wireguard.dll not found ({e}). \
-             It should be bundled at %ProgramFiles%\\SuperManager\\bin\\wireguard.dll. \
-             Re-run the SuperManager installer to restore it."
+                "failed to load signed {} ({e}). Re-run the SuperManager installer to restore it.",
+                dll_path.display()
             ))
         })?;
 

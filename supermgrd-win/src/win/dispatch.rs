@@ -30,6 +30,7 @@ use supermgr_core::protocol::{PipeRequest, PipeResponse, RpcError, PROTOCOL_VERS
 use supermgr_core::secret_lifecycle::SecretOwner;
 
 use super::daemon::DaemonState;
+use super::pipe_acl::CallerAuth;
 use super::{appliance, known_hosts, ssh_exec};
 use crate::rpc_args::{
     arg_id, build_ssh_key_record, canonical_ssh_key_type, host_api_token_label,
@@ -58,7 +59,29 @@ async fn clear_owned_secrets<T: SecretOwner>(state: &Arc<DaemonState>, owner: &T
 
 /// Route a single request to the appropriate handler and produce the
 /// matching response envelope.
-pub async fn dispatch(state: &Arc<DaemonState>, req: &PipeRequest) -> PipeResponse {
+pub async fn dispatch(
+    state: &Arc<DaemonState>,
+    req: &PipeRequest,
+    caller: &CallerAuth,
+) -> PipeResponse {
+    let unprivileged_allowed = matches!(req.method.as_str(), "get_status" | "vpn_capabilities");
+    if !caller.is_admin_or_operator && !unprivileged_allowed {
+        warn!(
+            method = %req.method,
+            caller_sid = %caller.user_sid,
+            "denied privileged named-pipe RPC from non-operator user"
+        );
+        return PipeResponse {
+            v: PROTOCOL_VERSION,
+            id: req.id,
+            result: None,
+            error: Some(RpcError::PermissionDenied(format!(
+                "method '{}' requires Administrator or 'SuperManager Operators' group membership (caller {})",
+                req.method, caller.user_sid
+            ))),
+        };
+    }
+
     let result: Result<Value, RpcError> = match req.method.as_str() {
         // ----- VPN profile lifecycle -----
         "list_profiles" => handle_list_profiles(state).await,
