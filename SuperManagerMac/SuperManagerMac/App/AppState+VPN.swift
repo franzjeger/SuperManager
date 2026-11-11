@@ -459,9 +459,10 @@ extension AppState {
         }
     }
 
-    /// Refresh the helper's auto-reconnect watch list. Drives
-    /// the "Always on" toggle's UI state. Helper-unreachable
-    /// leaves the local set untouched.
+    /// Refresh the helper's auto-reconnect watch list, and re-arm any
+    /// Always-on profiles whose credentials were cleared across a helper
+    /// restart (credentials live in `VPNKeychain`, never in
+    /// `/var/lib/supermanager/auto_reconnect.json`).
     func refreshAutoReconnect() async {
         do {
             let r = try await HelperClient.shared.autoReconnectList()
@@ -469,13 +470,131 @@ extension AppState {
             autoReconnectUnarmed = Set(r.unarmed)
         } catch {
             // Silent; not critical for steady-state.
+            return
+        }
+
+        guard !LockState.shared.isLocked, !autoReconnectUnarmed.isEmpty else { return }
+        let candidates = autoReconnectUnarmed.subtracting(autoReconnectRearmFailed)
+        guard !candidates.isEmpty else { return }
+
+        var rearmedAny = false
+        for profileId in candidates {
+            guard let summary = vpnProfiles.first(where: { $0.id == profileId }) else {
+                continue
+            }
+            do {
+                let (backend, args) = try await buildAutoReconnectArgs(for: summary)
+                _ = try await HelperClient.shared.autoReconnectEnable(
+                    profileId: profileId,
+                    backend: backend,
+                    connectArgs: args
+                )
+                rearmedAny = true
+            } catch {
+                autoReconnectRearmFailed.insert(profileId)
+                DebugLog.write("[auto-reconnect] could not re-arm \(profileId): \(error.localizedDescription)")
+            }
+        }
+        if rearmedAny, let updated = try? await HelperClient.shared.autoReconnectList() {
+            autoReconnectEnabled = Set(updated.watched)
+            autoReconnectUnarmed = Set(updated.unarmed)
+        }
+    }
+
+    /// Construct validated connect arguments for an Always-on profile from the
+    /// daemon's profile store and the user's Data Protection Keychain.
+    private func buildAutoReconnectArgs(
+        for summary: VpnProfileSummary
+    ) async throws -> (backend: String, args: [String: Any]) {
+        let profileId = summary.id
+        let backendLower = summary.backend.lowercased()
+        if backendLower.contains("wireguard") || backendLower.contains("wire_guard") {
+            await installVPNRuntime()
+            struct Rendered: Decodable {
+                let conf: String
+                let dnsServers: [String]
+                enum CodingKeys: String, CodingKey {
+                    case conf
+                    case dnsServers = "dns_servers"
+                }
+            }
+            let r: Rendered = try await client.call(
+                "vpn_render_wireguard_conf",
+                params: ["profile_id": profileId]
+            )
+            let args = HelperClient.wgConnectArgs(
+                profileId: profileId,
+                confContent: r.conf,
+                dnsServers: r.dnsServers,
+                native: AppSettings.shared.wireguardNativeSetup
+            )
+            return ("wireguard", args)
+        } else if backendLower.contains("openvpn") || backendLower.contains("open_vpn") {
+            try await HelperClient.shared.installBundledVPNRuntime()
+            let profile: VpnProfile = try await client.call(
+                "vpn_get_profile", params: ["id": profileId])
+            guard case .openvpn(let cfg) = profile.config else {
+                throw NSError(
+                    domain: "SuperManager.AutoReconnect",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Profile \(summary.name) is not an OpenVPN profile"]
+                )
+            }
+            var args: [String: Any] = [
+                "profile_id": profileId,
+                "config": try String(contentsOfFile: cfg.configFile, encoding: .utf8),
+            ]
+            if let u = try? VPNKeychain.getString(account: "vpn/\(profileId)/ovpn-username") {
+                args["username"] = u
+            }
+            if let p = try? VPNKeychain.getString(account: "vpn/\(profileId)/ovpn-password") {
+                args["password"] = p
+            }
+            return ("openvpn", args)
+        } else if backendLower.contains("fortigate")
+            || backendLower.contains("forti_gate")
+            || backendLower.contains("ikev2")
+            || backendLower.contains("ipsec")
+        {
+            try await HelperClient.shared.installBundledVPNRuntime()
+            let profile: VpnProfile = try await client.call(
+                "vpn_get_profile", params: ["id": profileId])
+            guard case .ikev2(let cfg) = profile.config else {
+                throw NSError(
+                    domain: "SuperManager.AutoReconnect",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Profile \(summary.name) has no IKEv2 configuration"]
+                )
+            }
+            let credentials = try VPNKeychain.ikev2Credentials(
+                passwordAccount: cfg.password,
+                pskAccount: cfg.psk
+            )
+            let args: [String: Any] = [
+                "profile_id": profile.id,
+                "name": profile.name,
+                "host": cfg.host,
+                "username": cfg.username,
+                "password": credentials.password,
+                "shared_secret": credentials.sharedSecret,
+                "full_tunnel": profile.fullTunnel,
+                "routes": cfg.routes,
+                "dns_servers": cfg.dnsServers,
+                "local_id": cfg.localId,
+            ]
+            return ("ikev2", args)
+        } else {
+            throw NSError(
+                domain: "SuperManager.AutoReconnect",
+                code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "Unknown backend for always-on: \(summary.backend)"]
+            )
         }
     }
 
     /// Toggle always-on for a profile. Captures the connect args
-    /// from the profile's current config so the helper can replay
-    /// them. Returns false if we couldn't construct args (e.g.
-    /// missing daemon-side render).
+    /// from the profile's current config + Keychain so the helper holds
+    /// them in RAM.
     @discardableResult
     func setAutoReconnect(profileId: String, enabled: Bool) async -> Bool {
         guard let summary = vpnProfiles.first(where: { $0.id == profileId }) else {
@@ -485,68 +604,18 @@ extension AppState {
             do {
                 _ = try await HelperClient.shared.autoReconnectDisable(profileId: profileId)
                 autoReconnectEnabled.remove(profileId)
+                autoReconnectUnarmed.remove(profileId)
+                autoReconnectRearmFailed.remove(profileId)
                 return true
             } catch {
                 handleError(error)
                 return false
             }
         }
-        // Build connect args matching the backend's RPC schema.
-        // For WireGuard we need the rendered .conf; daemon owns
-        // it via vpn_render_wireguard_conf.
-        let backendLower = summary.backend.lowercased()
-        var args: [String: Any] = ["profile_id": profileId]
         let backendStr: String
+        let args: [String: Any]
         do {
-            if backendLower.contains("wireguard") || backendLower.contains("wire_guard") {
-                backendStr = "wireguard"
-                // The helper reconnects with the runtime installed now.
-                await installVPNRuntime()
-                struct Rendered: Decodable {
-                    let conf: String
-                    let dnsServers: [String]
-                    enum CodingKeys: String, CodingKey {
-                        case conf
-                        case dnsServers = "dns_servers"
-                    }
-                }
-                let r: Rendered = try await client.call(
-                    "vpn_render_wireguard_conf",
-                    params: ["profile_id": profileId]
-                )
-                args = HelperClient.wgConnectArgs(
-                    profileId: profileId, confContent: r.conf, dnsServers: r.dnsServers,
-                    native: AppSettings.shared.wireguardNativeSetup)
-            } else if backendLower.contains("openvpn") || backendLower.contains("open_vpn") {
-                backendStr = "openvpn"
-                try await HelperClient.shared.installBundledVPNRuntime()
-                // The same arguments a manual connect sends: the
-                // configuration itself, and the stored credentials.
-                let profile: VpnProfile = try await client.call(
-                    "vpn_get_profile", params: ["id": profileId])
-                guard case .openvpn(let cfg) = profile.config else {
-                    tailscaleActionError = "Profile \(summary.name) is not an OpenVPN profile"
-                    return false
-                }
-                args["config"] = try String(contentsOfFile: cfg.configFile, encoding: .utf8)
-                let username = try? VPNKeychain.getString(account: "vpn/\(profileId)/ovpn-username")
-                let password = try? VPNKeychain.getString(account: "vpn/\(profileId)/ovpn-password")
-                if let u = username { args["username"] = u }
-                if let p = password { args["password"] = p }
-            } else if backendLower.contains("fortigate") || backendLower.contains("forti_gate") || backendLower.contains("ikev2") || backendLower.contains("ipsec") {
-                backendStr = "ikev2"
-                try await HelperClient.shared.installBundledVPNRuntime()
-                // IKEv2 connect args are richer; for the always-on
-                // capture, we rely on the helper having stored args
-                // from a recent successful connect. If user hasn't
-                // connected since enabling always-on, args will be
-                // empty and helper will skip. The connect refresh
-                // hook in helper main.rs ensures we get them on
-                // next manual connect.
-            } else {
-                tailscaleActionError = "Unknown backend for always-on: \(summary.backend)"
-                return false
-            }
+            (backendStr, args) = try await buildAutoReconnectArgs(for: summary)
         } catch {
             handleError(error)
             return false
@@ -558,6 +627,8 @@ extension AppState {
                 connectArgs: args
             )
             autoReconnectEnabled.insert(profileId)
+            autoReconnectUnarmed.remove(profileId)
+            autoReconnectRearmFailed.remove(profileId)
             return true
         } catch {
             handleError(error)
@@ -599,6 +670,7 @@ extension AppState {
     func refreshProfiles() async {
         do {
             vpnProfiles = try await client.call("list_profiles")
+            autoReconnectRearmFailed.removeAll()
         } catch {
             handleError(error)
         }

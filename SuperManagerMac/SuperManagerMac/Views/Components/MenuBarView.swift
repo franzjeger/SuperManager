@@ -11,8 +11,28 @@ import SwiftUI
 /// `systemImage` parameter, which it derives from `appState`.
 struct MenuBarView: View {
     @Environment(AppState.self) private var appState
+    @State private var lockState = LockState.shared
 
     var body: some View {
+        if lockState.isLocked {
+            Label("SuperManager is locked", systemImage: "lock.fill")
+            Divider()
+            Button("Unlock SuperManager…") {
+                bringMainWindowToFront()
+            }
+            .keyboardShortcut("o")
+            Divider()
+            Button("Quit SuperManager") {
+                NSApplication.shared.terminate(nil)
+            }
+            .keyboardShortcut("q")
+        } else {
+            unlockedContent
+        }
+    }
+
+    @ViewBuilder
+    private var unlockedContent: some View {
         // Daemon health
         if appState.daemonAvailable {
             Label("Daemon: connected", systemImage: "checkmark.circle.fill")
@@ -76,18 +96,7 @@ struct MenuBarView: View {
 
         // ----- Window + actions -----
         Button("Open SuperManager") {
-            // Bringing the main window to front when the user
-            // clicks here is what they expect; the alternative
-            // (keep app running headless) is annoying when the
-            // user just wants to inspect state.
-            for window in NSApp.windows {
-                if window.title == "SuperManager" || window.contentViewController != nil {
-                    window.makeKeyAndOrderFront(nil)
-                    NSApp.activate(ignoringOtherApps: true)
-                    return
-                }
-            }
-            NSApp.activate(ignoringOtherApps: true)
+            bringMainWindowToFront()
         }
         .keyboardShortcut("o")
 
@@ -104,6 +113,17 @@ struct MenuBarView: View {
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q")
+    }
+
+    private func bringMainWindowToFront() {
+        for window in NSApp.windows {
+            if window.title == "SuperManager" || window.contentViewController != nil {
+                window.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+                return
+            }
+        }
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     /// One row in the connected-VPN list. Extracted from the

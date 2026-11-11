@@ -69,9 +69,17 @@ pub enum WatchMode {
 pub struct WatchedProfile {
     pub profile_id: String,
     pub backend: String, // "wireguard" | "openvpn" | "ikev2"
+    /// Held in RAM only — never serialized to `auto_reconnect.json`. After a
+    /// helper restart or reboot, the Mac app re-arms Always-on profiles from
+    /// the user's Data Protection Keychain.
+    #[serde(skip, default = "empty_connect_args")]
     pub last_connect_args: serde_json::Value,
     #[serde(default)]
     pub mode: WatchMode,
+}
+
+fn empty_connect_args() -> serde_json::Value {
+    serde_json::Value::Null
 }
 
 impl WatchedProfile {
@@ -231,21 +239,26 @@ pub async fn spawn_watchdog(
 ) -> Result<()> {
     let state = STATE
         .get_or_init(|| async {
-            let mut map = match fs::read_to_string(STATE_PATH) {
+            let (mut map, had_legacy_secrets) = match fs::read_to_string(STATE_PATH) {
                 Ok(s) => {
-                    serde_json::from_str::<HashMap<String, WatchedProfile>>(&s).unwrap_or_default()
+                    let had_legacy = s.contains("last_connect_args");
+                    let parsed =
+                        serde_json::from_str::<HashMap<String, WatchedProfile>>(&s).unwrap_or_default();
+                    (parsed, had_legacy)
                 }
-                Err(_) => HashMap::new(),
+                Err(_) => (HashMap::new(), false),
             };
             // Purge any legacy RouteGuard or invalid entries that an older
-            // helper persisted to disk.
+            // helper persisted to disk, and initialise in-memory connect args
+            // to an unarmed placeholder until the GUI re-supplies credentials.
             let before = map.len();
             map.retain(|k, w| {
+                w.last_connect_args = serde_json::json!({ "profile_id": w.profile_id });
                 w.mode == WatchMode::AlwaysOn
                     && k == &w.profile_id
                     && validate_enrollment(&w.profile_id, &w.backend, &w.last_connect_args).is_ok()
             });
-            if map.len() != before {
+            if had_legacy_secrets || map.len() != before {
                 let _ = persist(&map);
             }
             // A file an earlier helper wrote gets the same mode.
@@ -485,6 +498,9 @@ async fn check_and_reconnect(
     ov: Arc<Mutex<OpenVpn>>,
     sw: Arc<Mutex<Strongswan>>,
 ) {
+    if !p.is_armed() {
+        return;
+    }
     let connected = match p.backend.as_str() {
         "wireguard" => wg_connected(p, wg.clone()).await,
         "openvpn" => ov_connected(p, ov.clone()).await,
@@ -873,5 +889,44 @@ mod tests {
         .is_err());
         assert!(validate_enrollment("../etc/passwd", "ikev2", &serde_json::json!({})).is_err());
         assert!(validate_enrollment(uuid, "tailscale", &serde_json::json!({})).is_err());
+    }
+
+    #[test]
+    fn persisted_state_never_serializes_connect_args_or_secrets() {
+        let mut map = HashMap::new();
+        map.insert(
+            "p1".to_owned(),
+            WatchedProfile {
+                profile_id: "p1".into(),
+                backend: "ikev2".into(),
+                last_connect_args: serde_json::json!({
+                    "profile_id": "p1",
+                    "password": "super-secret-password",
+                    "shared_secret": "top-secret-psk",
+                }),
+                mode: WatchMode::AlwaysOn,
+            },
+        );
+        let serialized = serde_json::to_string_pretty(&persistable_entries(&map)).unwrap();
+        assert!(serialized.contains("\"profile_id\": \"p1\""));
+        assert!(!serialized.contains("last_connect_args"));
+        assert!(!serialized.contains("super-secret-password"));
+        assert!(!serialized.contains("top-secret-psk"));
+    }
+
+    #[test]
+    fn legacy_json_with_secrets_deserializes_without_retaining_credentials() {
+        let legacy = r#"{
+            "profile_id": "p1",
+            "backend": "wireguard",
+            "last_connect_args": {
+                "profile_id": "p1",
+                "conf_content": "[Interface]\nPrivateKey = SECRETKEY\n"
+            }
+        }"#;
+        let wp: WatchedProfile = serde_json::from_str(legacy).unwrap();
+        assert_eq!(wp.mode, WatchMode::AlwaysOn);
+        assert!(!wp.is_armed());
+        assert_eq!(wp.last_connect_args, serde_json::Value::Null);
     }
 }

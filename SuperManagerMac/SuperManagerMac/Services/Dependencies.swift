@@ -157,29 +157,28 @@ enum Dependencies {
     static var missing: [Tool] { all.filter { !$0.isInstalled } }
 
     /// For a tool Homebrew can't supply (`formula == nil`), the shell
-    /// command that builds and installs it. Run in Terminal, not
-    /// captured in-app: the OpenVPN 3 build takes minutes and ends in a
-    /// `sudo install`, so its progress and password prompt have to be
-    /// visible. `nil` when brew can do the job instead.
-    static func terminalBuildCommand(for id: String) -> String? {
+    /// command that builds and installs it from the scripts sealed inside
+    /// `Contents/Resources/openvpn3-builder` (never fetched from a mutable
+    /// remote branch). Run in Terminal so the multi-minute compile and its
+    /// `sudo install` prompt are visible. `nil` when brew can do the job or
+    /// the bundled recipe is absent.
+    nonisolated static func terminalBuildCommand(
+        for id: String,
+        resourceURL: URL? = Bundle.main.resourceURL
+    ) -> String? {
         switch id {
         case "openvpn3":
-            // The documented --with-openvpn3 path: installs the build
-            // deps (cmake, asio, jsoncpp, openssl@3, lz4) and runs
-            // contrib/build-openvpn3-mac.sh.
-            // Download completely before execution, and keep Terminal's
-            // stdin available for the installer's confirmation prompts.
-            return """
-                installer=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/supermanager-installer.XXXXXX") || exit 1
-                /usr/bin/curl -fsSL https://raw.githubusercontent.com/franzjeger/SuperManager/main/scripts/install.sh -o "$installer"
-                status=$?
-                if [ "$status" -eq 0 ]; then
-                    /bin/bash "$installer" --deps-only --with-openvpn3
-                    status=$?
-                fi
-                /bin/rm -f "$installer"
-                (exit "$status")
-                """
+            guard let base = resourceURL?.appendingPathComponent("openvpn3-builder", isDirectory: true) else {
+                return nil
+            }
+            let installer = base.appendingPathComponent("scripts/install.sh")
+            let builder = base.appendingPathComponent("contrib/build-openvpn3-mac.sh")
+            guard FileManager.default.fileExists(atPath: installer.path),
+                  FileManager.default.fileExists(atPath: builder.path) else {
+                return nil
+            }
+            let quoted = "'" + installer.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+            return "/bin/bash \(quoted) --deps-only --with-openvpn3"
         default:
             return nil
         }

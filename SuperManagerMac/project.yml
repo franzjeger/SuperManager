@@ -291,6 +291,12 @@ targets:
         # which re-seals the bundle.
         script: |
           "${SRCROOT}/Signing/bundle_vpn_runtime.sh"
+      - name: Bundle OpenVPN 3 repair recipe
+        basedOnDependencyAnalysis: false
+        # Bundles the pinned OpenVPN 3 source-build scripts inside
+        # Contents/Resources/openvpn3-builder before the bundle is sealed.
+        script: |
+          "${SRCROOT}/Signing/bundle_openvpn3_builder.sh"
       - name: Stamp version from git
         basedOnDependencyAnalysis: false
         # The version is the release tag the build descends from, not the
