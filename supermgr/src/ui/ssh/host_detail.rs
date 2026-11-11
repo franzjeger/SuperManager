@@ -1436,8 +1436,7 @@ pub fn launch_rdp(
                 }
             }
         } else {
-            let args =
-                build_freerdp_args(client, hostname, port, username, pw_non_empty.is_some());
+            let args = build_freerdp_args(client, hostname, port, username, pw_non_empty.is_some());
             let mut cmd = std::process::Command::new(client);
             cmd.args(&args)
                 .stdout(std::process::Stdio::null())

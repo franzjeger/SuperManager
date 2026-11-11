@@ -530,6 +530,10 @@ mod tests {
             ),
             ("async fn get_logs(", "crate::polkit::ACTION_MANAGE"),
             (
+                "async fn ssh_get_audit_log(",
+                "crate::polkit::ACTION_MANAGE",
+            ),
+            (
                 "async fn list_config_versions(",
                 "crate::polkit::ACTION_MANAGE",
             ),

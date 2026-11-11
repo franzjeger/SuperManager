@@ -460,57 +460,122 @@ impl SshSession {
 
     // -- command execution --------------------------------------------------
 
-    /// Execute a command on the remote host.
+    /// Default remote command execution timeout in seconds (`P2-36`).
+    pub const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 60;
+
+    /// Minimum allowed execution timeout in seconds (`P2-36`).
+    pub const MIN_EXEC_TIMEOUT_SECS: u64 = 1;
+
+    /// Maximum allowed execution timeout in seconds (`P2-36`).
+    pub const MAX_EXEC_TIMEOUT_SECS: u64 = 3600;
+
+    /// Maximum bytes captured per `stdout` or `stderr` stream (`8 MiB`, `P2-36`).
+    pub const MAX_EXEC_STREAM_BYTES: usize = 8 * 1024 * 1024;
+
+    /// Clamp a requested execution timeout into the mandatory `1..=3600s` range.
+    pub fn clamp_exec_timeout(timeout_secs: u64) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            timeout_secs.clamp(Self::MIN_EXEC_TIMEOUT_SECS, Self::MAX_EXEC_TIMEOUT_SECS),
+        )
+    }
+
+    /// Execute a command on the remote host with the default `60s` timeout and
+    /// `8 MiB` per-stream output cap (`P2-36`).
     ///
     /// Returns `(exit_status, stdout, stderr)`.
     pub async fn exec(&self, command: &str) -> Result<(u32, String, String), SshError> {
-        let mut channel =
-            self.handle
-                .channel_open_session()
-                .await
-                .map_err(|e| SshError::ConnectionFailed {
-                    host: String::new(),
-                    reason: format!("failed to open session channel: {e}"),
-                })?;
-
-        channel
-            .exec(true, command)
+        self.exec_with_timeout(command, Self::DEFAULT_EXEC_TIMEOUT_SECS)
             .await
+    }
+
+    /// Execute a command on the remote host with an explicit timeout bounded to
+    /// `1..=3600s` and `8 MiB` `stdout`/`stderr` buffer caps (`P2-36`).
+    ///
+    /// Returns `(exit_status, stdout, stderr)`.
+    pub async fn exec_with_timeout(
+        &self,
+        command: &str,
+        timeout_secs: u64,
+    ) -> Result<(u32, String, String), SshError> {
+        let timeout_dur = Self::clamp_exec_timeout(timeout_secs);
+        let mut channel = tokio::time::timeout(timeout_dur, self.handle.channel_open_session())
+            .await
+            .map_err(|_| SshError::ConnectionFailed {
+                host: String::new(),
+                reason: format!(
+                    "SSH exec timed out opening session channel after {}s",
+                    timeout_dur.as_secs()
+                ),
+            })?
             .map_err(|e| SshError::ConnectionFailed {
                 host: String::new(),
-                reason: format!("exec failed: {e}"),
+                reason: format!("failed to open session channel: {e}"),
             })?;
 
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut exit_status: u32 = 1;
+        let deadline = tokio::time::Instant::now() + timeout_dur;
 
-        loop {
-            match channel.wait().await {
-                Some(russh::ChannelMsg::Data { data }) => {
-                    stdout.extend_from_slice(&data);
+        let exec_res = async {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            tokio::time::timeout(remaining, channel.exec(true, command))
+                .await
+                .map_err(|_| SshError::ConnectionFailed {
+                    host: String::new(),
+                    reason: format!("SSH exec timed out after {}s", timeout_dur.as_secs()),
+                })?
+                .map_err(|e| SshError::ConnectionFailed {
+                    host: String::new(),
+                    reason: format!("exec failed: {e}"),
+                })?;
+
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut exit_status: u32 = 1;
+
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(SshError::ConnectionFailed {
+                        host: String::new(),
+                        reason: format!("SSH exec timed out after {}s", timeout_dur.as_secs()),
+                    });
                 }
-                Some(russh::ChannelMsg::ExtendedData { data, ext }) => {
-                    if ext == 1 {
-                        // ext == 1 is stderr
-                        stderr.extend_from_slice(&data);
+                match tokio::time::timeout(remaining, channel.wait()).await {
+                    Ok(Some(russh::ChannelMsg::Data { data })) => {
+                        append_bounded_exec_stream(&mut stdout, &data, "stdout")?;
+                    }
+                    Ok(Some(russh::ChannelMsg::ExtendedData { data, ext })) => {
+                        if ext == 1 {
+                            // ext == 1 is stderr
+                            append_bounded_exec_stream(&mut stderr, &data, "stderr")?;
+                        }
+                    }
+                    Ok(Some(russh::ChannelMsg::ExitStatus { exit_status: code })) => {
+                        exit_status = code;
+                    }
+                    Ok(Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close)) => {
+                        // Keep draining until the channel is fully closed.
+                    }
+                    Ok(None) => break,
+                    Ok(_) => {}
+                    Err(_) => {
+                        return Err(SshError::ConnectionFailed {
+                            host: String::new(),
+                            reason: format!("SSH exec timed out after {}s", timeout_dur.as_secs()),
+                        });
                     }
                 }
-                Some(russh::ChannelMsg::ExitStatus { exit_status: code }) => {
-                    exit_status = code;
-                }
-                Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close) => {
-                    // Keep draining until the channel is fully closed.
-                }
-                None => break,
-                _ => {}
             }
+
+            let stdout_str = String::from_utf8_lossy(&stdout).into_owned();
+            let stderr_str = String::from_utf8_lossy(&stderr).into_owned();
+            Ok((exit_status, stdout_str, stderr_str))
         }
+        .await;
 
-        let stdout_str = String::from_utf8_lossy(&stdout).into_owned();
-        let stderr_str = String::from_utf8_lossy(&stderr).into_owned();
-
-        Ok((exit_status, stdout_str, stderr_str))
+        if exec_res.is_err() {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), channel.close()).await;
+        }
+        exec_res
     }
 
     /// Run an interactive shell session, sending lines sequentially.
@@ -524,14 +589,20 @@ impl SshSession {
         _delay_ms: u64,
         timeout_secs: u64,
     ) -> Result<String, SshError> {
-        let mut channel =
-            self.handle
-                .channel_open_session()
-                .await
-                .map_err(|e| SshError::ConnectionFailed {
-                    host: String::new(),
-                    reason: format!("failed to open session channel: {e}"),
-                })?;
+        let timeout_dur = Self::clamp_exec_timeout(timeout_secs);
+        let mut channel = tokio::time::timeout(timeout_dur, self.handle.channel_open_session())
+            .await
+            .map_err(|_| SshError::ConnectionFailed {
+                host: String::new(),
+                reason: format!(
+                    "SSH interactive shell timed out opening channel after {}s",
+                    timeout_dur.as_secs()
+                ),
+            })?
+            .map_err(|e| SshError::ConnectionFailed {
+                host: String::new(),
+                reason: format!("failed to open session channel: {e}"),
+            })?;
 
         // Request a PTY so FortiGate treats it as interactive.
         channel
@@ -550,7 +621,7 @@ impl SshSession {
                 reason: format!("request_shell failed: {e}"),
             })?;
 
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        let deadline = tokio::time::Instant::now() + timeout_dur;
         let mut output = Vec::new();
 
         // Macro-like helper: drain channel data until a keyword appears
@@ -559,10 +630,23 @@ impl SshSession {
             ($keywords:expr) => {
                 loop {
                     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                    if remaining.is_zero() { break; }
+                    if remaining.is_zero() {
+                        break;
+                    }
                     match tokio::time::timeout(remaining, channel.wait()).await {
                         Ok(Some(russh::ChannelMsg::Data { data })) => {
-                            output.extend_from_slice(&data);
+                            if append_bounded_exec_stream(&mut output, &data, "shell output")
+                                .is_err()
+                            {
+                                let _ = channel.close().await;
+                                return Err(SshError::ConnectionFailed {
+                                    host: String::new(),
+                                    reason: format!(
+                                        "SSH shell output exceeded {} byte limit",
+                                        Self::MAX_EXEC_STREAM_BYTES
+                                    ),
+                                });
+                            }
                             let text = String::from_utf8_lossy(&output);
                             let found = $keywords.iter().any(|kw: &&str| text.contains(kw));
                             let trimmed = text.trim_end();
@@ -597,7 +681,16 @@ impl SshSession {
                 }
                 match tokio::time::timeout(remaining, channel.wait()).await {
                     Ok(Some(russh::ChannelMsg::Data { data })) => {
-                        output.extend_from_slice(&data);
+                        if append_bounded_exec_stream(&mut output, &data, "shell output").is_err() {
+                            let _ = channel.close().await;
+                            return Err(SshError::ConnectionFailed {
+                                host: String::new(),
+                                reason: format!(
+                                    "SSH shell output exceeded {} byte limit",
+                                    Self::MAX_EXEC_STREAM_BYTES
+                                ),
+                            });
+                        }
                         // Only check NEW data (after prev_len).
                         let new_text = String::from_utf8_lossy(&output[prev_len..]);
                         let keywords = [
@@ -768,6 +861,28 @@ impl RemoteFiles for SftpFiles {
     }
 }
 
+fn append_bounded_exec_stream(
+    buf: &mut Vec<u8>,
+    chunk: &[u8],
+    stream_name: &str,
+) -> Result<(), SshError> {
+    if buf
+        .len()
+        .checked_add(chunk.len())
+        .is_none_or(|n| n > SshSession::MAX_EXEC_STREAM_BYTES)
+    {
+        return Err(SshError::ConnectionFailed {
+            host: String::new(),
+            reason: format!(
+                "SSH {stream_name} exceeded {} byte limit",
+                SshSession::MAX_EXEC_STREAM_BYTES
+            ),
+        });
+    }
+    buf.extend_from_slice(chunk);
+    Ok(())
+}
+
 fn sftp_err(op: &str, path: &str, e: &impl std::fmt::Display) -> SshError {
     SshError::ConnectionFailed {
         host: String::new(),
@@ -841,5 +956,36 @@ mod certificate_tests {
         let cert = parse_certificate(&pasted).unwrap();
         assert_eq!(cert.key_id(), "testid");
         assert_eq!(cert.valid_principals(), ["root"]);
+    }
+}
+
+#[cfg(test)]
+mod exec_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn clamp_exec_timeout_enforces_mandatory_bounds() {
+        assert_eq!(
+            SshSession::clamp_exec_timeout(0),
+            std::time::Duration::from_secs(1)
+        );
+        assert_eq!(
+            SshSession::clamp_exec_timeout(60),
+            std::time::Duration::from_secs(60)
+        );
+        assert_eq!(
+            SshSession::clamp_exec_timeout(86_400),
+            std::time::Duration::from_secs(3600)
+        );
+    }
+
+    #[test]
+    fn stream_cap_rejects_growth_past_eight_mib() {
+        let mut buf = vec![b'x'; SshSession::MAX_EXEC_STREAM_BYTES - 4];
+        append_bounded_exec_stream(&mut buf, b"abcd", "stdout").expect("exact 8 MiB fits");
+        assert_eq!(buf.len(), SshSession::MAX_EXEC_STREAM_BYTES);
+        let err = append_bounded_exec_stream(&mut buf, b"!", "stdout")
+            .expect_err("1 byte past 8 MiB must fail");
+        assert!(err.to_string().contains("stdout exceeded"));
     }
 }

@@ -21,16 +21,12 @@ use tracing::{debug, warn};
 pub use supermgr_core::tailscale::{TailscaleHealth, TailscaleNode};
 
 async fn status_output() -> std::io::Result<std::process::Output> {
-    tokio::time::timeout(
+    crate::subprocess::run_system_cmd(
+        &["tailscale"],
+        &["status", "--json"],
         std::time::Duration::from_secs(5),
-        tokio::process::Command::new("tailscale")
-            .args(["status", "--json"])
-            .stdin(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .output(),
     )
     .await
-    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "Tailscale status timed out"))?
 }
 
 /// Diagnose the local Tailscale stack: CLI present, daemon answering,
@@ -102,50 +98,19 @@ fn health_from_status_json(raw: &serde_json::Value) -> TailscaleHealth {
     }
 }
 
-/// Which package manager this host uses, by which binary exists.
-///
-/// Checked in order of specificity, not popularity — a host with both
-/// `pacman` and `apt` (containers do this) is far more likely to be Arch
-/// with a stray tool than Debian with pacman installed.
-fn detect_package_manager() -> Option<(&'static str, &'static [&'static str])> {
-    const CANDIDATES: &[(&str, &[&str])] = &[
-        ("pacman", &["-S", "--noconfirm", "--needed", "tailscale"]),
-        ("apt-get", &["install", "-y", "tailscale"]),
-        ("dnf", &["install", "-y", "tailscale"]),
-        ("zypper", &["--non-interactive", "install", "tailscale"]),
-    ];
-    CANDIDATES.iter().find(|(pm, _)| which_exists(pm)).copied()
-}
-
-/// `command -v` without the shell: walk PATH for an executable file.
-fn which_exists(name: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| {
-        let candidate = dir.join(name);
-        candidate.is_file()
-            && std::fs::metadata(&candidate)
-                .map(|m| {
-                    use std::os::unix::fs::PermissionsExt;
-                    m.permissions().mode() & 0o111 != 0
-                })
-                .unwrap_or(false)
-    })
-}
-
 /// Bring the local Tailscale stack up as far as it can go without a human:
-/// install the package if the CLI is missing, start and enable tailscaled,
-/// and `tailscale up` if the backend was deliberately stopped. Login is the
-/// one step this cannot do — that is [`crate::tailscale_accounts::start`]'s job, because it needs
-/// a browser and a person.
+/// start and enable `tailscaled`, and run `tailscale up` if the backend was
+/// deliberately stopped.
+///
+/// Package installation is intentionally never performed automatically by the
+/// privileged daemon; if the `tailscale` CLI is absent, an actionable error
+/// instructs the operator to install it via their distribution's package
+/// manager. Login is handled separately by [`crate::tailscale_accounts::start`],
+/// because it requires a browser and a person.
 ///
 /// Idempotent by construction: each step is skipped when its condition
 /// already holds, so calling this on a healthy stack does nothing. Returns a
 /// human-readable summary of the steps actually taken.
-///
-/// The package name is a constant and the package manager is detected, not
-/// caller-supplied — nothing from the bus reaches these command lines.
 pub async fn repair() -> Result<String, String> {
     let _guard = crate::tailscale_management::CONTROL_LOCK.lock().await;
     crate::tailscale_accounts::ensure_idle()?;
@@ -153,40 +118,23 @@ pub async fn repair() -> Result<String, String> {
     let mut state = health().await;
 
     if !state.cli_present {
-        let Some((pm, args)) = detect_package_manager() else {
-            return Err(
-                "the tailscale CLI is missing and no supported package manager \
-                 (pacman, apt-get, dnf, zypper) was found — install it manually, \
-                 see https://tailscale.com/install"
-                    .to_owned(),
-            );
-        };
-        debug!(pm, "tailscale::repair: installing tailscale");
-        let out = tokio::process::Command::new(pm)
-            .args(args)
-            .env("DEBIAN_FRONTEND", "noninteractive")
-            .output()
-            .await
-            .map_err(|e| format!("failed to run {pm}: {e}"))?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
-            return Err(format!(
-                "{pm} could not install tailscale ({}): {stderr}. If the package \
-                 is not in this distribution's repositories, add Tailscale's own — \
-                 see https://tailscale.com/install",
-                out.status
-            ));
-        }
-        done.push(format!("installed the tailscale package via {pm}"));
+        return Err(
+            "the tailscale CLI is not installed — please install the `tailscale` package \
+             via your distribution's package manager (see https://tailscale.com/install) \
+             and retry"
+                .to_owned(),
+        );
     }
 
     // Enable + start in one systemctl call. Also the remedy when the unit
     // exists but is stopped, and a no-op (exit 0) when already both.
-    let out = tokio::process::Command::new("systemctl")
-        .args(["enable", "--now", "tailscaled"])
-        .output()
-        .await
-        .map_err(|e| format!("failed to run systemctl: {e}"))?;
+    let out = crate::subprocess::run_system_cmd(
+        &["systemctl"],
+        &["enable", "--now", "tailscaled"],
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .map_err(|e| format!("failed to run systemctl: {e}"))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
         return Err(format!("could not start tailscaled: {stderr}"));
@@ -202,16 +150,19 @@ pub async fn repair() -> Result<String, String> {
     // does not perform.
     state = health().await;
     if state.daemon_running && state.backend_state == "Stopped" {
-        let out = tokio::time::timeout(
+        let out = crate::subprocess::run_system_cmd(
+            &["tailscale"],
+            &["up"],
             std::time::Duration::from_secs(15),
-            tokio::process::Command::new("tailscale")
-                .args(["up"])
-                .kill_on_drop(true)
-                .output(),
         )
         .await
-        .map_err(|_| "tailscale up timed out".to_owned())?
-        .map_err(|e| format!("failed to run tailscale up: {e}"))?;
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::TimedOut {
+                "tailscale up timed out".to_owned()
+            } else {
+                format!("failed to run tailscale up: {e}")
+            }
+        })?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
             return Err(format!("tailscale up failed: {stderr}"));
@@ -524,5 +475,22 @@ mod tests {
         let h = health_from_status_json(&serde_json::json!({}));
         assert!(!h.is_running());
         assert!(!h.needs_login());
+    }
+
+    #[test]
+    fn repair_never_invokes_package_managers_or_curl_installers() {
+        let src = include_str!("tailscale.rs");
+        let code_only: String = src
+            .lines()
+            .take_while(|l| !l.starts_with("#[cfg(test)]"))
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for forbidden in ["apt-get", "pacman", "dnf", "zypper", "curl"] {
+            assert!(
+                !code_only.contains(forbidden),
+                "tailscale.rs must not invoke `{forbidden}` automatically"
+            );
+        }
     }
 }

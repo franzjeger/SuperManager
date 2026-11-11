@@ -45,12 +45,13 @@
 //! - `PeerStats` has `tx_bytes: u64`, `rx_bytes: u64`, `last_handshake_time: Option<SystemTime>`
 //! - Interface deletion is NOT in the crate API; we use rtnetlink directly.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::TryStreamExt as _;
-use netlink_packet_route::route::{RouteAttribute, RouteMessage};
 use rtnetlink::{LinkUnspec, RouteMessageBuilder};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, instrument, warn};
@@ -65,30 +66,31 @@ use supermgr_core::{
 
 use crate::secrets;
 
+/// Dedicated WireGuard `fwmark` and routing table ID (`0xca6c`, matching `wg-quick`).
+pub const WG_FWMARK_TABLE: u32 = 51820;
+
+/// Timeout for single-shot peer endpoint DNS resolution (`P2-35`).
+const ENDPOINT_DNS_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Timeout for `ip`, `modprobe`, `nmcli`, and `resolvectl` helper commands (`P3-12`).
+const WG_CMD_TIMEOUT: Duration = Duration::from_secs(10);
+
 // ---------------------------------------------------------------------------
 // Internal state
 // ---------------------------------------------------------------------------
 
 /// Tracks whether a WireGuard interface is currently owned by this backend,
-/// and saves state that must be restored at disconnect time.
+/// and records resources that must be cleaned up on disconnect or error.
 #[derive(Debug, Default)]
 struct WgState {
-    /// The kernel interface name if a tunnel is up.
+    /// The kernel interface name if a tunnel is up (or mid-bring-up).
     interface: Option<String>,
 
-    /// The full default IPv4 route message captured before we displaced it.
-    /// `None` if AllowedIPs did not include `0.0.0.0/0` or no pre-existing
-    /// default was found.
-    saved_default_v4: Option<RouteMessage>,
+    /// True if IPv4 policy routing rules (`table 51820`) were installed.
+    policy_routing_v4: bool,
 
-    /// The full default IPv6 route message captured before we displaced it.
-    saved_default_v6: Option<RouteMessage>,
-
-    /// Host routes (`<ip>/32` or `<ip>/128`) added for peer endpoints before
-    /// displacing the default route.  These are installed on the *physical*
-    /// interface so they survive `ip link delete <wg>` and must be removed
-    /// explicitly during disconnect.
-    endpoint_host_routes: Vec<String>,
+    /// True if IPv6 policy routing rules (`table 51820`) were installed.
+    policy_routing_v6: bool,
 
     /// Linux interface index stored after a successful `SetLinkDNS` call to
     /// `systemd-resolved`.  Used to call `RevertLink` on disconnect.
@@ -107,45 +109,297 @@ struct WgState {
 }
 
 // ---------------------------------------------------------------------------
-// Module-level route helpers (no &self needed)
+// Endpoint resolution & policy-routing helpers
 // ---------------------------------------------------------------------------
+
+/// Resolve a single WireGuard peer endpoint (`host:port` or literal `ip:port`),
+/// falling back to `cached` if live DNS fails (e.g. when a persisted kill
+/// switch blocks outbound DNS during reconnect, `P2-35`).
+async fn resolve_single_endpoint(
+    ep: &str,
+    cached: &HashMap<String, SocketAddr>,
+) -> Result<SocketAddr, BackendError> {
+    let trimmed = ep.trim();
+    if let Ok(sock) = trimmed.parse::<SocketAddr>() {
+        return Ok(sock);
+    }
+
+    match tokio::time::timeout(ENDPOINT_DNS_TIMEOUT, tokio::net::lookup_host(trimmed)).await {
+        Ok(Ok(mut addrs)) => {
+            if let Some(addr) = addrs.next() {
+                return Ok(addr);
+            }
+            if let Some(&fallback) = cached.get(trimmed) {
+                warn!(
+                    "peer endpoint '{trimmed}' returned zero DNS records; \
+                     using cached endpoint {fallback}"
+                );
+                return Ok(fallback);
+            }
+            Err(BackendError::Interface(format!(
+                "peer endpoint '{trimmed}' resolved to zero addresses — \
+                 verify the hostname in your WireGuard configuration"
+            )))
+        }
+        Ok(Err(e)) => {
+            if let Some(&fallback) = cached.get(trimmed) {
+                warn!(
+                    "DNS lookup failed for peer endpoint '{trimmed}' ({e}); \
+                     using cached endpoint {fallback}"
+                );
+                return Ok(fallback);
+            }
+            Err(BackendError::Interface(format!(
+                "cannot resolve peer endpoint '{trimmed}': {e} — \
+                 check that the hostname is correct and DNS is working"
+            )))
+        }
+        Err(_) => {
+            if let Some(&fallback) = cached.get(trimmed) {
+                warn!(
+                    "DNS lookup timed out for peer endpoint '{trimmed}'; \
+                     using cached endpoint {fallback}"
+                );
+                return Ok(fallback);
+            }
+            Err(BackendError::Interface(format!(
+                "timed out resolving peer endpoint '{trimmed}' after {}s",
+                ENDPOINT_DNS_TIMEOUT.as_secs()
+            )))
+        }
+    }
+}
+
+/// Resolve all configured peer endpoints (`host:port` → [`SocketAddr`]) once
+/// before kill-switch and interface setup (`P2-35`).
+///
+/// # Errors
+///
+/// Returns [`BackendError::Interface`] if any peer endpoint cannot be resolved
+/// and has no entry in `cached`.
+pub async fn resolve_wg_endpoints(
+    wg_cfg: &WireGuardConfig,
+    cached: &HashMap<String, SocketAddr>,
+) -> Result<HashMap<String, SocketAddr>, BackendError> {
+    let mut resolved = HashMap::new();
+    for peer in &wg_cfg.peers {
+        let Some(ref ep) = peer.endpoint else {
+            continue;
+        };
+        let key = ep.trim().to_owned();
+        if resolved.contains_key(&key) {
+            continue;
+        }
+        let addr = resolve_single_endpoint(&key, cached).await?;
+        resolved.insert(key, addr);
+    }
+    Ok(resolved)
+}
+
+/// Check whether `ip -4/-6 rule show` output already contains the `not fwmark`
+/// lookup rule for [`WG_FWMARK_TABLE`].
+fn has_fwmark_policy_rule(rule_output: &str) -> bool {
+    let dec = WG_FWMARK_TABLE.to_string();
+    let hex = format!("0x{WG_FWMARK_TABLE:x}");
+    rule_output.lines().any(|line| {
+        line.contains("not")
+            && line.contains("fwmark")
+            && (line.contains(&dec) || line.contains(&hex))
+            && line.contains(&format!("lookup {dec}"))
+    })
+}
+
+/// Check whether `ip -4/-6 rule show` output already contains
+/// `lookup main suppress_prefixlength 0`.
+fn has_suppress_prefix_rule(rule_output: &str) -> bool {
+    rule_output
+        .lines()
+        .any(|line| line.contains("lookup main") && line.contains("suppress_prefixlength 0"))
+}
+
+/// Install `wg-quick`-equivalent policy routing for IPv4 or IPv6 (`P2-31`).
+async fn install_policy_default_route(iface_name: &str, ipv6: bool) -> Result<(), BackendError> {
+    let family_flag = if ipv6 { "-6" } else { "-4" };
+    let default_cidr = if ipv6 { "::/0" } else { "0.0.0.0/0" };
+    let table_str = WG_FWMARK_TABLE.to_string();
+
+    let route_out = crate::subprocess::run_system_cmd(
+        &["ip"],
+        &[
+            family_flag,
+            "route",
+            "replace",
+            default_cidr,
+            "dev",
+            iface_name,
+            "table",
+            &table_str,
+        ],
+        WG_CMD_TIMEOUT,
+    )
+    .await
+    .map_err(|e| {
+        BackendError::Interface(format!(
+            "ip {family_flag} route replace {default_cidr} table {table_str}: {e}"
+        ))
+    })?;
+    if !route_out.status.success() {
+        let stderr = String::from_utf8_lossy(&route_out.stderr);
+        return Err(BackendError::Interface(format!(
+            "ip {family_flag} route replace {default_cidr} dev {iface_name} table {table_str} failed: {}",
+            stderr.trim()
+        )));
+    }
+
+    let existing_rules =
+        crate::subprocess::run_system_cmd(&["ip"], &[family_flag, "rule", "show"], WG_CMD_TIMEOUT)
+            .await
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+
+    // Order matters: adding `not fwmark 51820 table 51820` first and
+    // `table main suppress_prefixlength 0` second assigns the lower rule
+    // priority number to `suppress_prefixlength 0`, matching `wg-quick` so
+    // non-/0 routes in `main` are evaluated before table 51820.
+    if !has_fwmark_policy_rule(&existing_rules) {
+        let out = crate::subprocess::run_system_cmd(
+            &["ip"],
+            &[
+                family_flag,
+                "rule",
+                "add",
+                "not",
+                "fwmark",
+                &table_str,
+                "table",
+                &table_str,
+            ],
+            WG_CMD_TIMEOUT,
+        )
+        .await
+        .map_err(|e| {
+            BackendError::Interface(format!(
+                "ip {family_flag} rule add not fwmark {table_str} table {table_str}: {e}"
+            ))
+        })?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(BackendError::Interface(format!(
+                "ip {family_flag} rule add not fwmark {table_str} table {table_str} failed: {}",
+                stderr.trim()
+            )));
+        }
+    }
+
+    if !has_suppress_prefix_rule(&existing_rules) {
+        let out = crate::subprocess::run_system_cmd(
+            &["ip"],
+            &[
+                family_flag,
+                "rule",
+                "add",
+                "table",
+                "main",
+                "suppress_prefixlength",
+                "0",
+            ],
+            WG_CMD_TIMEOUT,
+        )
+        .await
+        .map_err(|e| {
+            BackendError::Interface(format!(
+                "ip {family_flag} rule add table main suppress_prefixlength 0: {e}"
+            ))
+        })?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(BackendError::Interface(format!(
+                "ip {family_flag} rule add table main suppress_prefixlength 0 failed: {}",
+                stderr.trim()
+            )));
+        }
+    }
+
+    info!(
+        "installed WireGuard {} policy routing via table {} on {}",
+        if ipv6 { "IPv6" } else { "IPv4" },
+        table_str,
+        iface_name
+    );
+    Ok(())
+}
+
+/// Remove WireGuard policy routing rules and flush routing table [`WG_FWMARK_TABLE`]
+/// for the requested address families (`P2-31`, `P2-34`).
+///
+/// Safe and idempotent to call during disconnect, failed connect cleanup, or
+/// daemon startup recovery.
+pub async fn cleanup_policy_rules(ipv4: bool, ipv6: bool) {
+    let table_str = WG_FWMARK_TABLE.to_string();
+    for (enabled, family_flag) in [(ipv4, "-4"), (ipv6, "-6")] {
+        if !enabled {
+            continue;
+        }
+        // Loop up to 8 times to clear any duplicate rules without risking an infinite loop.
+        for _ in 0..8 {
+            match crate::subprocess::run_system_cmd(
+                &["ip"],
+                &[
+                    family_flag,
+                    "rule",
+                    "del",
+                    "not",
+                    "fwmark",
+                    &table_str,
+                    "table",
+                    &table_str,
+                ],
+                WG_CMD_TIMEOUT,
+            )
+            .await
+            {
+                Ok(out) if out.status.success() => {
+                    debug!(
+                        "removed ip {family_flag} rule not fwmark {table_str} table {table_str}"
+                    );
+                }
+                _ => break,
+            }
+        }
+        for _ in 0..8 {
+            match crate::subprocess::run_system_cmd(
+                &["ip"],
+                &[
+                    family_flag,
+                    "rule",
+                    "del",
+                    "table",
+                    "main",
+                    "suppress_prefixlength",
+                    "0",
+                ],
+                WG_CMD_TIMEOUT,
+            )
+            .await
+            {
+                Ok(out) if out.status.success() => {
+                    debug!("removed ip {family_flag} rule table main suppress_prefixlength 0");
+                }
+                _ => break,
+            }
+        }
+        let _ = crate::subprocess::run_system_cmd(
+            &["ip"],
+            &[family_flag, "route", "flush", "table", &table_str],
+            WG_CMD_TIMEOUT,
+        )
+        .await;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // rtnetlink route helpers
 // ---------------------------------------------------------------------------
-
-/// Extract gateway IP and output interface index from a RouteMessage.
-fn route_gateway_and_oif(msg: &RouteMessage) -> Option<(IpAddr, u32)> {
-    let mut gw: Option<IpAddr> = None;
-    let mut oif: Option<u32> = None;
-    for attr in &msg.attributes {
-        match attr {
-            RouteAttribute::Gateway(addr) => {
-                gw = match addr {
-                    netlink_packet_route::route::RouteAddress::Inet(v4) => Some(IpAddr::V4(*v4)),
-                    netlink_packet_route::route::RouteAddress::Inet6(v6) => Some(IpAddr::V6(*v6)),
-                    _ => None,
-                };
-            }
-            RouteAttribute::Oif(idx) => oif = Some(*idx),
-            _ => {}
-        }
-    }
-    match (gw, oif) {
-        (Some(g), Some(o)) => Some((g, o)),
-        _ => None,
-    }
-}
-
-/// A request for every route of one address family: without a destination,
-/// rtnetlink sends it as a dump.
-fn route_dump(ipv6: bool) -> RouteMessage {
-    if ipv6 {
-        RouteMessageBuilder::<Ipv6Addr>::new().build()
-    } else {
-        RouteMessageBuilder::<Ipv4Addr>::new().build()
-    }
-}
 
 /// True when rtnetlink returned the specified kernel errno.
 ///
@@ -172,229 +426,6 @@ async fn ifname_to_index(name: &str) -> Result<u32, BackendError> {
         .map_err(|e| BackendError::Interface(format!("rtnetlink link get '{name}': {e}")))?
         .ok_or_else(|| BackendError::Interface(format!("interface '{name}' not found")))?;
     Ok(link.header.index)
-}
-
-/// Resolve an interface index to its name via rtnetlink.
-async fn ifindex_to_name(idx: u32) -> Option<String> {
-    let (conn, handle, _) = rtnetlink::new_connection().ok()?;
-    tokio::spawn(conn);
-    let mut links = handle.link().get().match_index(idx).execute();
-    let link = links.try_next().await.ok()??;
-    use netlink_packet_route::link::LinkAttribute;
-    link.attributes.iter().find_map(|a| {
-        if let LinkAttribute::IfName(name) = a {
-            Some(name.clone())
-        } else {
-            None
-        }
-    })
-}
-
-/// Capture the current default route for the given address family.
-///
-/// Returns `None` if no default route exists. Only the first (lowest metric)
-/// default is captured; ECMP setups will have the primary restored.
-async fn capture_default_route(ipv6: bool) -> Result<Option<RouteMessage>, BackendError> {
-    let (conn, handle, _) = rtnetlink::new_connection()
-        .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
-    tokio::spawn(conn);
-
-    let mut routes = handle.route().get(route_dump(ipv6)).execute();
-    let mut best: Option<RouteMessage> = None;
-
-    while let Some(route) = routes
-        .try_next()
-        .await
-        .map_err(|e| BackendError::Interface(format!("rtnetlink route get: {e}")))?
-    {
-        // Default route has destination prefix length 0.
-        if route.header.destination_prefix_length != 0 {
-            continue;
-        }
-        // Only consider unicast routes in the main table.
-        use netlink_packet_route::route::{RouteHeader, RouteType};
-        if route.header.kind != RouteType::Unicast {
-            continue;
-        }
-        if route.header.table != RouteHeader::RT_TABLE_MAIN
-            && !route
-                .attributes
-                .iter()
-                .any(|a| matches!(a, RouteAttribute::Table(254)))
-        {
-            continue;
-        }
-        // Take the first (lowest metric) match.
-        if best.is_none() {
-            let gw_info = route_gateway_and_oif(&route);
-            if let Some((gw, oif)) = gw_info {
-                let dev_name = ifindex_to_name(oif)
-                    .await
-                    .unwrap_or_else(|| format!("ifindex:{oif}"));
-                info!(
-                    "captured {} default route: via {} dev {}",
-                    if ipv6 { "IPv6" } else { "IPv4" },
-                    gw,
-                    dev_name
-                );
-            }
-            best = Some(route);
-        }
-    }
-    Ok(best)
-}
-
-/// Delete a default route captured by `capture_default_route`.
-///
-/// Logged as a warning if deletion fails — the route may not exist.
-async fn delete_default_route(saved: &RouteMessage) -> Result<(), BackendError> {
-    let ipv6 = saved.header.address_family == netlink_packet_route::AddressFamily::Inet6;
-    info!(
-        "deleting {} default route via rtnetlink",
-        if ipv6 { "IPv6" } else { "IPv4" }
-    );
-
-    let (conn, handle, _) = rtnetlink::new_connection()
-        .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
-    tokio::spawn(conn);
-
-    match handle.route().del(saved.clone()).execute().await {
-        Ok(()) => {
-            info!(
-                "deleted {} default route — ok",
-                if ipv6 { "IPv6" } else { "IPv4" }
-            );
-        }
-        Err(e) => {
-            warn!(
-                "delete {} default route failed: {e} (may be harmless)",
-                if ipv6 { "IPv6" } else { "IPv4" }
-            );
-        }
-    }
-    Ok(())
-}
-
-/// Restore a previously captured default route.
-///
-/// A failure is logged as a warning; we do not fail `disconnect` over a
-/// restore error since the tunnel itself is already torn down.
-async fn restore_default_route(saved: &RouteMessage) -> Result<(), BackendError> {
-    let ipv6 = saved.header.address_family == netlink_packet_route::AddressFamily::Inet6;
-    info!(
-        "restoring {} default route via rtnetlink",
-        if ipv6 { "IPv6" } else { "IPv4" }
-    );
-
-    let (conn, handle, _) = rtnetlink::new_connection()
-        .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
-    tokio::spawn(conn);
-
-    // Add the saved message back: NLM_F_CREATE | NLM_F_EXCL, like `ip route add`.
-    match handle.route().add(saved.clone()).execute().await {
-        Ok(()) => {
-            info!(
-                "restored {} default route — ok",
-                if ipv6 { "IPv6" } else { "IPv4" }
-            );
-        }
-        // EEXIST means a default route is already back — NetworkManager or
-        // dhcpcd reinstalled it when the tunnel interface went away, which is
-        // the common case on a desktop and races us every time. The route we
-        // wanted is present, so this is the goal state, not a failure; it was
-        // being logged as one on every single disconnect.
-        Err(e) if rtnetlink_has_errno(&e, nix::errno::Errno::EEXIST) => {
-            info!(
-                "{} default route already restored by the system — nothing to do",
-                if ipv6 { "IPv6" } else { "IPv4" }
-            );
-        }
-        Err(e) => {
-            warn!(
-                "restore {} default route failed: {e}",
-                if ipv6 { "IPv6" } else { "IPv4" }
-            );
-        }
-    }
-    Ok(())
-}
-
-/// Add a host route for a specific IP via a gateway and output interface.
-async fn add_host_route(ip: IpAddr, gateway: IpAddr, oif: u32) -> Result<(), BackendError> {
-    let (conn, handle, _) = rtnetlink::new_connection()
-        .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
-    tokio::spawn(conn);
-
-    let result = match (ip, gateway) {
-        (IpAddr::V4(dst), IpAddr::V4(gw)) => {
-            let route = RouteMessageBuilder::<Ipv4Addr>::new()
-                .destination_prefix(dst, 32)
-                .gateway(gw)
-                .output_interface(oif)
-                .build();
-            handle.route().add(route).execute().await
-        }
-        (IpAddr::V6(dst), IpAddr::V6(gw)) => {
-            let route = RouteMessageBuilder::<Ipv6Addr>::new()
-                .destination_prefix(dst, 128)
-                .gateway(gw)
-                .output_interface(oif)
-                .build();
-            handle.route().add(route).execute().await
-        }
-        _ => {
-            return Err(BackendError::Interface(
-                "mixed IPv4/IPv6 gateway mismatch".into(),
-            ))
-        }
-    };
-
-    result.map_err(|e| BackendError::Interface(format!("add host route for {ip}: {e}")))
-}
-
-/// Delete a host route (endpoint route added during connect).
-async fn delete_host_route(cidr: &str) -> Result<(), BackendError> {
-    let (ip, prefix) = parse_cidr(cidr)?;
-
-    let (conn, handle, _) = rtnetlink::new_connection()
-        .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
-    tokio::spawn(conn);
-
-    // Find the matching route.
-    let mut routes = handle.route().get(route_dump(ip.is_ipv6())).execute();
-    while let Some(route) = routes
-        .try_next()
-        .await
-        .map_err(|e| BackendError::Interface(format!("rtnetlink route get: {e}")))?
-    {
-        if route.header.destination_prefix_length != prefix {
-            continue;
-        }
-        let matches_dst = route.attributes.iter().any(|a| match a {
-            RouteAttribute::Destination(addr) => match (addr, ip) {
-                (netlink_packet_route::route::RouteAddress::Inet(v4), IpAddr::V4(want)) => {
-                    *v4 == want
-                }
-                (netlink_packet_route::route::RouteAddress::Inet6(v6), IpAddr::V6(want)) => {
-                    *v6 == want
-                }
-                _ => false,
-            },
-            _ => false,
-        });
-        if matches_dst {
-            let (conn2, handle2, _) = rtnetlink::new_connection()
-                .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
-            tokio::spawn(conn2);
-            match handle2.route().del(route).execute().await {
-                Ok(()) => info!("deleted host route {cidr} — ok"),
-                Err(e) => warn!("delete host route {cidr} failed: {e} (may already be gone)"),
-            }
-            return Ok(());
-        }
-    }
-    warn!("host route {cidr} not found for deletion (may already be gone)");
-    Ok(())
 }
 
 /// Add a route for an AllowedIP CIDR via a WireGuard interface.
@@ -478,11 +509,7 @@ async fn ensure_module_loaded() {
         return;
     }
 
-    match tokio::process::Command::new("modprobe")
-        .arg("wireguard")
-        .output()
-        .await
-    {
+    match crate::subprocess::run_system_cmd(&["modprobe"], &["wireguard"], WG_CMD_TIMEOUT).await {
         Ok(out) if out.status.success() => info!("loaded the WireGuard kernel module"),
         Ok(out) => debug!(
             "modprobe wireguard: exit={} stderr={:?}",
@@ -599,16 +626,28 @@ fn kernel_module_tree_state() -> ModuleTree {
     }
 }
 
+/// WireGuard backend — creates and manages a WireGuard kernel interface.
 pub struct WireGuardBackend {
     state: Arc<Mutex<WgState>>,
+    /// Pre-resolved peer endpoints (`host:port` → [`SocketAddr`]) passed in by
+    /// the daemon so connect/reconnect performs a single DNS lookup before
+    /// kill-switch activation (`P2-35`).
+    resolved_endpoints: HashMap<String, SocketAddr>,
 }
 
 impl WireGuardBackend {
     /// Create a new, idle WireGuard backend.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_resolved_endpoints(HashMap::new())
+    }
+
+    /// Create a new WireGuard backend seeded with pre-resolved peer endpoints (`P2-35`).
+    #[must_use]
+    pub fn with_resolved_endpoints(resolved_endpoints: HashMap<String, SocketAddr>) -> Self {
         Self {
             state: Arc::new(Mutex::new(WgState::default())),
+            resolved_endpoints,
         }
     }
 
@@ -677,6 +716,16 @@ impl WireGuardBackend {
         // Build the device update.
         let mut update = DeviceUpdate::new().set_private_key(private_key);
 
+        let uses_default_route = wg_cfg.peers.iter().any(|p| {
+            p.allowed_ips.iter().any(|ip| {
+                let s = ip.to_string();
+                s == "0.0.0.0/0" || s == "::/0"
+            })
+        });
+        if uses_default_route {
+            update = update.set_fwmark(WG_FWMARK_TABLE);
+        }
+
         if let Some(port) = wg_cfg.listen_port {
             update = update.set_listen_port(port);
         }
@@ -689,21 +738,11 @@ impl WireGuardBackend {
             let mut peer_builder = PeerConfigBuilder::new(&peer_key);
 
             if let Some(ref ep) = peer.endpoint {
-                let addr = tokio::net::lookup_host(ep)
-                    .await
-                    .map_err(|e| {
-                        BackendError::Interface(format!(
-                            "cannot resolve peer endpoint '{ep}': {e} — \
-                         check that the hostname is correct and DNS is working"
-                        ))
-                    })?
-                    .next()
-                    .ok_or_else(|| {
-                        BackendError::Interface(format!(
-                            "peer endpoint '{ep}' resolved to zero addresses — \
-                         verify the hostname in your WireGuard configuration"
-                        ))
-                    })?;
+                let trimmed = ep.trim();
+                let addr = match self.resolved_endpoints.get(trimmed).copied() {
+                    Some(pre) => pre,
+                    None => resolve_single_endpoint(trimmed, &self.resolved_endpoints).await?,
+                };
                 peer_builder = peer_builder.set_endpoint(addr);
             }
 
@@ -787,10 +826,12 @@ impl WireGuardBackend {
         // Tell NetworkManager not to manage this interface so it does not
         // appear as a new network adapter in the system tray / network applet.
         // Non-fatal: if nmcli is unavailable or NM is not running, log and continue.
-        match tokio::process::Command::new("nmcli")
-            .args(["device", "set", iface_name, "managed", "no"])
-            .output()
-            .await
+        match crate::subprocess::run_system_cmd(
+            &["nmcli"],
+            &["device", "set", iface_name, "managed", "no"],
+            WG_CMD_TIMEOUT,
+        )
+        .await
         {
             Ok(out) if out.status.success() => {
                 debug!("nmcli: set {iface_name} unmanaged — ok");
@@ -873,28 +914,17 @@ impl WireGuardBackend {
 
     /// Install kernel routes for every `AllowedIPs` entry across all peers.
     ///
-    /// For full-tunnel configs (`0.0.0.0/0` or `::/0` in AllowedIPs) the
-    /// sequence is:
-    /// 1. Capture the current default route via rtnetlink.
-    /// 2. Add a `/32` (IPv4) or `/128` (IPv6) host route for **every** peer
-    ///    endpoint via the original gateway, so WireGuard UDP traffic continues
-    ///    to reach the server after the default is replaced.
-    /// 3. Delete the original default route.
-    /// 4. Add the AllowedIPs routes (including `0.0.0.0/0 dev <wg> metric 100`).
-    ///
-    /// Returns `(saved_v4, saved_v6, endpoint_host_routes)` for storage in
-    /// `WgState` so `disconnect` can reverse the changes.
+    /// Full-tunnel prefixes (`0.0.0.0/0` and `::/0`) are installed into
+    /// dedicated policy-routing table [`WG_FWMARK_TABLE`] (`51820`) with
+    /// `ip rule` rules matching `wg-quick` (`P2-31`), leaving the host's
+    /// default route in `main` intact. Specific prefixes are installed into
+    /// `main` via rtnetlink.
     #[instrument(skip(self, wg_cfg), fields(iface = %iface_name))]
     async fn add_routes(
         &self,
         iface_name: &str,
         wg_cfg: &WireGuardConfig,
-    ) -> Result<(Option<RouteMessage>, Option<RouteMessage>, Vec<String>), BackendError> {
-        let mut saved_v4: Option<RouteMessage> = None;
-        let mut saved_v6: Option<RouteMessage> = None;
-        let mut endpoint_host_routes: Vec<String> = Vec::new();
-
-        // Determine whether full-tunnel routing is needed for each family.
+    ) -> Result<(bool, bool), BackendError> {
         let needs_full_tunnel_v4 = wg_cfg
             .peers
             .iter()
@@ -904,140 +934,37 @@ impl WireGuardBackend {
             .iter()
             .any(|p| p.allowed_ips.iter().any(|ip| ip.to_string() == "::/0"));
 
-        // ----------------------------------------------------------------
-        // Phase 1: Capture default routes via rtnetlink.
-        // ----------------------------------------------------------------
+        // Record policy-routing intent BEFORE installing rules so deterministic
+        // error cleanup (`P2-34`) removes partial `ip rule`s on any failure.
+        {
+            let mut st = self.state.lock().await;
+            st.policy_routing_v4 = needs_full_tunnel_v4;
+            st.policy_routing_v6 = needs_full_tunnel_v6;
+        }
+
         if needs_full_tunnel_v4 {
-            saved_v4 = capture_default_route(false).await?;
+            install_policy_default_route(iface_name, false).await?;
         }
         if needs_full_tunnel_v6 {
-            saved_v6 = capture_default_route(true).await?;
+            install_policy_default_route(iface_name, true).await?;
         }
 
-        // ----------------------------------------------------------------
-        // Phase 2: Add endpoint host routes BEFORE displacing the default.
-        // ----------------------------------------------------------------
-        let gw_v4 = saved_v4.as_ref().and_then(route_gateway_and_oif);
-        let gw_v6 = saved_v6.as_ref().and_then(route_gateway_and_oif);
-
-        if needs_full_tunnel_v4 || needs_full_tunnel_v6 {
-            for peer in &wg_cfg.peers {
-                let Some(ref ep) = peer.endpoint else {
-                    continue;
-                };
-
-                let ep_ip = match tokio::net::lookup_host(ep.as_str()).await {
-                    Ok(mut addrs) => match addrs.next().map(|sa| sa.ip()) {
-                        Some(ip) => ip,
-                        None => {
-                            warn!(
-                                "endpoint {} resolved to zero addresses — skipping host route",
-                                ep
-                            );
-                            continue;
-                        }
-                    },
-                    Err(e) => {
-                        warn!("could not resolve endpoint {} for host route: {e}", ep);
-                        continue;
-                    }
-                };
-
-                let (host_cidr, gw_info, family_active) = if ep_ip.is_ipv4() {
-                    (
-                        format!("{}/32", ep_ip),
-                        gw_v4.as_ref(),
-                        needs_full_tunnel_v4,
-                    )
-                } else {
-                    (
-                        format!("{}/128", ep_ip),
-                        gw_v6.as_ref(),
-                        needs_full_tunnel_v6,
-                    )
-                };
-
-                if !family_active {
-                    continue;
-                }
-
-                match gw_info {
-                    Some((gw, oif)) => {
-                        info!(
-                            "adding endpoint host route: {} via {} oif {}",
-                            host_cidr, gw, oif
-                        );
-                        match add_host_route(ep_ip, *gw, *oif).await {
-                            Ok(()) => {
-                                info!("endpoint host route {} — ok", host_cidr);
-                                endpoint_host_routes.push(host_cidr);
-                            }
-                            Err(e) => {
-                                warn!("failed to add endpoint host route for {}: {e}", ep);
-                            }
-                        }
-                    }
-                    None => {
-                        warn!(
-                            "full-tunnel active but could not extract gateway from default route \
-                             — endpoint host route for {} not added; WireGuard UDP may be lost",
-                            ep
-                        );
-                    }
-                }
-            }
-
-            // ----------------------------------------------------------------
-            // Phase 2b: Persist state BEFORE deleting defaults.
-            // ----------------------------------------------------------------
-            {
-                let mut st = self.state.lock().await;
-                st.interface = Some(iface_name.to_owned());
-                st.saved_default_v4 = saved_v4.clone();
-                st.saved_default_v6 = saved_v6.clone();
-                st.endpoint_host_routes = endpoint_host_routes.clone();
-            }
-
-            // ----------------------------------------------------------------
-            // Phase 3: Displace the original default routes.
-            // ----------------------------------------------------------------
-            if let Some(ref saved) = saved_v4 {
-                delete_default_route(saved).await?;
-            }
-            if let Some(ref saved) = saved_v6 {
-                delete_default_route(saved).await?;
-            }
-        }
-
-        // ----------------------------------------------------------------
-        // Phase 4: Add all AllowedIPs routes via rtnetlink.
-        // ----------------------------------------------------------------
+        // Install explicit (non-/0) AllowedIPs prefixes into the main table.
         let iface_index = ifname_to_index(iface_name).await?;
 
         for peer in &wg_cfg.peers {
             for allowed_ip in &peer.allowed_ips {
                 let cidr = allowed_ip.to_string();
-                let is_default_v4 = cidr == "0.0.0.0/0";
-                let is_default_v6 = cidr == "::/0";
-
-                let metric = if is_default_v4 || is_default_v6 {
-                    Some(100)
-                } else {
-                    None
-                };
-                info!(
-                    "adding route {} dev {}{}",
-                    cidr,
-                    iface_name,
-                    metric.map(|m| format!(" metric {m}")).unwrap_or_default()
-                );
-
-                add_allowed_ip_route(&cidr, iface_index, metric).await?;
+                if cidr == "0.0.0.0/0" || cidr == "::/0" {
+                    continue;
+                }
+                info!("adding route {} dev {}", cidr, iface_name);
+                add_allowed_ip_route(&cidr, iface_index, None).await?;
                 debug!("added route {} dev {}", cidr, iface_name);
             }
         }
 
-        Ok((saved_v4, saved_v6, endpoint_host_routes))
+        Ok((needs_full_tunnel_v4, needs_full_tunnel_v6))
     }
 
     /// Configure per-link DNS via `systemd-resolved` D-Bus (`org.freedesktop.resolve1`).
@@ -1213,13 +1140,14 @@ impl WireGuardBackend {
                 domain_args.join(" ")
             );
 
-            let mut cmd = tokio::process::Command::new("resolvectl");
-            cmd.arg("domain").arg(iface_name);
+            let mut argv: Vec<&str> = Vec::with_capacity(2 + domain_args.len());
+            argv.push("domain");
+            argv.push(iface_name);
             for arg in &domain_args {
-                cmd.arg(arg);
+                argv.push(arg.as_str());
             }
 
-            match cmd.output().await {
+            match crate::subprocess::run_system_cmd(&["resolvectl"], &argv, WG_CMD_TIMEOUT).await {
                 Ok(out) => {
                     let stderr = String::from_utf8_lossy(&out.stderr);
                     if out.status.success() {
@@ -1247,6 +1175,77 @@ impl WireGuardBackend {
         }
 
         Some(ifindex)
+    }
+
+    /// Deterministically tear down any WireGuard interface, policy rules,
+    /// table `51820` routes, and per-link DNS owned by this backend (`P2-31`, `P2-34`).
+    async fn cleanup_tunnel(&self, ignore_missing_iface: bool) -> Result<(), BackendError> {
+        let (iface_name, policy_v4, policy_v6, dns_ifindex) = {
+            let state = self.state.lock().await;
+            match state.interface.clone() {
+                Some(name) => (
+                    name,
+                    state.policy_routing_v4,
+                    state.policy_routing_v6,
+                    state.dns_configured_ifindex,
+                ),
+                None => {
+                    debug!("cleanup_tunnel called with no active interface — no-op");
+                    return Ok(());
+                }
+            }
+        };
+
+        // Step 0: Revert systemd-resolved DNS settings before the interface disappears.
+        if let Some(ifindex) = dns_ifindex {
+            match zbus::Connection::system().await {
+                Ok(conn) => {
+                    match zbus::Proxy::new(
+                        &conn,
+                        "org.freedesktop.resolve1",
+                        "/org/freedesktop/resolve1",
+                        "org.freedesktop.resolve1.Manager",
+                    )
+                    .await
+                    {
+                        Ok(proxy) => match proxy.call_method("RevertLink", &(ifindex,)).await {
+                            Ok(_) => info!("RevertLink({iface_name}) — ok"),
+                            Err(e) => warn!("RevertLink({iface_name}) failed: {e}"),
+                        },
+                        Err(e) => warn!("resolve1 proxy for RevertLink failed: {e}"),
+                    }
+                }
+                Err(e) => warn!("D-Bus connection for RevertLink failed: {e}"),
+            }
+        }
+
+        // Step 1: Remove policy-routing rules and flush table 51820 BEFORE or
+        // alongside interface deletion so traffic immediately reverts cleanly
+        // to `main` (`P2-31`).
+        if policy_v4 || policy_v6 {
+            cleanup_policy_rules(policy_v4, policy_v6).await;
+        }
+
+        // Step 2: Delete the WireGuard interface via rtnetlink.
+        let del_res = match delete_interface(&iface_name).await {
+            Ok(()) => Ok(()),
+            Err(BackendError::Interface(ref msg))
+                if ignore_missing_iface || msg.contains("not found") =>
+            {
+                debug!("delete_interface({iface_name}): {msg} — already absent");
+                Ok(())
+            }
+            Err(e) => Err(e),
+        };
+
+        {
+            let mut state = self.state.lock().await;
+            *state = WgState::default();
+        }
+
+        del_res?;
+        info!("WireGuard tunnel {} torn down", iface_name);
+        Ok(())
     }
 }
 
@@ -1402,39 +1401,55 @@ impl VpnBackend for WireGuardBackend {
         };
         let wg_cfg = effective_cfg.as_ref();
 
-        // 2. Create / configure the WireGuard kernel interface.
-        self.apply_wg_config(&iface_name, wg_cfg, private_key)
-            .await?;
-
-        // 3. Assign addresses and bring the interface up.
-        self.assign_addresses(&iface_name, wg_cfg).await?;
-
-        // 4. Add routes for peer AllowedIPs.
-        //    For full-tunnel configs this also captures the original default
-        //    route, pins endpoint host routes on the physical NIC, and then
-        //    displaces the default before adding the tunnel default route.
-        let (saved_v4, saved_v6, endpoint_host_routes) =
-            self.add_routes(&iface_name, wg_cfg).await?;
-
-        // 5. Configure DNS (non-fatal — returns None on failure).
-        // Only configure if the profile explicitly opted in, mirroring macOS.
-        let dns_ifindex = if profile.push_dns {
-            self.configure_dns(&iface_name, wg_cfg).await
-        } else {
-            debug!("profile.push_dns is false — skipping systemd-resolved configuration");
-            None
-        };
-
-        // Record active interface and all state needed for clean disconnect.
+        // Reserve the interface name in `WgState` BEFORE touching the kernel so
+        // any error below triggers deterministic cleanup (`P2-34`).
         {
             let mut state = self.state.lock().await;
+            if state.interface.is_some() {
+                return Err(BackendError::AlreadyConnected);
+            }
             state.interface = Some(iface_name.clone());
-            state.saved_default_v4 = saved_v4;
-            state.saved_default_v6 = saved_v6;
-            state.endpoint_host_routes = endpoint_host_routes;
+        }
+
+        let bringup_res: Result<(), BackendError> = async {
+            // 2. Create / configure the WireGuard kernel interface.
+            self.apply_wg_config(&iface_name, wg_cfg, private_key)
+                .await?;
+
+            // 3. Assign addresses and bring the interface up.
+            self.assign_addresses(&iface_name, wg_cfg).await?;
+
+            // 4. Add routes (policy routing via table 51820 for full-tunnel,
+            //    rtnetlink `main` routes for explicit prefixes).
+            let (policy_v4, policy_v6) = self.add_routes(&iface_name, wg_cfg).await?;
+
+            // 5. Configure DNS (non-fatal — returns None on failure).
+            // Only configure if the profile explicitly opted in, mirroring macOS.
+            let dns_ifindex = if profile.push_dns {
+                self.configure_dns(&iface_name, wg_cfg).await
+            } else {
+                debug!("profile.push_dns is false — skipping systemd-resolved configuration");
+                None
+            };
+
+            let mut state = self.state.lock().await;
+            state.interface = Some(iface_name.clone());
+            state.policy_routing_v4 = policy_v4;
+            state.policy_routing_v6 = policy_v6;
             state.dns_configured_ifindex = dns_ifindex;
             state.addresses = wg_cfg.addresses.clone();
             state.connected_at = Some(std::time::Instant::now());
+            Ok(())
+        }
+        .await;
+
+        if let Err(err) = bringup_res {
+            warn!(
+                "WireGuard connect failed on {} ({}); running deterministic cleanup",
+                iface_name, err
+            );
+            let _ = self.cleanup_tunnel(true).await;
+            return Err(err);
         }
 
         info!("WireGuard tunnel {} is up", iface_name);
@@ -1443,87 +1458,7 @@ impl VpnBackend for WireGuardBackend {
 
     #[instrument(skip(self))]
     async fn disconnect(&self) -> Result<(), BackendError> {
-        let (iface_name, saved_v4, saved_v6, endpoint_host_routes, dns_ifindex) = {
-            let state = self.state.lock().await;
-            match state.interface.clone() {
-                Some(name) => (
-                    name,
-                    state.saved_default_v4.clone(),
-                    state.saved_default_v6.clone(),
-                    state.endpoint_host_routes.clone(),
-                    state.dns_configured_ifindex,
-                ),
-                None => {
-                    debug!("disconnect called but no interface is active — no-op");
-                    return Ok(());
-                }
-            }
-        };
-
-        // Step 0: Revert systemd-resolved DNS settings before the interface
-        // disappears.  RevertLink removes all per-link DNS servers and domains
-        // that were previously set with SetLinkDNS / SetLinkDomains.
-        if let Some(ifindex) = dns_ifindex {
-            match zbus::Connection::system().await {
-                Ok(conn) => {
-                    match zbus::Proxy::new(
-                        &conn,
-                        "org.freedesktop.resolve1",
-                        "/org/freedesktop/resolve1",
-                        "org.freedesktop.resolve1.Manager",
-                    )
-                    .await
-                    {
-                        Ok(proxy) => match proxy.call_method("RevertLink", &(ifindex,)).await {
-                            Ok(_) => info!("RevertLink({iface_name}) — ok"),
-                            Err(e) => warn!("RevertLink({iface_name}) failed: {e}"),
-                        },
-                        Err(e) => warn!("resolve1 proxy for RevertLink failed: {e}"),
-                    }
-                }
-                Err(e) => warn!("D-Bus connection for RevertLink failed: {e}"),
-            }
-        }
-
-        // Step 1: Delete the WireGuard interface.  The kernel automatically
-        // removes all routes whose `dev` is that interface (AllowedIPs routes,
-        // the tunnel default route, etc.).
-        match delete_interface(&iface_name).await {
-            Ok(()) => {}
-            Err(BackendError::Interface(ref msg)) if msg.contains("not found") => {
-                warn!("delete_interface: {msg} — interface already gone, continuing disconnect");
-            }
-            Err(e) => return Err(e),
-        }
-
-        // Step 2: Remove endpoint host routes via rtnetlink.  These were
-        // installed on the physical interface and survive interface deletion.
-        for cidr in &endpoint_host_routes {
-            info!("removing endpoint host route: {}", cidr);
-            if let Err(e) = delete_host_route(cidr).await {
-                warn!("delete endpoint host route {}: {e}", cidr);
-            }
-        }
-
-        // Step 3: Restore the original default routes via rtnetlink.
-        if let Some(ref saved) = saved_v4 {
-            restore_default_route(saved).await?;
-        }
-        if let Some(ref saved) = saved_v6 {
-            restore_default_route(saved).await?;
-        }
-
-        {
-            let mut state = self.state.lock().await;
-            state.interface = None;
-            state.saved_default_v4 = None;
-            state.saved_default_v6 = None;
-            state.endpoint_host_routes = Vec::new();
-            state.dns_configured_ifindex = None;
-        }
-
-        info!("WireGuard tunnel {} torn down", iface_name);
-        Ok(())
+        self.cleanup_tunnel(false).await
     }
 
     async fn status(&self) -> Result<BackendStatus, BackendError> {
@@ -1730,5 +1665,46 @@ mod module_hint_tests {
             !msg.contains("sudo modprobe"),
             "tells you to load a module that is already loaded: {msg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod policy_routing_and_endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn policy_rule_matchers_detect_hex_and_decimal_fwmark() {
+        let sample_hex = "0:\tfrom all lookup local\n\
+                          32764:\tfrom all lookup main suppress_prefixlength 0\n\
+                          32765:\tnot from all fwmark 0xca6c lookup 51820\n\
+                          32766:\tfrom all lookup main\n";
+        assert!(has_fwmark_policy_rule(sample_hex));
+        assert!(has_suppress_prefix_rule(sample_hex));
+
+        let sample_dec = "32765:\tnot from all fwmark 51820 lookup 51820\n";
+        assert!(has_fwmark_policy_rule(sample_dec));
+        assert!(!has_suppress_prefix_rule(sample_dec));
+    }
+
+    #[tokio::test]
+    async fn resolve_single_endpoint_parses_literals_and_uses_cached_fallback() {
+        let empty = HashMap::new();
+        let v4 = resolve_single_endpoint("198.51.100.10:51820", &empty)
+            .await
+            .unwrap();
+        assert_eq!(v4, "198.51.100.10:51820".parse().unwrap());
+
+        let v6 = resolve_single_endpoint("[2001:db8::1]:51820", &empty)
+            .await
+            .unwrap();
+        assert_eq!(v6, "[2001:db8::1]:51820".parse().unwrap());
+
+        let mut cached = HashMap::new();
+        let expected: SocketAddr = "203.0.113.42:51820".parse().unwrap();
+        cached.insert("vpn.invalid:51820".to_owned(), expected);
+        let resolved = resolve_single_endpoint("vpn.invalid:51820", &cached)
+            .await
+            .unwrap();
+        assert_eq!(resolved, expected);
     }
 }

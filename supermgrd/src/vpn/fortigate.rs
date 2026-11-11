@@ -263,24 +263,26 @@ async fn run_swanctl(args: &[&str]) -> Result<std::process::Output, BackendError
         info!("running: {}", cmd_str);
     }
 
-    let out_future = tokio::process::Command::new("swanctl").args(args).output();
-
-    let out = tokio::time::timeout(std::time::Duration::from_secs(15), out_future)
-        .await
-        .map_err(|_| BackendError::Interface("swanctl command timed out after 15 seconds".into()))?
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                BackendError::Interface(
-                    "swanctl not found — install strongswan and strongswan-swanctl".into(),
-                )
-            } else if e.kind() == std::io::ErrorKind::PermissionDenied {
-                BackendError::Interface(
-                    "permission denied running swanctl — the daemon must run as root".into(),
-                )
-            } else {
-                BackendError::Io(e)
-            }
-        })?;
+    // `--initiate` passes `--timeout 30`, so allow 35s for initiate and 15s otherwise.
+    let timeout_secs = if args.contains(&"--initiate") { 35 } else { 15 };
+    let out = crate::subprocess::run_system_cmd(
+        &["swanctl"],
+        args,
+        std::time::Duration::from_secs(timeout_secs),
+    )
+    .await
+    .map_err(|e| match e.kind() {
+        std::io::ErrorKind::TimedOut => BackendError::Interface(format!(
+            "swanctl command timed out after {timeout_secs} seconds"
+        )),
+        std::io::ErrorKind::NotFound => BackendError::Interface(
+            "swanctl not found — install strongswan and strongswan-swanctl".into(),
+        ),
+        std::io::ErrorKind::PermissionDenied => BackendError::Interface(
+            "permission denied running swanctl — the daemon must run as root".into(),
+        ),
+        _ => BackendError::Io(e),
+    })?;
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -690,9 +692,7 @@ fn parse_gateway(route_line: &str) -> Option<(String, String)> {
 async fn capture_default_route_v4() -> Result<Option<String>, BackendError> {
     let argv = ["route", "show", "exact", "0.0.0.0/0"];
     info!("running: ip {}", argv.join(" "));
-    let out = tokio::process::Command::new("ip")
-        .args(argv)
-        .output()
+    let out = crate::subprocess::run_system_cmd(&["ip"], &argv, std::time::Duration::from_secs(5))
         .await
         .map_err(BackendError::Io)?;
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -737,16 +737,18 @@ const DNS_DUMMY_IFACE: &str = "supermgr_dns";
 /// and recreate so we know the link state is fresh.  Returns the interface
 /// name on success so the caller can pass it to `configure_dns_for_link`.
 async fn ensure_dns_dummy() -> Option<&'static str> {
+    let ip_timeout = std::time::Duration::from_secs(5);
     // Best-effort delete of any leftover from a previous run.
-    let _ = tokio::process::Command::new("ip")
-        .args(["link", "del", DNS_DUMMY_IFACE])
-        .output()
-        .await;
+    let _ =
+        crate::subprocess::run_system_cmd(&["ip"], &["link", "del", DNS_DUMMY_IFACE], ip_timeout)
+            .await;
 
-    let add = tokio::process::Command::new("ip")
-        .args(["link", "add", DNS_DUMMY_IFACE, "type", "dummy"])
-        .output()
-        .await;
+    let add = crate::subprocess::run_system_cmd(
+        &["ip"],
+        &["link", "add", DNS_DUMMY_IFACE, "type", "dummy"],
+        ip_timeout,
+    )
+    .await;
     match add {
         Ok(out) if out.status.success() => {}
         Ok(out) => {
@@ -763,10 +765,12 @@ async fn ensure_dns_dummy() -> Option<&'static str> {
         }
     }
 
-    let up = tokio::process::Command::new("ip")
-        .args(["link", "set", DNS_DUMMY_IFACE, "up"])
-        .output()
-        .await;
+    let up = crate::subprocess::run_system_cmd(
+        &["ip"],
+        &["link", "set", DNS_DUMMY_IFACE, "up"],
+        ip_timeout,
+    )
+    .await;
     if let Ok(out) = up {
         if !out.status.success() {
             warn!(
@@ -782,10 +786,12 @@ async fn ensure_dns_dummy() -> Option<&'static str> {
 
 /// Remove the DNS dummy interface.  Idempotent — ignores errors.
 pub(crate) async fn remove_dns_dummy() {
-    let _ = tokio::process::Command::new("ip")
-        .args(["link", "del", DNS_DUMMY_IFACE])
-        .output()
-        .await;
+    let _ = crate::subprocess::run_system_cmd(
+        &["ip"],
+        &["link", "del", DNS_DUMMY_IFACE],
+        std::time::Duration::from_secs(5),
+    )
+    .await;
 }
 
 /// Configure per-link DNS on `iface_name` via systemd-resolved D-Bus.
@@ -1082,11 +1088,13 @@ impl VpnBackend for FortiGateBackend {
                 "adding endpoint host route: ip route add {} via {} dev {}",
                 host_cidr, gw, dev
             );
-            let out = tokio::process::Command::new("ip")
-                .args(["route", "add", &host_cidr, "via", gw, "dev", dev])
-                .output()
-                .await
-                .map_err(BackendError::Io)?;
+            let out = crate::subprocess::run_system_cmd(
+                &["ip"],
+                &["route", "add", &host_cidr, "via", gw, "dev", dev],
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .map_err(BackendError::Io)?;
             let stderr = String::from_utf8_lossy(&out.stderr);
             info!(
                 "ip route add {} via {} dev {} → exit={} stderr={:?}",
@@ -1125,10 +1133,12 @@ impl VpnBackend for FortiGateBackend {
         if !out.status.success() {
             // Clean up host routes and config on failure.
             for cidr in &endpoint_host_routes {
-                let _ = tokio::process::Command::new("ip")
-                    .args(["route", "del", cidr])
-                    .output()
-                    .await;
+                let _ = crate::subprocess::run_system_cmd(
+                    &["ip"],
+                    &["route", "del", cidr],
+                    std::time::Duration::from_secs(5),
+                )
+                .await;
             }
             let _ = tokio::fs::remove_file(&config_path).await;
             let _ = run_swanctl(&["--load-all"]).await;
@@ -1183,29 +1193,26 @@ impl VpnBackend for FortiGateBackend {
                 let saved_default_route = saved_default_route.clone();
                 let config_path = config_path.clone();
                 async move {
+                    let ip_timeout = std::time::Duration::from_secs(5);
                     let _ =
                         run_swanctl(&["--terminate", "--ike", &conn_name, "--timeout", "5"]).await;
                     for spec in &tunnel_routes {
-                        let mut cmd = tokio::process::Command::new("ip");
-                        cmd.arg("route").arg("del");
-                        for word in spec.split_whitespace() {
-                            cmd.arg(word);
-                        }
-                        let _ = cmd.output().await;
+                        let mut argv = vec!["route", "del"];
+                        argv.extend(spec.split_whitespace());
+                        let _ = crate::subprocess::run_system_cmd(&["ip"], &argv, ip_timeout).await;
                     }
                     if let Some(saved) = saved_default_route {
-                        let mut cmd = tokio::process::Command::new("ip");
-                        cmd.arg("route").arg("add");
-                        for word in saved.split_whitespace() {
-                            cmd.arg(word);
-                        }
-                        let _ = cmd.output().await;
+                        let mut argv = vec!["route", "add"];
+                        argv.extend(saved.split_whitespace());
+                        let _ = crate::subprocess::run_system_cmd(&["ip"], &argv, ip_timeout).await;
                     }
                     for cidr in &endpoint_host_routes {
-                        let _ = tokio::process::Command::new("ip")
-                            .args(["route", "del", cidr])
-                            .output()
-                            .await;
+                        let _ = crate::subprocess::run_system_cmd(
+                            &["ip"],
+                            &["route", "del", cidr],
+                            ip_timeout,
+                        )
+                        .await;
                     }
                     let _ = tokio::fs::remove_file(&config_path).await;
                     let _ = run_swanctl(&["--load-all"]).await;
@@ -1271,11 +1278,13 @@ impl VpnBackend for FortiGateBackend {
             if profile.full_tunnel {
                 // Full-tunnel: capture old default, then atomically swap in a
                 // new one with src=VIP via the same gateway.
-                let cap = tokio::process::Command::new("ip")
-                    .args(["route", "show", "exact", "0.0.0.0/0"])
-                    .output()
-                    .await
-                    .map_err(BackendError::Io)?;
+                let cap = crate::subprocess::run_system_cmd(
+                    &["ip"],
+                    &["route", "show", "exact", "0.0.0.0/0"],
+                    std::time::Duration::from_secs(5),
+                )
+                .await
+                .map_err(BackendError::Io)?;
                 let cap_out = String::from_utf8_lossy(&cap.stdout);
                 saved_default_route = cap_out
                     .lines()
@@ -1300,8 +1309,10 @@ impl VpnBackend for FortiGateBackend {
                         // If the subprocess itself fails to spawn (e.g. fork
                         // ENOMEM), we still have a live SA. Roll back the SA
                         // before propagating the error.
-                        let replace_out = match tokio::process::Command::new("ip")
-                            .args([
+                        let vip_str = vip.to_string();
+                        let replace_out = match crate::subprocess::run_system_cmd(
+                            &["ip"],
+                            &[
                                 "route",
                                 "replace",
                                 "default",
@@ -1310,17 +1321,18 @@ impl VpnBackend for FortiGateBackend {
                                 "dev",
                                 outbound_dev,
                                 "src",
-                                &vip.to_string(),
+                                &vip_str,
                                 "metric",
                                 "50",
-                            ])
-                            .output()
-                            .await
+                            ],
+                            std::time::Duration::from_secs(5),
+                        )
+                        .await
                         {
                             Ok(o) => o,
                             Err(io) => {
                                 warn!(
-                                    "ip route replace default failed to spawn ({io}); \
+                                    "ip route replace default failed ({io}); \
                                      tearing down SA and restoring original default"
                                 );
                                 rollback_after_initiate(
@@ -1360,6 +1372,7 @@ impl VpnBackend for FortiGateBackend {
                 // any profile DNS server they don't cover — or the assigned
                 // resolver ends up with a negotiated selector but no kernel
                 // route, which is the same dead nameserver dressed differently.
+                let vip_str = vip.to_string();
                 for route_cidr in &supermgr_core::vpn::profile::split_ts_with_dns(
                     &fg_cfg.routes,
                     &fg_cfg.dns_servers,
@@ -1367,19 +1380,13 @@ impl VpnBackend for FortiGateBackend {
                     let cidr = route_cidr.to_string();
                     info!("installing split-tunnel route: {cidr} dev {outbound_dev} src {vip}");
 
-                    let add_out = tokio::process::Command::new("ip")
-                        .args([
-                            "route",
-                            "add",
-                            &cidr,
-                            "dev",
-                            outbound_dev,
-                            "src",
-                            &vip.to_string(),
-                        ])
-                        .output()
-                        .await
-                        .map_err(BackendError::Io)?;
+                    let add_out = crate::subprocess::run_system_cmd(
+                        &["ip"],
+                        &["route", "add", &cidr, "dev", outbound_dev, "src", &vip_str],
+                        std::time::Duration::from_secs(5),
+                    )
+                    .await
+                    .map_err(BackendError::Io)?;
 
                     if add_out.status.success() {
                         tunnel_routes.push(cidr.clone());
@@ -1557,14 +1564,14 @@ impl VpnBackend for FortiGateBackend {
         // connect() where this is pushed.  For split-tunnel, the entry is a plain
         // CIDR which becomes a one-token argument; whitespace-splitting handles
         // both cases uniformly.
+        let ip_timeout = std::time::Duration::from_secs(5);
         for spec in &tunnel_routes {
             info!("removing tunnel route: {spec}");
-            let mut cmd = tokio::process::Command::new("ip");
-            cmd.arg("route").arg("del");
-            for word in spec.split_whitespace() {
-                cmd.arg(word);
-            }
-            let out = cmd.output().await.map_err(BackendError::Io)?;
+            let mut argv = vec!["route", "del"];
+            argv.extend(spec.split_whitespace());
+            let out = crate::subprocess::run_system_cmd(&["ip"], &argv, ip_timeout)
+                .await
+                .map_err(BackendError::Io)?;
             if !out.status.success() {
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 warn!(
@@ -1577,12 +1584,9 @@ impl VpnBackend for FortiGateBackend {
         // Restore original default route if we displaced it for full-tunnel.
         if let Some(ref saved) = saved_default_route {
             info!("restoring original default route: {saved}");
-            let mut cmd = tokio::process::Command::new("ip");
-            cmd.arg("route").arg("add");
-            for word in saved.split_whitespace() {
-                cmd.arg(word);
-            }
-            match cmd.output().await {
+            let mut argv = vec!["route", "add"];
+            argv.extend(saved.split_whitespace());
+            match crate::subprocess::run_system_cmd(&["ip"], &argv, ip_timeout).await {
                 Ok(out) if !out.status.success() => {
                     let stderr = String::from_utf8_lossy(&out.stderr);
                     warn!("restore default route failed: {}", stderr.trim());
@@ -1597,11 +1601,10 @@ impl VpnBackend for FortiGateBackend {
         // charon, so we must remove them explicitly.
         for cidr in &endpoint_host_routes {
             info!("removing endpoint host route: ip route del {}", cidr);
-            let out = tokio::process::Command::new("ip")
-                .args(["route", "del", cidr])
-                .output()
-                .await
-                .map_err(BackendError::Io)?;
+            let out =
+                crate::subprocess::run_system_cmd(&["ip"], &["route", "del", cidr], ip_timeout)
+                    .await
+                    .map_err(BackendError::Io)?;
             let stderr = String::from_utf8_lossy(&out.stderr);
             if !out.status.success() {
                 warn!(

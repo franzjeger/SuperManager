@@ -64,6 +64,86 @@ pub fn write_private(path: &Path, bytes: &[u8], owner: Option<u32>) -> io::Resul
     create_private(path, bytes, owner)
 }
 
+/// Atomically write `bytes` to `path` at mode `0600` owned by this process.
+///
+/// Ensures the parent directory exists, is a real directory (not a symlink),
+/// and is owned by the current effective UID; stages `bytes` into an
+/// unguessable `O_CREAT | O_EXCL` `0600` sibling temporary file, calls
+/// `sync_all()`, and atomically `rename`s it over `path`.
+///
+/// Because POSIX `rename(2)` replaces the target directory entry itself rather
+/// than following a symlink at `path`, there is never a window where `path` is
+/// missing, partially written, or readable at a wider mode.
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] if directory verification, temporary file creation,
+/// write, fsync, or atomic rename fails. Any staged temporary file is unlinked
+/// on failure.
+pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write as _;
+
+    let dir = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} has no parent directory", path.display()),
+        )
+    })?;
+
+    if !dir.exists() {
+        ensure_private_dir(dir, 0o700)?;
+    } else {
+        let meta = std::fs::symlink_metadata(dir)?;
+        if !meta.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{} exists and is not a directory", dir.display()),
+            ));
+        }
+        if meta.uid() != nix::unistd::getuid().as_raw() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} is owned by uid {}, not by this daemon — refusing to write private state into it",
+                    dir.display(),
+                    meta.uid()
+                ),
+            ));
+        }
+    }
+
+    let file_stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("state");
+    let tmp_path = dir.join(format!(
+        ".{file_stem}.{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp_path)?;
+
+    let write_res = (|| -> io::Result<()> {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    drop(file);
+
+    if let Err(err) = write_res {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+
+    if let Err(err) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+
+    Ok(())
+}
+
 /// Like [`write_private`], but fails rather than replacing an existing file.
 ///
 /// The right choice when the path carries randomness and is therefore
@@ -384,6 +464,27 @@ mod tests {
         ensure_private_dir(&path, 0o700).unwrap();
 
         assert_eq!(mode_of(&path), 0o700);
+    }
+
+    #[test]
+    fn atomic_private_write_preserves_0600_and_replaces_symlinks() {
+        let dir = scratch();
+        let victim = dir.path().join("victim");
+        let target = dir.path().join("nested/state.json");
+
+        write_private_atomic(&target, b"first").unwrap();
+        assert_eq!(mode_of(&target), 0o600);
+        assert_eq!(std::fs::read(&target).unwrap(), b"first");
+
+        std::fs::remove_file(&target).unwrap();
+        std::os::unix::fs::symlink(&victim, &target).unwrap();
+        write_private_atomic(&target, b"second").unwrap();
+        assert!(
+            !victim.exists(),
+            "atomic rename must not follow target symlink"
+        );
+        assert_eq!(mode_of(&target), 0o600);
+        assert_eq!(std::fs::read(&target).unwrap(), b"second");
     }
 
     // --- the call sites -----------------------------------------------

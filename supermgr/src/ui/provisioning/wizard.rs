@@ -2246,7 +2246,8 @@ fn build_step5_review(
                                     return;
                                 }
                             };
-                            if let Err(e) = std::io::Write::write_all(&mut tmp_file, html.as_bytes())
+                            if let Err(e) =
+                                std::io::Write::write_all(&mut tmp_file, html.as_bytes())
                             {
                                 tracing::error!("Failed to write temp HTML: {e}");
                                 return;
