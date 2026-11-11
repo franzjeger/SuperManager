@@ -45,32 +45,30 @@ async fn main() -> anyhow::Result<()> {
 
     // Set up secrets store.
     //
-    // The architecturally correct macOS path is the Data Protection
-    // Keychain, accessed via `kSecUseDataProtectionKeychain: true`.
-    // DPK requires a `keychain-access-groups` entitlement, which in
-    // turn requires the *binary* to be authorised by a provisioning
-    // profile. The Personal Team profile we have only authorises
-    // bundles that carry an `embedded.provisionprofile` — and a raw
-    // CLI binary like this daemon, sitting in `Contents/MacOS/`
-    // alongside the GUI but not wrapped in its own .app, has no way
-    // to carry one. Signing it with the entitlement anyway makes
-    // amfid kill the process on launch (SIGKILL within milliseconds
-    // of fork — no log entries reach us, console barely registers
-    // it).
-    //
-    // The architecturally correct fix is to have the GUI own all
-    // user-facing secrets in DPK and ship them down to the daemon
-    // over RPC on demand — that's the macOS-canonical "GUI owns
-    // user data, headless helpers are stateless" pattern. We're
-    // not there yet for SSH passwords (VPN already works that way),
-    // so for now the daemon falls back to the file-based store
-    // (mode 0600 JSON in the data dir). It's the same bytes as the
-    // pre-DPK days; not encrypted at rest, but readable only by
-    // the user. Once SSH password flow gets refactored to send the
-    // secret as an RPC argument from the GUI (mirroring VPN), this
-    // store becomes write-only and eventually unused.
-    let secrets: Arc<dyn supermgr_core::keyring::SecretStore> =
-        Arc::new(FileSecretStore::new(data_dir.join("secrets.json")));
+    // `SuperManager.app` owns a 256-bit wrapping key in the macOS Data
+    // Protection Keychain (`com.sybr.supermanager.vpn` /
+    // `engine/secrets-master-key-v1`) and passes it to `supermgrd-mac`
+    // over a private `--key-stdin` pipe at spawn time. `FileSecretStore`
+    // seals `secrets.json` at rest with `AES-256-GCM` (`version: 2`) and
+    // transparently upgrades any existing v1 `secrets.json` in place on
+    // startup without prompting or losing stored credentials.
+    let secrets_path = data_dir.join("secrets.json");
+    let store = if std::env::args().any(|a| a == "--key-stdin") {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        let s = FileSecretStore::from_hex_key(secrets_path, &line)?;
+        line.replace_range(.., "");
+        s
+    } else if let Ok(dpk_key) = supermgr_engine::secrets::keychain::try_load_or_create_dpk_master_key() {
+        FileSecretStore::with_master_key(secrets_path, *dpk_key)
+    } else {
+        tracing::warn!(
+            "running without Data Protection Keychain wrapping key (unsigned dev/CLI invocation)"
+        );
+        FileSecretStore::new(secrets_path)
+    };
+    store.migrate_to_encrypted_if_needed().await?;
+    let secrets: Arc<dyn supermgr_core::keyring::SecretStore> = Arc::new(store);
 
     // Background recon scheduler is intentionally disabled while the Recon /
     // Engagement UI is inactive so the daemon never triggers unsolicited

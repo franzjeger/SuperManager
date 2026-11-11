@@ -1,30 +1,79 @@
-//! File-based secrets store.
+//! File-based secrets store with optional `AES-256-GCM` at-rest wrapping.
 //!
-//! Credentials are stored as a JSON map of `label -> base64(bytes)` in a
-//! permission-restricted file. Used on both Linux and macOS as a simple
-//! alternative to system keyrings.
+//! Credentials are stored as a map of `label -> base64(bytes)` in an
+//! owner-only (`0600`) file. When configured with a 256-bit master key
+//! (supplied on macOS from the Data Protection Keychain), the map is sealed in
+//! an authenticated `AES-256-GCM` envelope (`version: 2`) on disk, while
+//! transparently upgrading legacy plain JSON (`version: 1`) files in place.
 
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use aes_gcm::aead::{Aead, KeyInit, Payload};
+use aes_gcm::{Aes256Gcm, Nonce};
+use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use rand::RngExt as _;
+use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use supermgr_core::error::SecretError;
 use supermgr_core::keyring::{SecretStore, ZeroizingSecret};
 
+const ENVELOPE_VERSION: u32 = 2;
+const ENVELOPE_CIPHER: &str = "aes-256-gcm";
+const ENVELOPE_AAD: &[u8] = b"supermanager-secrets-v2";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct EncryptedSecretsEnvelope {
+    version: u32,
+    cipher: String,
+    nonce: String,
+    ciphertext: String,
+}
+
 /// File-based [`SecretStore`] implementation.
 pub struct FileSecretStore {
     path: PathBuf,
+    master_key: Option<Arc<Zeroizing<[u8; 32]>>>,
 }
 
 impl FileSecretStore {
-    /// Create a new file-based store at the given path.
+    /// Create a new file-based store at the given path (unwrapped JSON mode).
     #[must_use]
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            master_key: None,
+        }
+    }
+
+    /// Create an `AES-256-GCM` encrypted store wrapped by `master_key`.
+    #[must_use]
+    pub fn with_master_key(path: PathBuf, master_key: [u8; 32]) -> Self {
+        Self {
+            path,
+            master_key: Some(Arc::new(Zeroizing::new(master_key))),
+        }
+    }
+
+    /// Parse a 64-character hex master key (e.g. delivered over stdin pipe from
+    /// the signed GUI bundle) into a zeroizing 32-byte key and construct an
+    /// encrypted [`FileSecretStore`].
+    pub fn from_hex_key(path: PathBuf, hex_key: &str) -> Result<Self> {
+        let trimmed = hex_key.trim();
+        if trimmed.len() != 64 || !trimmed.is_ascii() {
+            bail!("expected 64-character hex master key");
+        }
+        let mut key = Zeroizing::new([0u8; 32]);
+        for (i, chunk) in trimmed.as_bytes().chunks_exact(2).enumerate() {
+            let pair = std::str::from_utf8(chunk).context("invalid UTF-8 in hex key")?;
+            key[i] = u8::from_str_radix(pair, 16).context("invalid hex digit in master key")?;
+        }
+        Ok(Self::with_master_key(path, *key))
     }
 
     /// Create with the default path for the current platform.
@@ -34,9 +83,53 @@ impl FileSecretStore {
         Self::new(dir.join("secrets.json"))
     }
 
+    /// Transparently upgrade an existing plain JSON `secrets.json` into an
+    /// `AES-256-GCM` envelope on disk while holding the store's OS lock.
+    /// No-op when no `master_key` is configured, when the file does not yet
+    /// exist, or when it is already an encrypted v2 envelope.
+    pub async fn migrate_to_encrypted_if_needed(&self) -> Result<()> {
+        let Some(key) = self.master_key.clone() else {
+            return Ok(());
+        };
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            if !path.exists() {
+                return Ok(());
+            }
+            let dir = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            std::fs::create_dir_all(dir).context("create secrets directory")?;
+            let lock = open_transaction_lock(&path)?;
+
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("read secrets file {}", path.display()))?;
+            if is_encrypted_envelope(&text) {
+                // Verify the key actually decrypts the existing store at startup.
+                let _ = parse_secrets_text(&text, &path, Some(&key))?;
+                drop(lock);
+                return Ok(());
+            }
+            let map: HashMap<String, String> = serde_json::from_str(&text)
+                .with_context(|| format!("parse legacy secrets file {}", path.display()))?;
+            persist_map_atomic(dir, &path, &map, Some(&key))?;
+            tracing::info!(
+                "migrated {} secret(s) in {} to AES-256-GCM at-rest format",
+                map.len(),
+                path.display()
+            );
+            drop(lock);
+            Ok(())
+        })
+        .await
+        .context("secret store migration task failed")?
+    }
+
     async fn read_map(&self) -> Result<HashMap<String, String>> {
         let path = self.path.clone();
-        tokio::task::spawn_blocking(move || read_map_at(&path))
+        let key = self.master_key.clone();
+        tokio::task::spawn_blocking(move || read_map_at(&path, key.as_deref().map(|z| &**z)))
             .await
             .context("secret store reader task failed")?
     }
@@ -50,40 +143,19 @@ impl FileSecretStore {
         update: impl FnOnce(&mut HashMap<String, String>) + Send + 'static,
     ) -> Result<()> {
         let path = self.path.clone();
+        let key = self.master_key.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let dir = path
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty())
                 .unwrap_or_else(|| Path::new("."));
             std::fs::create_dir_all(dir).context("create secrets directory")?;
-            let mut options = std::fs::OpenOptions::new();
-            options.read(true).write(true).create(true).truncate(false);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let lock = options
-                .open(path.with_extension("lock"))
-                .context("open secret store transaction lock")?;
-            lock.lock().context("lock secret store transaction")?;
+            let lock = open_transaction_lock(&path)?;
 
-            let mut map = read_map_at(&path)?;
+            let key_ref = key.as_deref().map(|z| &**z);
+            let mut map = read_map_at(&path, key_ref)?;
             update(&mut map);
-            // NamedTempFile is create-new, randomly named, and 0600 on Unix
-            // from the first write. Dropping it on failure removes the file.
-            let mut tmp = tempfile::NamedTempFile::new_in(dir)
-                .context("create private secrets temporary file")?;
-            serde_json::to_writer_pretty(&mut tmp, &map).context("serialize secrets map")?;
-            tmp.flush().context("flush secrets temporary file")?;
-            tmp.as_file()
-                .sync_all()
-                .context("sync secrets temporary file")?;
-            tmp.persist(&path).context("replace secrets file")?;
-            #[cfg(unix)]
-            std::fs::File::open(dir)?
-                .sync_all()
-                .context("sync secrets directory")?;
+            persist_map_atomic(dir, &path, &map, key_ref)?;
             // Closing the handle releases the OS lock, including error paths.
             drop(lock);
             Ok(())
@@ -93,13 +165,140 @@ impl FileSecretStore {
     }
 }
 
-fn read_map_at(path: &Path) -> Result<HashMap<String, String>> {
+fn open_transaction_lock(path: &Path) -> Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let lock = options
+        .open(path.with_extension("lock"))
+        .context("open secret store transaction lock")?;
+    lock.lock().context("lock secret store transaction")?;
+    Ok(lock)
+}
+
+fn persist_map_atomic(
+    dir: &Path,
+    path: &Path,
+    map: &HashMap<String, String>,
+    master_key: Option<&[u8; 32]>,
+) -> Result<()> {
+    // NamedTempFile is create-new, randomly named, and 0600 on Unix
+    // from the first write. Dropping it on failure removes the file.
+    let mut tmp =
+        tempfile::NamedTempFile::new_in(dir).context("create private secrets temporary file")?;
+    if let Some(key) = master_key {
+        let plaintext =
+            Zeroizing::new(serde_json::to_vec(map).context("serialize secrets map")?);
+        let cipher = Aes256Gcm::new(key.into());
+        let mut nonce_bytes = [0u8; 12];
+        rand::rng().fill(&mut nonce_bytes);
+        let ciphertext = cipher
+            .encrypt(
+                &Nonce::from(nonce_bytes),
+                Payload {
+                    msg: &plaintext,
+                    aad: ENVELOPE_AAD,
+                },
+            )
+            .map_err(|_| anyhow!("AES-256-GCM encryption failed"))?;
+        let env = EncryptedSecretsEnvelope {
+            version: ENVELOPE_VERSION,
+            cipher: ENVELOPE_CIPHER.into(),
+            nonce: STANDARD.encode(nonce_bytes),
+            ciphertext: STANDARD.encode(ciphertext),
+        };
+        serde_json::to_writer_pretty(&mut tmp, &env)
+            .context("serialize encrypted secrets envelope")?;
+    } else {
+        serde_json::to_writer_pretty(&mut tmp, map).context("serialize secrets map")?;
+    }
+    tmp.flush().context("flush secrets temporary file")?;
+    tmp.as_file()
+        .sync_all()
+        .context("sync secrets temporary file")?;
+    tmp.persist(path).context("replace secrets file")?;
+    #[cfg(unix)]
+    std::fs::File::open(dir)?
+        .sync_all()
+        .context("sync secrets directory")?;
+    Ok(())
+}
+
+fn is_encrypted_envelope(text: &str) -> bool {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    val.as_object().is_some_and(|obj| {
+        obj.contains_key("version") && obj.contains_key("cipher") && obj.contains_key("ciphertext")
+    })
+}
+
+fn parse_secrets_text(
+    text: &str,
+    path: &Path,
+    master_key: Option<&[u8; 32]>,
+) -> Result<HashMap<String, String>> {
+    if is_encrypted_envelope(text) {
+        let env: EncryptedSecretsEnvelope = serde_json::from_str(text)
+            .with_context(|| format!("parse encrypted secrets envelope {}", path.display()))?;
+        if env.version != ENVELOPE_VERSION || env.cipher != ENVELOPE_CIPHER {
+            bail!(
+                "unsupported encrypted secrets format version={} cipher={} in {}",
+                env.version,
+                env.cipher,
+                path.display()
+            );
+        }
+        let key = master_key.ok_or_else(|| {
+            anyhow!(
+                "secrets file {} is encrypted at rest; Keychain master key required",
+                path.display()
+            )
+        })?;
+        let nonce_bytes = STANDARD
+            .decode(&env.nonce)
+            .context("decode secrets envelope nonce")?;
+        let nonce_arr: [u8; 12] = nonce_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow!("invalid secrets envelope nonce length {}", nonce_bytes.len()))?;
+        let ciphertext = STANDARD
+            .decode(&env.ciphertext)
+            .context("decode secrets envelope ciphertext")?;
+        let cipher = Aes256Gcm::new(key.into());
+        let plaintext = Zeroizing::new(
+            cipher
+                .decrypt(
+                    &Nonce::from(nonce_arr),
+                    Payload {
+                        msg: &ciphertext,
+                        aad: ENVELOPE_AAD,
+                    },
+                )
+                .map_err(|_| {
+                    anyhow!(
+                        "failed to authenticate/decrypt secrets file {}",
+                        path.display()
+                    )
+                })?,
+        );
+        return serde_json::from_slice(&plaintext)
+            .with_context(|| format!("parse decrypted secrets map {}", path.display()));
+    }
+    serde_json::from_str(text).with_context(|| format!("parse secrets file {}", path.display()))
+}
+
+fn read_map_at(path: &Path, master_key: Option<&[u8; 32]>) -> Result<HashMap<String, String>> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
         Err(e) => return Err(e).with_context(|| format!("read secrets file {}", path.display())),
     };
-    serde_json::from_str(&text).with_context(|| format!("parse secrets file {}", path.display()))
+    parse_secrets_text(&text, path, master_key)
 }
 
 #[async_trait]
@@ -305,7 +504,61 @@ mod tests {
                 String::from_utf8_lossy(&out.stderr)
             );
         }
-        assert_eq!(read_map_at(&path).unwrap().len(), 40);
+        assert_eq!(read_map_at(&path, None).unwrap().len(), 40);
+    }
+
+    #[tokio::test]
+    async fn encrypted_store_migrates_legacy_json_in_place_and_rejects_wrong_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.json");
+
+        // Start with a legacy plain JSON secrets.json containing two entries.
+        let legacy = FileSecretStore::new(path.clone());
+        legacy
+            .store("ssh/host1/password", b"existing-ssh-password")
+            .await
+            .unwrap();
+        legacy
+            .store("vpn/p1/wg-private-key", b"existing-wg-key")
+            .await
+            .unwrap();
+        let raw_before = std::fs::read_to_string(&path).unwrap();
+        assert!(raw_before.contains("ssh/host1/password"));
+
+        // Upgrade in place with a 32-byte master key: zero secrets lost,
+        // and neither labels nor base64 values remain in plaintext on disk.
+        let key_a = [0x42u8; 32];
+        let enc = FileSecretStore::with_master_key(path.clone(), key_a);
+        enc.migrate_to_encrypted_if_needed().await.unwrap();
+
+        let raw_after = std::fs::read_to_string(&path).unwrap();
+        assert!(raw_after.contains("\"version\": 2"));
+        assert!(!raw_after.contains("ssh/host1/password"));
+        assert!(!raw_after.contains("ZXhpc3Rpbmctc3NoLXBhc3N3b3Jk"));
+
+        assert_eq!(
+            &*enc.retrieve("ssh/host1/password").await.unwrap(),
+            b"existing-ssh-password"
+        );
+        assert_eq!(
+            &*enc.retrieve("vpn/p1/wg-private-key").await.unwrap(),
+            b"existing-wg-key"
+        );
+
+        // Unkeyed or wrong-key stores refuse to read or clobber the file.
+        let unkeyed = FileSecretStore::new(path.clone());
+        assert!(unkeyed.retrieve("ssh/host1/password").await.is_err());
+        assert!(unkeyed.store("new", b"nope").await.is_err());
+
+        let wrong = FileSecretStore::with_master_key(path.clone(), [0x99u8; 32]);
+        assert!(wrong.retrieve("ssh/host1/password").await.is_err());
+        assert!(wrong.store("new", b"nope").await.is_err());
+
+        // Original encrypted contents remain intact.
+        assert_eq!(
+            &*enc.retrieve("ssh/host1/password").await.unwrap(),
+            b"existing-ssh-password"
+        );
     }
 
     // Only launched by the parent test, with an isolated path in its own

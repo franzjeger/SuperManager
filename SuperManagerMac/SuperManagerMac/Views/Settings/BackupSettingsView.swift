@@ -3,42 +3,32 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// Backup / Restore pane.
-///
-/// Action buttons drive `NSSavePanel` / `NSOpenPanel`; the actual
-/// archive work is in `Services/Backup.swift`. We keep the view thin
-/// — it just orchestrates pickers, surfaces progress, and shows
-/// success / failure inline.
 struct BackupSettingsView: View {
     @Environment(AppState.self) private var appState
     @State private var status: BackupStatus = .idle
     @State private var lastResult: String?
-    /// A run that completed but did not do everything it was asked to —
-    /// credentials the Keychain would not give up on export, or would
-    /// not take on import. Kept apart from `lastResult` so a partial run
-    /// never renders under a green checkmark, and apart from `error` so
-    /// it doesn't claim the whole operation failed.
     @State private var lastWarning: String?
     @State private var error: String?
 
-    /// Confirmation alert state. Restore needs the user to acknowledge
-    /// that any unsaved daemon state will be lost.
+    @State private var pendingExportURL: URL?
     @State private var pendingRestoreURL: URL?
-    /// Dress-rehearsal result, rendered as a per-check list.
+    @State private var pendingEncryptedRestoreURL: URL?
+    @State private var pendingEncryptedVerifyURL: URL?
     @State private var verifyReport: BackupVerify.Report?
 
     var body: some View {
         Form {
             Section {
-                Text("Back up SSH keys, hosts, VPN profile metadata, and the audit log to a single `.tar.gz` archive. Restore reverses it on this Mac or another.")
+                Text("Back up SSH keys, hosts, VPN profile metadata, and the audit log to an `AES-256-GCM` passphrase-encrypted archive (`.tar.gz.enc`). Restore reverses it on this Mac or another.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
 
             Section {
                 Button {
-                    runExport()
+                    pickExportDestination()
                 } label: {
-                    Label("Export Backup…", systemImage: "tray.and.arrow.up")
+                    Label("Export Encrypted Backup…", systemImage: "tray.and.arrow.up")
                 }
                 .disabled(isWorking)
 
@@ -49,10 +39,6 @@ struct BackupSettingsView: View {
                 }
                 .disabled(isWorking)
 
-                // Dress rehearsal: extract to a scratch dir and run the
-                // checks a restore would care about, without touching
-                // the live data dir. Exists so a broken archive is found
-                // the day it is taken, not the day it is needed.
                 Button {
                     pickVerifyFile()
                 } label: {
@@ -62,7 +48,7 @@ struct BackupSettingsView: View {
             }
 
             Section("Portable backup (Mac \u{2194} Linux)") {
-                Text("A single `.json` backup that also restores on the Linux build. Carries everything the `.tar.gz` does, plus the IKEv2/OpenVPN passwords the Mac keeps in the Keychain \u{2014} so it is at least as sensitive; it is written owner-only (0600).")
+                Text("A single `.json` backup that also restores on the Linux build. Carries everything the full archive does, plus the IKEv2/OpenVPN passwords the Mac keeps in the Keychain \u{2014} written owner-only (`0600`).")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 Button {
@@ -98,7 +84,6 @@ struct BackupSettingsView: View {
                 }
             }
 
-            // Status / result
             if let warning = lastWarning {
                 Section {
                     HStack(spacing: 8) {
@@ -132,27 +117,79 @@ struct BackupSettingsView: View {
                 }
             }
 
-            // Caveats — important enough to be visible from the page,
-            // not buried in a docs link.
             Section {
                 CaveatRow(
-                    icon: "exclamationmark.triangle.fill",
-                    color: .orange,
-                    text: "The archive is a tar of the whole data directory, so treat everything in it as secret. That includes the daemon's secret store as plain text (SSH private keys and host passwords, FortiGate API tokens, UniFi controller passwords, WireGuard private keys and peer PSKs), your .ovpn files with their embedded client keys, and any notification webhooks and API keys. Keep it on encrypted storage."
+                    icon: "lock.shield.fill",
+                    color: .green,
+                    text: "Full backups are encrypted with `PBKDF2-HMAC-SHA256` and `AES-256-GCM` (`SMBKUP01`) using your backup passphrase. On disk, the daemon's `secrets.json` is wrapped with a 256-bit key held in the macOS Data Protection Keychain."
                 )
                 CaveatRow(
                     icon: "lock.fill",
                     color: .blue,
-                    text: "Secrets the app puts in the macOS Keychain are NOT in the archive, because they are bound to this Mac: IKEv2 passwords and PSKs, OpenVPN and Azure VPN usernames and passwords, and your master password. You re-enter those on restore."
+                    text: "Secrets the app puts directly in the macOS Keychain are NOT in the `.tar.gz.enc` archive, because they are bound to this Mac: IKEv2 passwords and PSKs, OpenVPN and Azure VPN usernames and passwords, and your master password. Use Portable Backup or re-enter those on restore."
                 )
                 CaveatRow(
                     icon: "arrow.counterclockwise",
                     color: .secondary,
-                    text: "Quit SuperManager before restoring. The existing data directory is preserved as `SuperManager.before-restore-<timestamp>` in case you need to roll back."
+                    text: "Quit SuperManager before restoring. The existing data directory is preserved as `SuperManager.before-restore-<timestamp>` and rolled back automatically if extraction fails."
                 )
             }
         }
         .formStyle(.grouped)
+        .sheet(isPresented: Binding(
+            get: { pendingExportURL != nil },
+            set: { if !$0 { pendingExportURL = nil } }
+        )) {
+            if let url = pendingExportURL {
+                BackupPassphraseSheet(
+                    title: "Encrypt Backup Archive",
+                    subtitle: "Choose a passphrase (at least \(Backup.minPasswordLength) characters) to encrypt \(url.lastPathComponent).",
+                    requireConfirmation: true,
+                    actionTitle: "Export"
+                ) { password in
+                    pendingExportURL = nil
+                    executeExport(to: url, password: password)
+                } onCancel: {
+                    pendingExportURL = nil
+                }
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { pendingEncryptedRestoreURL != nil },
+            set: { if !$0 { pendingEncryptedRestoreURL = nil } }
+        )) {
+            if let url = pendingEncryptedRestoreURL {
+                BackupPassphraseSheet(
+                    title: "Unlock Encrypted Backup",
+                    subtitle: "Enter the passphrase for \(url.lastPathComponent). Current data will be moved aside before extraction.",
+                    requireConfirmation: false,
+                    actionTitle: "Restore"
+                ) { password in
+                    pendingEncryptedRestoreURL = nil
+                    runRestore(from: url, password: password)
+                } onCancel: {
+                    pendingEncryptedRestoreURL = nil
+                }
+            }
+        }
+        .sheet(isPresented: Binding(
+            get: { pendingEncryptedVerifyURL != nil },
+            set: { if !$0 { pendingEncryptedVerifyURL = nil } }
+        )) {
+            if let url = pendingEncryptedVerifyURL {
+                BackupPassphraseSheet(
+                    title: "Verify Encrypted Backup",
+                    subtitle: "Enter the passphrase to authenticate and inspect \(url.lastPathComponent).",
+                    requireConfirmation: false,
+                    actionTitle: "Verify"
+                ) { password in
+                    pendingEncryptedVerifyURL = nil
+                    executeVerify(url: url, password: password)
+                } onCancel: {
+                    pendingEncryptedVerifyURL = nil
+                }
+            }
+        }
         .alert("Restore from backup?",
                isPresented: Binding(
                    get: { pendingRestoreURL != nil },
@@ -162,11 +199,15 @@ struct BackupSettingsView: View {
             Button("Restore", role: .destructive) {
                 if let url = pendingRestoreURL {
                     pendingRestoreURL = nil
-                    runRestore(from: url)
+                    if Backup.isEncryptedArchive(url) {
+                        pendingEncryptedRestoreURL = url
+                    } else {
+                        runRestore(from: url, password: nil)
+                    }
                 }
             }
         } message: {
-            Text("This replaces the current data directory with the contents of the archive. Your current data will be moved aside (not deleted), but you'll need to quit and re-open SuperManager for the daemon to pick up the restored state.")
+            Text("This replaces the current data directory with the contents of the archive. Your current data will be moved aside (not deleted), and you should quit and re-open SuperManager after restoring.")
         }
         .alert("Error",
                isPresented: Binding(
@@ -179,8 +220,6 @@ struct BackupSettingsView: View {
         }
     }
 
-    // MARK: - State
-
     private enum BackupStatus {
         case idle
         case exporting
@@ -190,7 +229,7 @@ struct BackupSettingsView: View {
         var label: String {
             switch self {
             case .idle:      return ""
-            case .exporting: return "Creating archive…"
+            case .exporting: return "Encrypting archive…"
             case .restoring: return "Restoring archive…"
             case .verifying: return "Verifying archive…"
             }
@@ -204,30 +243,34 @@ struct BackupSettingsView: View {
 
     // MARK: - Actions
 
-    private func runExport() {
+    private func pickExportDestination() {
         let panel = NSSavePanel()
-        panel.title = "Export SuperManager Backup"
+        panel.title = "Export Encrypted SuperManager Backup"
         panel.nameFieldStringValue = Backup.suggestedFilename()
         panel.allowedContentTypes = [
+            UTType(filenameExtension: "enc") ?? .data,
             UTType(filenameExtension: "gz") ?? .data,
         ]
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        pendingExportURL = url
+    }
 
+    private func executeExport(to url: URL, password: String) {
         status = .exporting
         lastResult = nil
         lastWarning = nil
         Task.detached(priority: .userInitiated) {
             do {
-                try await Backup.export(to: url)
+                try Backup.export(to: url, password: password)
                 let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
                 let sizeStr = ByteCountFormatter.string(fromByteCount: Int64(size),
                                                         countStyle: .file)
                 await MainActor.run {
                     self.status = .idle
-                    self.lastResult = "Exported \(sizeStr) to \(url.lastPathComponent)"
+                    self.lastResult = "Exported encrypted backup (\(sizeStr)) to \(url.lastPathComponent)"
                 }
             } catch {
                 await MainActor.run {
@@ -254,7 +297,6 @@ struct BackupSettingsView: View {
             do {
                 let result = try await PortableBackup.export(client: appState.client)
                 try result.data.write(to: url, options: [.atomic])
-                // Owner-only: the file carries private keys and passwords.
                 try? FileManager.default.setAttributes(
                     [.posixPermissions: 0o600], ofItemAtPath: url.path)
                 let size = ByteCountFormatter.string(
@@ -263,10 +305,6 @@ struct BackupSettingsView: View {
                 lastResult = "Exported \(size) to \(url.lastPathComponent)"
                 var warnings: [String] = []
                 if !result.unreadable.isEmpty {
-                    // The file is written and otherwise valid — it just
-                    // isn't a complete one. Say which credentials are
-                    // missing now, rather than at connect time on the
-                    // machine this gets restored to.
                     warnings.append(
                         "\(result.unreadable.count) credential(s) could not be read "
                         + "from the Keychain and are NOT in this backup: "
@@ -344,16 +382,27 @@ struct BackupSettingsView: View {
 
     private func pickVerifyFile() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.gzip, .archive, .data]
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "enc") ?? .data,
+            .gzip,
+            .archive,
+            .data,
+        ]
         panel.allowsMultipleSelection = false
         panel.message = "Pick a SuperManager backup archive to verify."
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        if Backup.isEncryptedArchive(url) {
+            pendingEncryptedVerifyURL = url
+        } else {
+            executeVerify(url: url, password: nil)
+        }
+    }
+
+    private func executeVerify(url: URL, password: String?) {
         status = .verifying
         verifyReport = nil
         Task.detached {
-            // Off the main actor — tar + extraction of a large archive
-            // shouldn't freeze the pane.
-            let report = BackupVerify.verify(archive: url)
+            let report = BackupVerify.verify(archive: url, password: password)
             await MainActor.run {
                 verifyReport = report
                 status = .idle
@@ -365,7 +414,9 @@ struct BackupSettingsView: View {
         let panel = NSOpenPanel()
         panel.title = "Choose a SuperManager Backup"
         panel.allowedContentTypes = [
+            UTType(filenameExtension: "enc") ?? .data,
             UTType(filenameExtension: "gz") ?? .data,
+            .data,
         ]
         panel.allowsMultipleSelection = false
         panel.canChooseFiles = true
@@ -375,13 +426,13 @@ struct BackupSettingsView: View {
         pendingRestoreURL = url
     }
 
-    private func runRestore(from url: URL) {
+    private func runRestore(from url: URL, password: String?) {
         status = .restoring
         lastResult = nil
         lastWarning = nil
         Task.detached(priority: .userInitiated) {
             do {
-                try await Backup.restore(from: url)
+                try Backup.restore(from: url, password: password)
                 await MainActor.run {
                     self.status = .idle
                     self.lastResult = "Restored from \(url.lastPathComponent). Quit and re-open SuperManager to load the restored state."
@@ -393,6 +444,69 @@ struct BackupSettingsView: View {
                 }
             }
         }
+    }
+}
+
+private struct BackupPassphraseSheet: View {
+    let title: String
+    let subtitle: String
+    let requireConfirmation: Bool
+    let actionTitle: String
+    let onSubmit: (String) -> Void
+    let onCancel: () -> Void
+
+    @State private var password = ""
+    @State private var confirm = ""
+    @State private var validationError: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(title).font(.headline)
+            Text(subtitle)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            SecureField("Passphrase", text: $password)
+                .textFieldStyle(.roundedBorder)
+
+            if requireConfirmation {
+                SecureField("Confirm Passphrase", text: $confirm)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            if let validationError {
+                Text(validationError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel, action: onCancel)
+                Button(actionTitle) {
+                    submit()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(password.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 400)
+    }
+
+    private func submit() {
+        if requireConfirmation {
+            guard password.count >= Backup.minPasswordLength else {
+                validationError = "Passphrase must be at least \(Backup.minPasswordLength) characters."
+                return
+            }
+            guard password == confirm else {
+                validationError = "Passphrases do not match."
+                return
+            }
+        }
+        onSubmit(password)
     }
 }
 

@@ -139,6 +139,27 @@ impl PlanRegistry {
             },
         ))
     }
+
+    /// Acquire an exclusive host lease for rollback without a preview plan,
+    /// ensuring the target is a `FortiGate` unit and no concurrent deploy or
+    /// rollback is already running against its `(hostname, port)`.
+    pub fn lease_host(self: &Arc<Self>, host: &Host) -> Result<TargetLease> {
+        if host.device_type != DeviceType::Fortigate {
+            bail!("provisioning rollback targets FortiGate units only");
+        }
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| anyhow!("the preview registry is unavailable"))?;
+        let endpoint = (host.hostname.clone(), host.port);
+        if !entries.active.insert(endpoint.clone()) {
+            bail!("a deploy or rollback to this host is already running; wait until it ends");
+        }
+        Ok(TargetLease {
+            registry: Arc::clone(self),
+            endpoint,
+        })
+    }
 }
 
 /// A deploy's hold on its host. Dropping it lets the next one in.

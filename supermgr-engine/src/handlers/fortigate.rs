@@ -77,6 +77,10 @@ impl EngineServer {
             .and_then(|v| v.as_str())
             .unwrap_or("supermgr-api")
             .to_owned();
+        let trusthost = params
+            .get("trusthost")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
 
         // SSH-connect to the device; the helper does its own state
         // lock for the host record so we don't double-lock here.
@@ -97,6 +101,7 @@ impl EngineServer {
             &session,
             &host,
             &api_user,
+            trusthost.as_deref(),
         )
         .await;
         let _ = session.disconnect().await;

@@ -294,3 +294,64 @@ pub async fn migrate_from_file(secrets_json_path: &std::path::Path) -> anyhow::R
     }
     Ok(())
 }
+
+const DPK_VPN_SERVICE: &str = "com.sybr.supermanager.vpn";
+const ENGINE_MASTER_KEY_ACCOUNT: &str = "engine/secrets-master-key-v1";
+
+/// Attempt to load or create the 32-byte `secrets.json` wrapping key directly
+/// in the Data Protection Keychain (`com.sybr.supermanager.vpn` /
+/// `engine/secrets-master-key-v1`, matching `VPNKeychain` in `SuperManagerMac`).
+pub fn try_load_or_create_dpk_master_key() -> Result<zeroize::Zeroizing<[u8; 32]>, SecretError> {
+    use rand::RngExt as _;
+
+    let build_query = || -> Vec<(CFString, CFType)> {
+        let mut options =
+            PasswordOptions::new_generic_password(DPK_VPN_SERVICE, ENGINE_MASTER_KEY_ACCOUNT);
+        options.use_protected_keychain();
+        #[allow(deprecated)]
+        options.query
+    };
+
+    let mut query = build_query();
+    query.push((
+        unsafe { CFString::wrap_under_get_rule(kSecReturnData) },
+        CFBoolean::from(true).into_CFType(),
+    ));
+    let dict = CFDictionary::from_CFType_pairs(&query);
+    let mut result: CFTypeRef = std::ptr::null();
+    let status = unsafe { SecItemCopyMatching(dict.as_concrete_TypeRef(), &raw mut result) };
+    if status == 0 && !result.is_null() {
+        let cf_data = unsafe { CFData::wrap_under_create_rule(result.cast()) };
+        let bytes = cf_data.bytes();
+        if let Ok(arr) = <[u8; 32]>::try_from(bytes) {
+            return Ok(zeroize::Zeroizing::new(arr));
+        }
+        return Err(SecretError::ServiceUnavailable(format!(
+            "unexpected master key length {} in Data Protection Keychain",
+            bytes.len()
+        )));
+    }
+    if status != errSecItemNotFound {
+        return Err(SecretError::ServiceUnavailable(format!(
+            "SecItemCopyMatching master key: status={status}"
+        )));
+    }
+
+    let mut fresh = zeroize::Zeroizing::new([0u8; 32]);
+    rand::rng().fill(&mut *fresh);
+    let mut add_query = build_query();
+    let value = CFData::from_buffer(&*fresh);
+    add_query.push((
+        unsafe { CFString::wrap_under_get_rule(kSecValueData) },
+        value.into_CFType(),
+    ));
+    let add_dict = CFDictionary::from_CFType_pairs(&add_query);
+    let add_status = unsafe { SecItemAdd(add_dict.as_concrete_TypeRef(), std::ptr::null_mut()) };
+    if add_status == 0 {
+        Ok(fresh)
+    } else {
+        Err(SecretError::ServiceUnavailable(format!(
+            "SecItemAdd master key: status={add_status}"
+        )))
+    }
+}

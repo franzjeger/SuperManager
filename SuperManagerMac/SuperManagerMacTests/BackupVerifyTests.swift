@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 
 @testable import SuperManagerMac
@@ -119,5 +120,92 @@ final class BackupVerifyTests: XCTestCase {
         try Data("not a tarball".utf8).write(to: bogus)
         defer { try? FileManager.default.removeItem(at: bogus) }
         XCTAssertEqual(BackupVerify.verify(archive: bogus).worst, .fail)
+    }
+
+    func testEncryptedBackupRoundTripAndWrongPasswordPreservesDataDir() throws {
+        // Build an AES-256-GCM v2 secrets.json matching Rust's FileSecretStore::with_master_key.
+        let masterKey = Data(repeating: 0x42, count: 32)
+        let innerJson = Data(#"{"vpn/abc/wg-private-key":"c2VjcmV0"}"#.utf8)
+        let nonceBytes = Data((0..<12).map(UInt8.init))
+        let sealedSecrets = try CryptoKit.AES.GCM.seal(
+            innerJson,
+            using: CryptoKit.SymmetricKey(data: masterKey),
+            nonce: try CryptoKit.AES.GCM.Nonce(data: nonceBytes),
+            authenticating: Data("supermanager-secrets-v2".utf8)
+        )
+        var ctAndTag = Data(sealedSecrets.ciphertext)
+        ctAndTag.append(sealedSecrets.tag)
+        let envelope = """
+        {
+          "version": 2,
+          "cipher": "aes-256-gcm",
+          "nonce": "\(nonceBytes.base64EncodedString())",
+          "ciphertext": "\(ctAndTag.base64EncodedString())"
+        }
+        """
+        try write("secrets.json", envelope)
+        try write("profiles/abc.toml", """
+            id = "abc"
+            [config]
+            backend = "wire_guard"
+            private_key = "vpn/abc/wg-private-key"
+            """)
+
+        // Inspecting v2 secrets.json directly with masterKey passes cross-reference.
+        let directChecks = BackupVerify.inspect(extracted: dir, masterKey: masterKey)
+        XCTAssertTrue(directChecks.allSatisfy { $0.status == .pass })
+
+        let archive = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bv-enc-\(UUID().uuidString).tar.gz.enc")
+        let restoredDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bv-restored-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: archive)
+            try? FileManager.default.removeItem(at: restoredDir)
+        }
+
+        // Weak password must be refused.
+        XCTAssertThrowsError(try Backup.export(
+            to: archive,
+            password: "short",
+            iterations: 2_000,
+            sourceDir: dir,
+            masterKey: masterKey
+        ))
+
+        try Backup.export(
+            to: archive,
+            password: "CorrectHorseBatteryStaple!",
+            iterations: 2_000,
+            sourceDir: dir,
+            masterKey: masterKey
+        )
+        XCTAssertTrue(Backup.isEncryptedArchive(archive))
+
+        // Verify fails without/wrong password and passes with right password.
+        XCTAssertEqual(BackupVerify.verify(archive: archive).worst, .fail)
+        XCTAssertEqual(BackupVerify.verify(archive: archive, password: "wrong-password").worst, .fail)
+        XCTAssertEqual(BackupVerify.verify(archive: archive, password: "CorrectHorseBatteryStaple!").worst, .pass)
+
+        // Populate existing targetDir and confirm wrong password leaves it completely untouched.
+        try FileManager.default.createDirectory(at: restoredDir, withIntermediateDirectories: true)
+        let sentinel = restoredDir.appendingPathComponent("keep.txt")
+        try "existing-state".write(to: sentinel, atomically: true, encoding: .utf8)
+        XCTAssertThrowsError(try Backup.restore(
+            from: archive,
+            password: "wrong-password",
+            targetDir: restoredDir
+        ))
+        XCTAssertEqual(try String(contentsOf: sentinel, encoding: .utf8), "existing-state")
+
+        // Correct password restores unwrapped secrets.json + profiles cleanly.
+        try Backup.restore(
+            from: archive,
+            password: "CorrectHorseBatteryStaple!",
+            targetDir: restoredDir
+        )
+        let restoredSecrets = try Data(contentsOf: restoredDir.appendingPathComponent("secrets.json"))
+        let decoded = try JSONDecoder().decode([String: String].self, from: restoredSecrets)
+        XCTAssertEqual(decoded["vpn/abc/wg-private-key"], "c2VjcmV0")
     }
 }
