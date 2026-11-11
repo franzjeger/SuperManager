@@ -42,6 +42,12 @@ pub(crate) fn lock_tailscale_ops() -> MutexGuard<'static, ()> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Zero-fork check whether SuperManager's managed `tailscaled` LaunchDaemon
+/// plist and live Unix socket are present (`P3-1`).
+pub(crate) fn has_managed_daemon() -> bool {
+    Path::new(LAUNCH_DAEMON_PLIST).is_file() && Path::new("/var/run/tailscaled.socket").exists()
+}
+
 /// Stable on-disk path for the daemon binary: next to the helper, in a
 /// directory only root can write, so nothing but the helper replaces
 /// the program launchd runs as root. The helper copies the bundled
@@ -963,6 +969,24 @@ fn detect_active_network_service() -> Option<String> {
     crate::dns::detect_active_network_service()
 }
 
+fn parse_networksetup_uses_dhcp(stdout: &str) -> bool {
+    stdout.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.eq_ignore_ascii_case("DHCP Configuration")
+            || trimmed.eq_ignore_ascii_case("BOOTP Configuration")
+    })
+}
+
+fn service_uses_dhcp(service: &str) -> bool {
+    let Ok(out) = Command::new("/usr/sbin/networksetup")
+        .args(["-getinfo", service])
+        .output()
+    else {
+        return false;
+    };
+    out.status.success() && parse_networksetup_uses_dhcp(&String::from_utf8_lossy(&out.stdout))
+}
+
 /// Pre-flight test: does the configured exit node actually forward
 /// our internet traffic? Detects the case Tailscale.app handles
 /// gracefully via NetworkExtension but open-source tailscaled on
@@ -1087,20 +1111,35 @@ pub struct TestExitResult {
     pub message: String,
 }
 
-/// Delete one split-default route unless a live WireGuard/OpenVPN full tunnel
-/// currently owns it. `family` is `-inet` or `-inet6`; `net` is both the
-/// `route get` target and the `route delete` prefix. Idempotent: a missing
-/// route is a no-op.
-fn delete_split_default_if_unowned(
-    family: &str,
-    net: &str,
-    foreign: &std::collections::HashSet<String>,
-) {
-    if let Some(iface) = crate::strongswan::route_iface_family(net, family) {
-        if foreign.contains(&iface) {
-            tracing::info!("exit_routes: keeping {net} — owned by live tunnel {iface}");
-            return;
+/// Decide whether `remove_exit_routes` may delete a split-default route (`P3-3`):
+/// - If Tailscale's `utun` is up (`ts_utun = Some(ts)`), delete **only** routes
+///   whose kernel interface equals `ts` — never touching IKEv2, WireGuard,
+///   OpenVPN, `lo0`, or physical uplinks.
+/// - If `tailscaled` has already stopped (`ts_utun = None`), delete **only** an
+///   orphaned `utun` route that no live VPN backend (WG/OpenVPN/IKEv2) owns.
+fn should_delete_exit_split_route(
+    route_iface: Option<&str>,
+    ts_utun: Option<&str>,
+    has_live_owner: impl Fn(&str) -> bool,
+) -> bool {
+    let Some(iface) = route_iface else {
+        return false;
+    };
+    match ts_utun {
+        Some(ts) => iface == ts,
+        None => iface.starts_with("utun") && !has_live_owner(iface),
+    }
+}
+
+/// Delete one split-default route iff it belongs to Tailscale's `utun` (or is
+/// orphaned on a dead `utun` after `tailscaled` exited; `P3-3`).
+fn delete_split_default_if_tailscale(family: &str, net: &str, ts_utun: Option<&str>) {
+    let route_iface = crate::strongswan::route_iface_family(net, family);
+    if !should_delete_exit_split_route(route_iface.as_deref(), ts_utun, utun_has_live_owner) {
+        if let Some(iface) = route_iface {
+            tracing::info!("exit_routes: keeping {net} — owned by non-Tailscale interface {iface}");
         }
+        return;
     }
     let mut args: Vec<&str> = vec!["delete"];
     if family == "-inet6" {
@@ -1111,31 +1150,23 @@ fn delete_split_default_if_unowned(
     let _ = Command::new("/sbin/route").args(&args).output();
 }
 
-/// Remove the split-default exit-node routes. Always succeeds —
-/// missing routes are a no-op. Called when the user clears the
-/// exit node, when auto-revert kicks in, and from `panic_reset`.
 pub fn remove_exit_routes(args: ExitRoutesArgs) -> Result<InstallResult> {
     let _guard = lock_tailscale_ops();
     remove_exit_routes_inner(args)
 }
 
 fn remove_exit_routes_inner(_: ExitRoutesArgs) -> Result<InstallResult> {
-    // 1. Drop the /1 split routes — but ONLY the ones tailscale owns.
+    // 1. Drop ONLY the /1 split routes owned by Tailscale's utun (`P3-3`).
     //
-    // This runs from panic_reset (fired by the connectivity watchdog on a
-    // ~6s internet blip) and from auto-revert. The `0/1` + `128/1` (+ v6)
-    // split-defaults are a SHARED kernel resource: WireGuard and OpenVPN
-    // full tunnels install the exact same pair. A blind delete here would
-    // rip a live WG/OpenVPN tunnel's default routes out from under it on any
-    // transient outage, silently leaking all traffic in cleartext via en0.
-    // So we skip any /1 route currently owned by a live foreign tunnel;
-    // tailscale's own exit-node routes point at the tailscale utun (not a
-    // WG/OpenVPN interface) and are still removed.
-    let foreign = crate::strongswan::foreign_tunnel_ifaces();
-    delete_split_default_if_unowned("-inet", "0.0.0.0/1", &foreign);
-    delete_split_default_if_unowned("-inet", "128.0.0.0/1", &foreign);
-    delete_split_default_if_unowned("-inet6", "::/1", &foreign);
-    delete_split_default_if_unowned("-inet6", "8000::/1", &foreign);
+    // WireGuard, OpenVPN, AND strongSwan IKEv2 full tunnels install the exact
+    // same `0/1` + `128/1` (+ v6) split-defaults. Checking only `foreign_tunnel_ifaces()`
+    // missed IKEv2 `utun` interfaces and tore a live IKEv2 full tunnel's routes
+    // out from under it while GUI status still said Connected.
+    let ts_utun = detect_tailscale_utun();
+    delete_split_default_if_tailscale("-inet", "0.0.0.0/1", ts_utun.as_deref());
+    delete_split_default_if_tailscale("-inet", "128.0.0.0/1", ts_utun.as_deref());
+    delete_split_default_if_tailscale("-inet6", "::/1", ts_utun.as_deref());
+    delete_split_default_if_tailscale("-inet6", "8000::/1", ts_utun.as_deref());
 
     // 2. Drop the per-underlay-IP exemption host routes we
     // installed alongside. Without this, those /32 entries would
@@ -1432,12 +1463,35 @@ pub fn panic_reset(args: PanicResetArgs) -> Result<InstallResult> {
         }
     }
 
-    // 2. Find the active network interface (usually en0 for WiFi
-    // or en1 for ethernet) by parsing `route -n get default` —
-    // wait, that's broken when default is missing, which is the
-    // whole reason we're here. Use `networksetup -listallhardwareports`
-    // and pick the first Wi-Fi or Ethernet device instead.
+    // 2. Only kick DHCP when needed AND safe (`P3-2`):
+    // - On automatic blip fail-open (`!args.clear_pref`), if the physical default
+    //   route is already present, removing the `/1` exit routes above already
+    //   restored egress; skip touching `ipconfig`.
+    // - Never run `ipconfig set <iface> DHCP` on a service configured with a
+    //   manual/static IPv4 address, which would wipe the operator's static IP.
+    if !args.clear_pref && physical_default(false).is_some() {
+        return Ok(InstallResult {
+            success: true,
+            message: "Exit-node split routes removed; physical default route is intact.".to_owned(),
+        });
+    }
+
     let active_iface = detect_active_interface().unwrap_or_else(|| "en0".to_string());
+    if let Some(service) = detect_active_network_service() {
+        if !service_uses_dhcp(&service) {
+            tracing::info!(
+                service = %service,
+                iface = %active_iface,
+                "panic_reset: skipping DHCP renew because service does not use DHCP"
+            );
+            return Ok(InstallResult {
+                success: true,
+                message: format!(
+                    "Reset complete on {active_iface} (DHCP renew skipped for non-DHCP service '{service}')."
+                ),
+            });
+        }
+    }
 
     // 3. Renew DHCP on it. macOS treats `ipconfig set <iface> DHCP`
     // as an idempotent re-lease — no service restart, no socket
@@ -2554,5 +2608,55 @@ An asterisk (*) denotes that a network service is disabled.
             plist.matches("<dict>").count(),
             plist.matches("</dict>").count()
         );
+    }
+
+    #[test]
+    fn remove_exit_routes_only_deletes_tailscale_utun_or_dead_orphan() {
+        // Tailscale utun is up (`utun3`): delete ONLY `utun3`, never IKEv2 (`utun6`),
+        // WireGuard (`utun4`), loopback (`lo0`), or physical (`en0`).
+        assert!(should_delete_exit_split_route(
+            Some("utun3"),
+            Some("utun3"),
+            |_| true
+        ));
+        assert!(!should_delete_exit_split_route(
+            Some("utun6"),
+            Some("utun3"),
+            |_| false
+        ));
+        assert!(!should_delete_exit_split_route(
+            Some("lo0"),
+            Some("utun3"),
+            |_| false
+        ));
+        assert!(!should_delete_exit_split_route(
+            Some("en0"),
+            Some("utun3"),
+            |_| false
+        ));
+
+        // tailscaled already stopped (`ts_utun = None`): keep any utun with a live
+        // owner (e.g. IKEv2 SA up), delete only a dead unowned utun.
+        assert!(!should_delete_exit_split_route(Some("utun6"), None, |_| {
+            true
+        }));
+        assert!(should_delete_exit_split_route(Some("utun3"), None, |_| {
+            false
+        }));
+        assert!(!should_delete_exit_split_route(Some("lo0"), None, |_| {
+            false
+        }));
+        assert!(!should_delete_exit_split_route(None, None, |_| false));
+    }
+
+    #[test]
+    fn service_uses_dhcp_rejects_manual_static_ipv4() {
+        let dhcp = "DHCP Configuration\nIP address: 192.168.1.42\nSubnet mask: 255.255.255.0\n";
+        let manual = "Manual Configuration\nIP address: 10.0.10.50\nSubnet mask: 255.255.255.0\n";
+        let dhcp_manual =
+            "DHCP with manual address\nIP address: 10.0.10.50\nSubnet mask: 255.255.255.0\n";
+        assert!(parse_networksetup_uses_dhcp(dhcp));
+        assert!(!parse_networksetup_uses_dhcp(manual));
+        assert!(!parse_networksetup_uses_dhcp(dhcp_manual));
     }
 }

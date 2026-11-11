@@ -56,11 +56,21 @@
 
 use anyhow::Result;
 use std::process::Command;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 static SPAWNED: Mutex<bool> = Mutex::new(false);
+static STATE_SIGNAL: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+static ORPHAN_STREAK: Mutex<[u8; 4]> = Mutex::new([0u8; 4]);
+
+/// Wake the connectivity watchdog immediately when Tailscale exit-node intent
+/// changes (`P3-1`).
+pub fn notify_state_changed() {
+    let (lock, cvar) = &STATE_SIGNAL;
+    *lock.lock().unwrap_or_else(PoisonError::into_inner) = true;
+    cvar.notify_all();
+}
 
 /// Suspend-until timestamp. While `Instant::now() < *PAUSE_UNTIL`,
 /// the watchdog keeps probing for visibility but does NOT
@@ -184,6 +194,16 @@ fn reap_orphaned_full_tunnel_routes(streak: &mut [u8; 4]) {
     }
 }
 
+/// Event-driven entry point invoked by `route_guardian` on `PF_ROUTE` changes
+/// (`P3-1`, `P3-5`). Returns `true` when a potential orphan is at `streak == 1`
+/// and needs a 2-second debounce follow-up check.
+pub(crate) fn reap_orphaned_routes_once() -> bool {
+    let _guard = crate::tailscale::lock_tailscale_ops();
+    let mut streak = ORPHAN_STREAK.lock().unwrap_or_else(PoisonError::into_inner);
+    reap_orphaned_full_tunnel_routes(&mut streak);
+    streak.iter().any(|&s| s > 0)
+}
+
 fn watchdog_loop() {
     let mut consecutive_failures: u32 = 0;
     // Track whether we've already escalated to panic_reset for
@@ -192,17 +212,36 @@ fn watchdog_loop() {
     // outage). Reset to false the first time a probe succeeds.
     let mut already_panic_reset = false;
 
-    // Per-net orphan streak for reap_orphaned_full_tunnel_routes (0/1,128/1,::/1,8000::/1).
-    let mut orphan_streak = [0u8; 4];
-
     loop {
-        thread::sleep(Duration::from_secs(2));
+        // Gate active probing strictly on SuperManager owning an active
+        // Tailscale exit-node intent (`P3-1`, `P3-2`). Without an exit node
+        // desired, we NEVER send background probes to `1.1.1.1:443` and NEVER
+        // call `force_restore_now` or `panic_reset` on local network outages.
+        if !crate::tailscale_state::load().desired {
+            consecutive_failures = 0;
+            already_panic_reset = false;
+            let (lock, cvar) = &STATE_SIGNAL;
+            let mut changed = lock.lock().unwrap_or_else(PoisonError::into_inner);
+            if !*changed {
+                let (mut guard, _) = cvar
+                    .wait_timeout(changed, Duration::from_secs(60))
+                    .unwrap_or_else(PoisonError::into_inner);
+                *guard = false;
+            } else {
+                *changed = false;
+            }
+            continue;
+        }
 
-        // NO-BRICK INVARIANT, enforced every cycle and NEVER gated on the
-        // panic-reset state: reap any full-tunnel split-default that is orphaned
-        // on a dead utun. This is the backstop for "a VPN went down and bricked
-        // the whole client" — independent of which backend died or how.
-        reap_orphaned_full_tunnel_routes(&mut orphan_streak);
+        thread::sleep(Duration::from_secs(2));
+        if !crate::tailscale_state::load().desired {
+            consecutive_failures = 0;
+            already_panic_reset = false;
+            continue;
+        }
+
+        // Enforce the no-brick orphan reaper while exit-node state is active.
+        let _ = reap_orphaned_routes_once();
 
         if probe_internet() {
             if consecutive_failures > 0 {
@@ -234,93 +273,44 @@ fn watchdog_loop() {
         }
 
         match consecutive_failures {
-            1 => {
-                // 2s. Could be a single packet loss. Wait one more
-                // cycle before doing anything.
-            }
+            1 => {}
             2 => {
-                // 4s. Trigger an immediate route restore in case
-                // tailscaled out-paced our route guardian.
-                tracing::warn!("4s no internet — forcing route restore");
+                tracing::warn!("4s no internet (exit node active) — forcing route restore");
                 if let Err(e) = crate::route_guardian::force_restore_now() {
                     tracing::warn!("force_restore_now failed: {e}");
                 }
             }
             _ if consecutive_failures >= 3 && !already_panic_reset => {
-                // Sustained outage. With NO exit node active this is the simple
-                // unconditional fail-open. With an exit node active the handling
-                // splits on LINK STATE, because tearing the node down on a
-                // transient local outage is exactly the flap the user reported
-                // ("bugs on any idle"):
-                //
-                //   * uplink DOWN → our own link blipped (sleep/roam/WiFi drop).
-                //     DO NOTHING. tailscale recovers when it returns; the
-                //     reconciler reinstalls routes if the utun renumbered. A
-                //     panic_reset here rips a perfectly healthy exit node on
-                //     every sleep.
-                //   * uplink UP but still no egress after a sustained window
-                //     (>= EXIT_DEAD_PEER_MISSES) → the exit PEER is genuinely
-                //     dead while our link is fine → fail open. Below that window
-                //     we wait it out (an upstream hotspot blip with the WiFi
-                //     association still up recovers on its own without a flap).
-                //
-                // Link state (carrier + IPv4), NOT an ICMP ping: a ping-filtering
-                // gateway must never wedge a dead peer offline forever.
-                let exit_desired = crate::tailscale_state::load().desired;
-                if exit_desired {
-                    if !crate::tailscale::local_uplink_up() {
-                        tracing::warn!(
-                            "{}s no internet, physical uplink down — link blip, NOT tearing down exit node",
-                            consecutive_failures * 2
-                        );
-                    } else if consecutive_failures >= EXIT_DEAD_PEER_MISSES {
-                        tracing::error!(
-                            "{}s no internet with uplink UP — exit peer appears dead, failing open (panic_reset)",
-                            consecutive_failures * 2
-                        );
-                        match crate::tailscale::panic_reset(crate::tailscale::PanicResetArgs {
-                            clear_pref: false,
-                        }) {
-                            Ok(_) => {
-                                tracing::info!("panic_reset complete (exit peer dead, failed open to local uplink)");
-                                already_panic_reset = true;
-                                crate::events::record(
-                                    crate::events::Event::ConnectivityFailedOpen {
-                                        exit_node: true,
-                                    },
-                                );
-                            }
-                            Err(e) => tracing::error!("panic_reset failed: {e}"),
-                        }
-                    } else {
-                        tracing::warn!(
-                            "{}s no internet, uplink up — riding out possible upstream blip before failing open",
-                            consecutive_failures * 2
-                        );
-                    }
-                } else {
-                    // No exit node — fail open immediately. Removes split-default
-                    // routes (no-op if none) and DHCP-renews; clear_pref=false
-                    // keeps any intent. Fires once per outage.
-                    tracing::error!("6s no internet — escalating to panic_reset (fail-open)");
+                if !crate::tailscale::local_uplink_up() {
+                    tracing::warn!(
+                        "{}s no internet, physical uplink down — link blip, NOT tearing down exit node",
+                        consecutive_failures * 2
+                    );
+                } else if consecutive_failures >= EXIT_DEAD_PEER_MISSES {
+                    tracing::error!(
+                        "{}s no internet with uplink UP — exit peer appears dead, failing open (panic_reset)",
+                        consecutive_failures * 2
+                    );
                     match crate::tailscale::panic_reset(crate::tailscale::PanicResetArgs {
                         clear_pref: false,
                     }) {
                         Ok(_) => {
-                            tracing::info!("panic_reset complete");
+                            tracing::info!("panic_reset complete (exit peer dead, failed open to local uplink)");
                             already_panic_reset = true;
                             crate::events::record(crate::events::Event::ConnectivityFailedOpen {
-                                exit_node: false,
+                                exit_node: true,
                             });
                         }
                         Err(e) => tracing::error!("panic_reset failed: {e}"),
                     }
+                } else {
+                    tracing::warn!(
+                        "{}s no internet, uplink up — riding out possible upstream blip before failing open",
+                        consecutive_failures * 2
+                    );
                 }
             }
             _ => {
-                // Probe still failing past panic_reset — likely
-                // genuine network outage. Don't spam the log on
-                // every poll.
                 if consecutive_failures.is_multiple_of(15) {
                     tracing::warn!(
                         "{}s sustained outage; panic_reset already fired, waiting for network to come back",

@@ -269,14 +269,23 @@ impl WireGuard {
 
         if args.native {
             let res = self.native_connect(&name, args).await;
+            if res.success {
+                crate::dns_health_watchdog::notify_state_changed();
+            }
             if res.success && want_kill_switch {
-                let iface = res.interface.as_deref().unwrap_or("");
-                if let Err(e) = crate::kill_switch::activate_for_profile(
-                    &args.profile_id,
-                    iface,
-                    endpoints,
-                    crate::kill_switch::KillSwitchBackend::Wireguard,
-                ) {
+                let iface = res.interface.clone().unwrap_or_default();
+                let pid_for_ks = args.profile_id.clone();
+                let ks_res = tokio::task::spawn_blocking(move || {
+                    crate::kill_switch::activate_for_profile(
+                        &pid_for_ks,
+                        &iface,
+                        endpoints,
+                        crate::kill_switch::KillSwitchBackend::Wireguard,
+                    )
+                })
+                .await
+                .context("kill-switch blocking task")?;
+                if let Err(e) = ks_res {
                     tracing::error!(tunnel = %name, "kill-switch activation failed; tearing down tunnel: {e:#}");
                     let _ = self
                         .disconnect(&WgDisconnectArgs {
@@ -354,22 +363,32 @@ impl WireGuard {
         tracing::info!(tunnel = %name, interface = ?interface, wg_quick = %wg_quick.describe(), "WireGuard tunnel up");
 
         let dns_owner = format!("wg-{name}");
-        if !args.dns_servers.is_empty() {
-            crate::dns::set_vpn_dns_for(&dns_owner, &args.dns_servers);
-        } else if crate::wg_native::takes_all(&args.conf_content) {
-            // The halves leave the Mac's own resolvers unreachable where
-            // mDNSResponder asks them; see `dns::follow_system_resolvers_for`.
-            crate::dns::follow_system_resolvers_for(&dns_owner);
-        }
+        let dns_servers = args.dns_servers.clone();
+        let takes_all = crate::wg_native::takes_all(&args.conf_content);
+        let _ = tokio::task::spawn_blocking(move || {
+            if !dns_servers.is_empty() {
+                crate::dns::set_vpn_dns_for(&dns_owner, &dns_servers);
+            } else if takes_all {
+                crate::dns::follow_system_resolvers_for(&dns_owner);
+            }
+            crate::dns_health_watchdog::notify_state_changed();
+        })
+        .await;
 
         if want_kill_switch {
-            let iface = interface.as_deref().unwrap_or("");
-            if let Err(e) = crate::kill_switch::activate_for_profile(
-                &args.profile_id,
-                iface,
-                endpoints,
-                crate::kill_switch::KillSwitchBackend::Wireguard,
-            ) {
+            let iface = interface.clone().unwrap_or_default();
+            let pid_for_ks = args.profile_id.clone();
+            let ks_res = tokio::task::spawn_blocking(move || {
+                crate::kill_switch::activate_for_profile(
+                    &pid_for_ks,
+                    &iface,
+                    endpoints,
+                    crate::kill_switch::KillSwitchBackend::Wireguard,
+                )
+            })
+            .await
+            .context("kill-switch blocking task")?;
+            if let Err(e) = ks_res {
                 tracing::error!(tunnel = %name, "kill-switch activation failed; tearing down tunnel: {e:#}");
                 let _ = self
                     .disconnect(&WgDisconnectArgs {
@@ -404,12 +423,19 @@ impl WireGuard {
         &mut self,
         args: &WgDisconnectArgs,
     ) -> anyhow::Result<WgDisconnectResult> {
-        let _ = crate::kill_switch::deactivate_for_profile(&args.profile_id);
+        let pid_for_ks = args.profile_id.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = crate::kill_switch::deactivate_for_profile(&pid_for_ks);
+        })
+        .await;
         let name = interface_name(&args.profile_id);
         let dns_owner = format!("wg-{name}");
         if let Some(result) = self.native_down(&name).await {
             let _ = std::fs::remove_file(conf_path_for(&name));
-            crate::dns::clear_vpn_dns_for(&dns_owner);
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::dns::clear_vpn_dns_for(&dns_owner);
+            })
+            .await;
             match &result {
                 Ok(()) => tracing::info!(tunnel = %name, "WireGuard tunnel down"),
                 Err(e) => tracing::warn!(tunnel = %name, "WireGuard tunnel still up: {e:#}"),
@@ -435,7 +461,10 @@ impl WireGuard {
         // and running wg-quick for each one only failed and said so in
         // the log. DNS is cleared as the teardown below would.
         if !wg_quick_has_tunnel(utun_name_before.as_deref(), &conf_path) {
-            crate::dns::clear_vpn_dns_for(&dns_owner);
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::dns::clear_vpn_dns_for(&dns_owner);
+            })
+            .await;
             tracing::debug!(tunnel = %name, "WireGuard tunnel was not up");
             return Ok(WgDisconnectResult {
                 success: true,
@@ -513,7 +542,10 @@ impl WireGuard {
         //    the `ifconfig destroy` fallback above does not. Calling
         //    `clear_vpn_dns` here covers both paths and also removes
         //    any State-store entries, matching macOS best-practice.
-        crate::dns::clear_vpn_dns_for(&dns_owner);
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::dns::clear_vpn_dns_for(&dns_owner);
+        })
+        .await;
 
         // Final verdict: success iff the interface is gone now.
         let final_alive = utun_name_before

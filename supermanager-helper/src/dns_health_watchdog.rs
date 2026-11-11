@@ -42,7 +42,7 @@ use std::fs;
 use std::path::Path;
 // Every command here is bounded: see `proc::Bounded`.
 use crate::proc::Bounded as Command;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -50,9 +50,29 @@ const FALLBACK_PATH: &str = "/var/lib/supermanager/dns_fallbacks.json";
 const PROBE_QUERY: &str = "google.com";
 
 static SPAWNED: Mutex<bool> = Mutex::new(false);
-/// User-configurable fallback list. Held in memory; persisted to
-/// disk via `set_fallbacks()` so it survives helper restart.
+static WAKE_SIGNAL: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+/// Opt-in fallback list (`P3-4`): empty by default so SuperManager never forces
+/// third-party public DNS (`1.1.1.1`/`9.9.9.9`) unless the operator explicitly
+/// configured fallback servers via `tailscale_set_dns_fallbacks`.
 static FALLBACKS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+pub fn notify_state_changed() {
+    let (lock, cvar) = &WAKE_SIGNAL;
+    *lock.lock().unwrap_or_else(PoisonError::into_inner) = true;
+    cvar.notify_all();
+}
+
+fn parse_requested_fallbacks(list: &[String]) -> Result<Vec<String>> {
+    let clear =
+        list.is_empty() || (list.len() == 1 && list[0].trim().eq_ignore_ascii_case("empty"));
+    if clear {
+        return Ok(Vec::new());
+    }
+    Ok(crate::tailscale::dns_servers(list)?
+        .iter()
+        .map(ToString::to_string)
+        .collect())
+}
 
 /// Spawn the watchdog. Idempotent.
 pub fn spawn_watchdog() -> Result<()> {
@@ -63,24 +83,10 @@ pub fn spawn_watchdog() -> Result<()> {
     *spawned = true;
     drop(spawned);
 
-    // Load persisted fallbacks (if any).
+    // Load persisted opt-in fallbacks (if any). Missing or empty file leaves
+    // the watchdog disabled (`FALLBACKS = []`).
     if let Ok(s) = fs::read_to_string(FALLBACK_PATH) {
         *FALLBACKS.lock().unwrap_or_else(PoisonError::into_inner) = stored_fallbacks(&s);
-    }
-    if FALLBACKS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .is_empty()
-    {
-        // Sensible default — two well-known public resolvers.
-        // The user can override at runtime via `set_fallbacks`
-        // (e.g. to prepend an internal DNS for split-horizon
-        // domains). Defaults must be reachable everywhere so
-        // the watchdog works out of the box on any network.
-        *FALLBACKS.lock().unwrap_or_else(PoisonError::into_inner) = vec![
-            "1.1.1.1".to_string(), // Cloudflare
-            "9.9.9.9".to_string(), // Quad9
-        ];
     }
 
     thread::Builder::new()
@@ -88,24 +94,29 @@ pub fn spawn_watchdog() -> Result<()> {
         .spawn(watchdog_loop)
         .context("spawning dns-health-watchdog thread")?;
 
-    tracing::info!("DNS health watchdog spawned");
+    tracing::info!(
+        enabled = !current_fallbacks().is_empty(),
+        "DNS health watchdog spawned (opt-in)"
+    );
     Ok(())
 }
 
-/// Replace the fallback list. Persisted to disk so a helper
-/// restart preserves the user's preference.
+/// Replace (or clear) the fallback list. Passing an empty list or `["empty"]`
+/// disables the DNS health watchdog and removes any active `"watchdog"` DNS key.
 pub fn set_fallbacks(list: Vec<String>) -> Result<()> {
-    let list: Vec<String> = crate::tailscale::dns_servers(&list)?
-        .iter()
-        .map(ToString::to_string)
-        .collect();
+    let list = parse_requested_fallbacks(&list)?;
     if let Some(parent) = Path::new(FALLBACK_PATH).parent() {
         fs::create_dir_all(parent).context("creating fallback dir")?;
     }
     let json = serde_json::to_string(&list).context("encoding json")?;
     crate::private_file::write(Path::new(FALLBACK_PATH), json.as_bytes())
         .context("writing fallback file")?;
+    let disabled = list.is_empty();
     *FALLBACKS.lock().unwrap_or_else(PoisonError::into_inner) = list;
+    if disabled {
+        crate::dns::clear_vpn_dns_for("watchdog");
+    }
+    notify_state_changed();
     Ok(())
 }
 
@@ -142,6 +153,47 @@ fn watchdog_loop() {
     let mut consecutive_failures = 0u32;
     let mut already_forced = false;
     loop {
+        let configured = current_fallbacks();
+        if configured.is_empty() {
+            if already_forced {
+                crate::dns::clear_vpn_dns_for("watchdog");
+                already_forced = false;
+            }
+            consecutive_failures = 0;
+            let (lock, cvar) = &WAKE_SIGNAL;
+            let changed = lock.lock().unwrap_or_else(PoisonError::into_inner);
+            if !*changed {
+                let mut guard = cvar.wait(changed).unwrap_or_else(PoisonError::into_inner);
+                *guard = false;
+            } else {
+                let mut guard = changed;
+                *guard = false;
+            }
+            continue;
+        }
+
+        // Gate active DNS probing on SuperManager managing an active VPN or
+        // Tailscale session (`P3-1`).
+        if !crate::has_managed_network_state() {
+            if already_forced {
+                crate::dns::clear_vpn_dns_for("watchdog");
+                already_forced = false;
+            }
+            consecutive_failures = 0;
+            let (lock, cvar) = &WAKE_SIGNAL;
+            let changed = lock.lock().unwrap_or_else(PoisonError::into_inner);
+            if !*changed {
+                let (mut guard, _) = cvar
+                    .wait_timeout(changed, Duration::from_secs(30))
+                    .unwrap_or_else(PoisonError::into_inner);
+                *guard = false;
+            } else {
+                let mut guard = changed;
+                *guard = false;
+            }
+            continue;
+        }
+
         thread::sleep(Duration::from_secs(10));
 
         let resolvers = read_active_resolvers();
@@ -319,6 +371,19 @@ mod tests {
             ["1.1.1.1", "9.9.9.9"]
         );
         assert!(stored_fallbacks("not json").is_empty());
+    }
+
+    #[test]
+    fn empty_or_clear_fallbacks_disable_watchdog() {
+        assert!(stored_fallbacks("[]").is_empty());
+        assert!(parse_requested_fallbacks(&[]).unwrap().is_empty());
+        assert!(parse_requested_fallbacks(&["empty".to_owned()])
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            parse_requested_fallbacks(&["1.1.1.1".to_owned()]).unwrap(),
+            vec!["1.1.1.1".to_owned()]
+        );
     }
 
     /// The exact shape scutil emits on a machine whose DHCP server

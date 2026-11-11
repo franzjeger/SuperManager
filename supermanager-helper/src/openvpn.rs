@@ -538,17 +538,12 @@ impl OpenVpn {
                 log_path.display()
             );
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            let log_tail = std::fs::read_to_string(&log_path)
-                .ok()
-                .map(|s| {
-                    // Last ~20 non-empty lines is plenty — early
-                    // openvpn errors fit comfortably and we don't
-                    // want to flood the GUI alert.
-                    let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
-                    let start = lines.len().saturating_sub(20);
-                    lines[start..].join("\n")
-                })
-                .unwrap_or_default();
+            let log_tail = {
+                let s = read_openvpn_log(&log_path);
+                let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
+                let start = lines.len().saturating_sub(20);
+                lines[start..].join("\n")
+            };
             let combined = match (stderr.is_empty(), log_tail.is_empty()) {
                 (false, false) => format!("{stderr}\n--- log ---\n{log_tail}"),
                 (true, false) => log_tail,
@@ -604,7 +599,7 @@ impl OpenVpn {
             tracing::info!("ovpn_connect: waiting 5s for daemon child to settle…");
             tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
 
-            let log_body = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let log_body = read_openvpn_log(&log_path);
             let pid_alive = read_pid_file(&pid_path).is_some_and(is_live_openvpn_pid);
             tracing::info!(
                 "ovpn_connect: post-spawn check pid_alive={} log_size={}",
@@ -655,9 +650,7 @@ impl OpenVpn {
         files_guard.keep_config = true;
         files_guard.keep_auth = is_v3;
 
-        let mut bound_iface: Option<String> = std::fs::read_to_string(&log_path)
-            .ok()
-            .and_then(|body| parse_tunnel_metadata(&body).0);
+        let mut bound_iface: Option<String> = parse_tunnel_metadata(&read_openvpn_log(&log_path)).0;
 
         if want_kill_switch {
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(25);
@@ -693,13 +686,19 @@ impl OpenVpn {
                 }
             }
 
-            let iface = bound_iface.as_deref().unwrap_or("");
-            if let Err(e) = crate::kill_switch::activate_for_profile(
-                &safe,
-                iface,
-                endpoints,
-                crate::kill_switch::KillSwitchBackend::Openvpn,
-            ) {
+            let iface = bound_iface.clone().unwrap_or_default();
+            let safe_for_ks = safe.clone();
+            let ks_res = tokio::task::spawn_blocking(move || {
+                crate::kill_switch::activate_for_profile(
+                    &safe_for_ks,
+                    &iface,
+                    endpoints,
+                    crate::kill_switch::KillSwitchBackend::Openvpn,
+                )
+            })
+            .await
+            .context("kill-switch blocking task")?;
+            if let Err(e) = ks_res {
                 tracing::error!(
                     profile = %safe,
                     "ovpn_connect: kill-switch activation failed; tearing down tunnel: {e:#}"
@@ -716,6 +715,7 @@ impl OpenVpn {
                 });
             }
         }
+        crate::dns_health_watchdog::notify_state_changed();
 
         Ok(OvpnConnectResult {
             success: true,
@@ -738,11 +738,18 @@ impl OpenVpn {
         args: &OvpnDisconnectArgs,
     ) -> anyhow::Result<OvpnDisconnectResult> {
         let safe = validate_profile_id(&args.profile_id)?;
-        let _ = crate::kill_switch::deactivate_for_profile(&safe);
+        let safe_for_ks = safe.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = crate::kill_switch::deactivate_for_profile(&safe_for_ks);
+        })
+        .await;
         let killed = stop_profile_processes(&safe).await;
 
-        // Restore ONLY this profile's ephemeral DNS key (`P2-18`).
-        crate::dns::clear_vpn_dns_for(&format!("ovpn-{safe}"));
+        let dns_owner = format!("ovpn-{safe}");
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::dns::clear_vpn_dns_for(&dns_owner);
+        })
+        .await;
 
         Ok(OvpnDisconnectResult {
             success: true,
@@ -821,7 +828,7 @@ impl OpenVpn {
         // last_event_from_log() scans every line and returns the
         // state implied by the FINAL status-bearing event plus a
         // short diagnostic string extracted from that line.
-        let body = std::fs::read_to_string(&log_path).unwrap_or_default();
+        let body = read_openvpn_log(&log_path);
         let (mut tunnel_state, mut error_reason) = last_event_from_log(&body);
         if tunnel_state == OvpnState::Connected
             && status_file_is_stale(&status_path_for(&safe), std::time::Duration::from_secs(30))
@@ -861,6 +868,59 @@ impl OpenVpn {
 }
 
 // ── Log-state scanner ─────────────────────────────────────────────────────
+
+/// Bounded OpenVPN log reader (`P3-6`): preserves the initial setup header
+/// (first `head_bytes`, containing `TUN/TAP device utunN` and `route add` lines)
+/// and seeks directly to the latest `tail_bytes` of status transitions when the
+/// log grows beyond `head_bytes + tail_bytes`.
+fn read_openvpn_log_bounded(path: &Path, head_bytes: usize, tail_bytes: usize) -> String {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let Ok(len) = file.metadata().map(|m| m.len()) else {
+        return String::new();
+    };
+    let cap = (head_bytes.saturating_add(tail_bytes)) as u64;
+    if len <= cap {
+        let mut buf = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+        if file.take(cap).read_to_end(&mut buf).is_err() {
+            return String::new();
+        }
+        return String::from_utf8_lossy(&buf).into_owned();
+    }
+    let mut head = Vec::with_capacity(head_bytes);
+    if (&mut file)
+        .take(head_bytes as u64)
+        .read_to_end(&mut head)
+        .is_err()
+    {
+        return String::new();
+    }
+    let tail_offset = len.saturating_sub(tail_bytes as u64);
+    if file.seek(SeekFrom::Start(tail_offset)).is_err() {
+        return String::from_utf8_lossy(&head).into_owned();
+    }
+    let mut tail = Vec::with_capacity(tail_bytes);
+    if file.take(tail_bytes as u64).read_to_end(&mut tail).is_err() {
+        return String::from_utf8_lossy(&head).into_owned();
+    }
+    // Advance `tail` past any partial line split by the seek offset.
+    let tail_slice = match tail.iter().position(|&b| b == b'\n') {
+        Some(pos) if pos + 1 < tail.len() => &tail[pos + 1..],
+        _ => tail.as_slice(),
+    };
+    let mut out = String::from_utf8_lossy(&head).into_owned();
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&String::from_utf8_lossy(tail_slice));
+    out
+}
+
+fn read_openvpn_log(path: &Path) -> String {
+    read_openvpn_log_bounded(path, 64 * 1024, 192 * 1024)
+}
 
 /// Scan the VPN log from top to bottom and return the state
 /// implied by the **last** status-bearing event, plus a short
@@ -1066,9 +1126,13 @@ fn parse_tunnel_metadata(log: &str) -> (Option<String>, Option<String>, Option<S
     // interface, `ifconfig tunN <vip> <vgw> netmask` for the IPs.
     let iface = log
         .lines()
-        .find_map(|l| l.split("TUN/TAP device ").nth(1))
+        .find_map(|l| {
+            l.split("TUN/TAP device ")
+                .nth(1)
+                .or_else(|| l.split("Opened utun device ").nth(1))
+        })
         .and_then(|s| s.split_whitespace().next())
-        .map(str::to_owned);
+        .map(|s| s.trim_start_matches("/dev/").to_owned());
     let (vip, vgw) = log
         .lines()
         .find_map(|l| l.split("/sbin/ifconfig ").nth(1))
@@ -1542,7 +1606,7 @@ pub fn live_tunnel_interfaces() -> Vec<String> {
         if !is_live_openvpn_pid(pid) {
             continue;
         }
-        let body = std::fs::read_to_string(log_path_for(&safe)).unwrap_or_default();
+        let body = read_openvpn_log(&log_path_for(&safe));
         if let (Some(iface), _, _) = parse_tunnel_metadata(&body) {
             out.push(iface);
         }
@@ -2048,5 +2112,30 @@ SIGUSR1[soft,ping-restart] received, process restarting\n";
         let terminated_log = format!("{recovered_log}SIGTERM[hard,] received, process exiting\n");
         let (st3, _) = last_event_from_log(&terminated_log);
         assert_eq!(st3, OvpnState::Disconnected);
+    }
+
+    #[test]
+    fn bounded_log_reader_preserves_setup_header_and_latest_tail_events() {
+        let dir = std::env::temp_dir().join(format!("smgr-ovpn-log-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("test.log");
+        let mut content = String::from(
+            "TUN/TAP device /dev/utun9 opened\n\
+             /sbin/ifconfig utun9 10.8.0.2 10.8.0.1 mtu 1500 netmask 255.255.255.255 up\n\
+             Initialization Sequence Completed\n",
+        );
+        for i in 0..1000 {
+            content.push_str(&format!(
+                "filler-line-{i:04}-xxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+            ));
+        }
+        content.push_str("SIGUSR1[soft,ping-restart] received, process restarting\n");
+        std::fs::write(&log, &content).unwrap();
+
+        let sampled = read_openvpn_log_bounded(&log, 256, 256);
+        assert!(sampled.len() <= 520, "sampled len={}", sampled.len());
+        assert_eq!(parse_tunnel_metadata(&sampled).0.as_deref(), Some("utun9"));
+        assert_eq!(last_event_from_log(&sampled).0, OvpnState::Reconnecting);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

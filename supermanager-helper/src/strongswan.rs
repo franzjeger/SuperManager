@@ -50,10 +50,14 @@ pub async fn sweep_stale_configs(policy: Policy) {
     // and remove the conf charon is actively using. Skip the whole sweep — at
     // startup (the other caller) charon isn't running yet, so no SA is
     // ESTABLISHED and the sweep runs normally to clean genuine leftovers.
-    if has_established_strongswan_sa() {
+    if tokio::task::spawn_blocking(has_established_strongswan_sa)
+        .await
+        .unwrap_or(true)
+    {
         tracing::info!("sweep_stale_configs: live strongSwan SA present — skipping sweep to avoid racing auto_reconnect");
         return;
     }
+    let mut hosts_to_delete = Vec::new();
     for etc in candidate_etc_dirs() {
         if policy == Policy::Release
             && crate::vpn_runtime::ensure_root_owned(&etc, "strongSwan config directory").is_err()
@@ -75,10 +79,8 @@ pub async fn sweep_stale_configs(policy: Policy) {
                     continue;
                 };
                 if name.starts_with("supermanager-") {
-                    // Extract server host before deleting the file so we
-                    // can also sweep the kernel host route.
                     if let Ok(host) = extract_remote_addr(entry.path()).await {
-                        delete_server_host_route(&host);
+                        hosts_to_delete.push(host);
                     }
                     let _ = tokio::fs::remove_file(entry.path()).await;
                     tracing::debug!(path = %entry.path().display(), "swept stale config");
@@ -86,10 +88,13 @@ pub async fn sweep_stale_configs(policy: Policy) {
             }
         }
     }
-    // On wake (the primary caller of this function) any full-tunnel routes
-    // from a pre-sleep session may have survived. Remove them so the first
-    // post-wake ping doesn't black-hole into a dead tunnel.
-    delete_full_tunnel_routes();
+    let _ = tokio::task::spawn_blocking(move || {
+        for host in &hosts_to_delete {
+            delete_server_host_route(host);
+        }
+        delete_full_tunnel_routes();
+    })
+    .await;
 }
 
 /// Where brew puts the strongSwan install root on Apple Silicon Macs.
@@ -498,6 +503,7 @@ impl Strongswan {
             .etc
             .clone()
             .context("strongSwan etc path not resolved")?;
+        crate::rotate_log_if_oversize(&self.log_file, 5 * 1024 * 1024);
         // Output goes to the helper's log rather than through a pipe to
         // this process, which would break when the helper exits.
         let log = std::fs::OpenOptions::new()
@@ -742,43 +748,50 @@ impl Strongswan {
         // traffic is tunnelled. Since the FortiGate side doesn't carry v6,
         // we fail closed: blackhole all IPv6 for the duration of the
         // tunnel. Torn down by delete_full_tunnel_routes() on disconnect.
-        if ok && args.full_tunnel && !narrowed {
-            install_ipv6_leak_block();
-        }
-
-        if ok && (args.full_tunnel || !args.dns_servers.is_empty()) {
-            // osx-attr puts the gateway's DNS first in the primary service's.
-            // Publish that service's resolvers as an unscoped VPN resolver so
-            // macOS sends DNS along the tunnel route. They are read from the
-            // service itself: what macOS resolves with now can be another
-            // VPN's. Explicit profile servers override negotiated DNS; blank
-            // means automatic.
-            let servers: Vec<String> = if args.dns_servers.is_empty() {
-                crate::dns::system_resolvers()
-                    .into_iter()
-                    .filter(|s| s.parse::<std::net::Ipv4Addr>().is_ok())
-                    .collect()
-            } else {
-                args.dns_servers.clone()
-            };
-            // Through a narrowed tunnel only the servers inside it answer;
-            // the others are the Mac's own business, reached directly.
-            let servers = if narrowed {
-                covered_by(&servers, &granted)
-            } else {
-                servers
-            };
-            crate::dns::set_vpn_dns_for(&format!("ikev2-{}", args.profile_id), &servers);
+        if ok {
+            let full_tunnel = args.full_tunnel;
+            let explicit_dns = args.dns_servers.clone();
+            let granted_for_dns = granted.clone();
+            let dns_owner = format!("ikev2-{}", args.profile_id);
+            let _ = tokio::task::spawn_blocking(move || {
+                if full_tunnel && !narrowed {
+                    install_ipv6_leak_block();
+                }
+                if full_tunnel || !explicit_dns.is_empty() {
+                    let servers: Vec<String> = if explicit_dns.is_empty() {
+                        crate::dns::system_resolvers()
+                            .into_iter()
+                            .filter(|s| s.parse::<std::net::Ipv4Addr>().is_ok())
+                            .collect()
+                    } else {
+                        explicit_dns
+                    };
+                    let servers = if narrowed {
+                        covered_by(&servers, &granted_for_dns)
+                    } else {
+                        servers
+                    };
+                    crate::dns::set_vpn_dns_for(&dns_owner, &servers);
+                }
+                crate::dns_health_watchdog::notify_state_changed();
+            })
+            .await;
         }
 
         if ok && want_kill_switch {
             let iface = self.resolve_profile_utun(&args.profile_id).await;
-            if let Err(e) = crate::kill_switch::activate_for_profile(
-                &args.profile_id,
-                &iface,
-                endpoints,
-                crate::kill_switch::KillSwitchBackend::Ikev2,
-            ) {
+            let pid_for_ks = args.profile_id.clone();
+            let ks_res = tokio::task::spawn_blocking(move || {
+                crate::kill_switch::activate_for_profile(
+                    &pid_for_ks,
+                    &iface,
+                    endpoints,
+                    crate::kill_switch::KillSwitchBackend::Ikev2,
+                )
+            })
+            .await
+            .context("kill-switch blocking task")?;
+            if let Err(e) = ks_res {
                 tracing::error!(
                     profile = %args.profile_id,
                     "strongswan connect: kill-switch activation failed; tearing down SA: {e:#}"
@@ -841,7 +854,9 @@ impl Strongswan {
             {
                 let block = extract_sa_block(&out, profile_id);
                 if let Some(vip) = parse_virtual_ip(&block) {
-                    if let Some((iface, _)) = utun_for_address(&vip) {
+                    if let Ok(Some((iface, _))) =
+                        tokio::task::spawn_blocking(move || utun_for_address(&vip)).await
+                    {
                         if !iface.is_empty() {
                             return iface;
                         }
@@ -855,7 +870,11 @@ impl Strongswan {
 
     pub async fn disconnect(&mut self, args: &DisconnectArgs) -> anyhow::Result<DisconnectResult> {
         validate_profile_id(&args.profile_id)?;
-        let _ = crate::kill_switch::deactivate_for_profile(&args.profile_id);
+        let pid_for_ks = args.profile_id.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let _ = crate::kill_switch::deactivate_for_profile(&pid_for_ks);
+        })
+        .await;
         self.resolve()?;
         let swanctl = self
             .swanctl
@@ -896,23 +915,22 @@ impl Strongswan {
         tokio::fs::remove_file(&conf_path).await.ok();
         tokio::fs::remove_file(&secrets_path).await.ok();
         let _ = run(&swanctl, &["--load-conns"]).await;
-        if !has_established_strongswan_sa() {
+        let has_sa = tokio::task::spawn_blocking(has_established_strongswan_sa)
+            .await
+            .unwrap_or(true);
+        if !has_sa {
             let _ = run(&swanctl, &["--load-creds", "--clear"]).await;
         }
 
-        if let Some(host) = server_host {
-            delete_server_host_route(&host);
-        }
-        // Belt-and-braces: charon removes the full-tunnel split-default routes
-        // (0/1 + 128/1) when it terminates the SA cleanly. But if the SA was
-        // already gone before --terminate ran (server timeout, network change,
-        // unexpected drop), charon has nothing to clean up and the routes stay
-        // in the kernel — routing ALL subsequent traffic into a dead tunnel and
-        // breaking internet access until the next VPN connect or reboot.
-        // Deleting them here is idempotent: `route delete` ignores missing routes.
-        delete_full_tunnel_routes();
-        // Restore ONLY this profile's ephemeral DNS key (`P2-18`).
-        crate::dns::clear_vpn_dns_for(&format!("ikev2-{}", args.profile_id));
+        let dns_owner = format!("ikev2-{}", args.profile_id);
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Some(host) = server_host {
+                delete_server_host_route(&host);
+            }
+            delete_full_tunnel_routes();
+            crate::dns::clear_vpn_dns_for(&dns_owner);
+        })
+        .await;
 
         Ok(DisconnectResult {
             ok: true,
@@ -988,18 +1006,23 @@ impl Strongswan {
             });
         }
         let virtual_ip = parse_virtual_ip(&block).unwrap_or_default();
-        // swanctl doesn't name the utun, but the virtual IP is assigned to it,
-        // so ifconfig can point back. Resolving via the IP rather than "the
-        // newest utun" keeps it right when several tunnels are up at once.
-        let (interface, virtual_gateway) = if virtual_ip.is_empty() {
-            (String::new(), String::new())
-        } else {
-            utun_for_address(&virtual_ip).unwrap_or_default()
-        };
         let active_routes = parse_child_remote_ts(&block);
-        let routes_installed = routes_installed_verdict(&interface, &active_routes, |dest| {
-            route_iface_family(dest, "-inet")
-        });
+        let vip_for_lookup = virtual_ip.clone();
+        let routes_for_lookup = active_routes.clone();
+        let (interface, virtual_gateway, routes_installed) =
+            tokio::task::spawn_blocking(move || {
+                let (iface, vgw) = if vip_for_lookup.is_empty() {
+                    (String::new(), String::new())
+                } else {
+                    utun_for_address(&vip_for_lookup).unwrap_or_default()
+                };
+                let verdict = routes_installed_verdict(&iface, &routes_for_lookup, |dest| {
+                    route_iface_family(dest, "-inet")
+                });
+                (iface, vgw, verdict)
+            })
+            .await
+            .unwrap_or_else(|_| (String::new(), String::new(), None));
         let (bytes_in, packets_in, bytes_out, packets_out) = parse_traffic(&block);
         Ok(StatusResult {
             state: state.to_owned(),
@@ -1358,16 +1381,33 @@ async fn stop_process(pid: i32, charon: &Path, pid_file: &Path, helper_pid_file:
     }
 }
 
-/// What `path` gained past `offset`, at most its last `max` bytes.
+/// What `path` gained past `offset`, at most its last `max` bytes (`P3-6`:
+/// seeks directly to the tail instead of reading the entire log file).
 fn read_from(path: &Path, offset: u64, max: usize) -> String {
-    let Ok(bytes) = std::fs::read(path) else {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    if max == 0 {
+        return String::new();
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
         return String::new();
     };
-    let start = usize::try_from(offset)
-        .unwrap_or(bytes.len())
-        .min(bytes.len());
-    let tail = &bytes[start..];
-    String::from_utf8_lossy(&tail[tail.len().saturating_sub(max)..]).into_owned()
+    let Ok(len) = file.metadata().map(|m| m.len()) else {
+        return String::new();
+    };
+    if offset >= len {
+        return String::new();
+    }
+    let max_u64 = u64::try_from(max).unwrap_or(u64::MAX);
+    let seek_to = offset.max(len.saturating_sub(max_u64));
+    if file.seek(SeekFrom::Start(seek_to)).is_err() {
+        return String::new();
+    }
+    let to_read = len.saturating_sub(seek_to).min(max_u64);
+    let mut buf = Vec::with_capacity(usize::try_from(to_read).unwrap_or(max));
+    if file.take(to_read).read_to_end(&mut buf).is_err() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 /// Poll the actual control channel instead of assuming that a process is
@@ -2345,8 +2385,11 @@ async fn extract_remote_addr(path: impl AsRef<std::path::Path>) -> anyhow::Resul
 ///   2. Sweep `supermanager-*-secrets.conf` files (belt-and-braces).
 ///   3. Run `swanctl --load-all` so charon sees the empty namespace.
 pub async fn terminate_and_sweep(policy: Policy) {
-    crate::kill_switch::deactivate_backend(crate::kill_switch::KillSwitchBackend::Ikev2);
-    crate::dns::clear_vpn_dns_prefix("ikev2-");
+    let _ = tokio::task::spawn_blocking(|| {
+        crate::kill_switch::deactivate_backend(crate::kill_switch::KillSwitchBackend::Ikev2);
+        crate::dns::clear_vpn_dns_prefix("ikev2-");
+    })
+    .await;
     // Find the first working swanctl binary permitted by policy. Return early
     // if strongSwan isn't installed — nothing to clean up.
     let Some(swanctl) = locate_swanctl(policy) else {
@@ -2399,7 +2442,7 @@ pub async fn terminate_and_sweep(policy: Policy) {
 
             // Sweep the kernel host route charon installed.
             if let Ok(host) = extract_remote_addr(entry.path()).await {
-                delete_server_host_route(&host);
+                let _ = tokio::task::spawn_blocking(move || delete_server_host_route(&host)).await;
             }
             // Remove the config file.
             let _ = tokio::fs::remove_file(entry.path()).await;
@@ -2410,7 +2453,7 @@ pub async fn terminate_and_sweep(policy: Policy) {
         // Explicitly remove full-tunnel split-default routes. charon removes
         // these when --terminate succeeds, but if a SA was already gone they
         // linger in the kernel and black-hole all internet traffic.
-        delete_full_tunnel_routes();
+        let _ = tokio::task::spawn_blocking(delete_full_tunnel_routes).await;
         break; // Found a valid config dir; done.
     }
 }
@@ -3422,5 +3465,21 @@ mod traffic_tests {
             classify_list_sas_output(true, REAL_LIST_SAS_FULL_TUNNEL, ""),
             Some(true)
         );
+    }
+
+    #[test]
+    fn read_from_seeks_tail_without_reading_entire_file() {
+        use super::read_from;
+        let dir = std::env::temp_dir().join(format!("smgr-read-from-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("helper.log");
+        let mut payload = vec![b'x'; 20_000];
+        payload.extend_from_slice(b"TAIL_MARKER_12345");
+        std::fs::write(&file, &payload).unwrap();
+
+        let tail = read_from(&file, 100, 17);
+        assert_eq!(tail, "TAIL_MARKER_12345");
+        assert_eq!(read_from(&file, 99_999, 64), "");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
