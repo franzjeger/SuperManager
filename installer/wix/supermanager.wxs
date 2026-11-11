@@ -138,6 +138,9 @@
         </Directory>
 
         <Directory Id="DocsDir" Name="docs">
+          <Component Id="LicenseTxt" Bitness="always64">
+            <File Id="LICENSE.txt" Name="LICENSE.txt" Source="LICENSE" KeyPath="yes" />
+          </Component>
           <Component Id="WindowsMd" Bitness="always64">
             <File Id="WINDOWS.md" Source="WINDOWS.md" KeyPath="yes" />
           </Component>
@@ -186,6 +189,7 @@
       <ComponentRef Id="InstallSvcPs1" />
       <ComponentRef Id="UninstallSvcPs1" />
       <ComponentRef Id="SmokeTestPs1" />
+      <ComponentRef Id="LicenseTxt" />
       <ComponentRef Id="WindowsMd" />
       <ComponentRef Id="ReadmeMd" />
       <ComponentRef Id="StartMenuShortcut" />

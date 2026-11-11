@@ -3,6 +3,7 @@ name = "supermgr-mcp"
 version     = "1.0.0"
 edition = "2021"
 description = "MCP (Model Context Protocol) server for SuperManager — exposes SSH/VPN operations as tools for Claude Code."
+license     = "GPL-3.0-or-later"
 
 [dependencies]
 supermgr-core = { path = "../supermgr-core" }

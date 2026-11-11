@@ -4,8 +4,9 @@
 //!
 //! `supermgrd` runs as root on the system bus. D-Bus admits root and members
 //! of the supermgr group; polkit then authorizes guarded operations. The
-//! installed operator rule grants routine manage/execute/SSH actions to
-//! active local group members. Secrets and routing retain separate policies.
+//! installed operator rule grants routine `manage` actions to active local
+//! group members while requiring `auth_admin_keep` (once per session) for
+//! `execute` and `ssh-connect`. Secrets and routing retain separate policies.
 //!
 //! Polkit is the mechanism Linux provides for exactly this shape of
 //! problem — a privileged service deciding whether an unprivileged caller
@@ -37,8 +38,8 @@ pub const ACTION_SECRETS: &str = "org.supermgr.daemon.secrets";
 
 /// Open an SSH session to a managed host.
 ///
-/// Defaults to `auth_admin_keep`, with temporary authorization caching.
-/// The installed operator rule permits active local supermgr members.
+/// Defaults to `auth_admin_keep`, with temporary authorization caching
+/// (once per active local session, matching the installed operator rule).
 ///
 /// # Why not `ACTION_SECRETS`
 ///

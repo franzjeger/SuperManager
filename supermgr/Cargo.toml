@@ -14,6 +14,7 @@ supermgr-core  = { path = "../supermgr-core" }
 supermgr-mcp   = { path = "../supermgr-mcp" }
 
 anyhow         = { workspace = true }
+async-trait    = { workspace = true }
 futures-util   = { version = "0.3", default-features = false, features = ["std"] }
 serde          = { workspace = true }
 serde_json     = { workspace = true }
