@@ -84,19 +84,106 @@ impl WatchedProfile {
     /// claims protection the helper cannot deliver. Reported so the GUI can
     /// say "arms after the next connect" instead of lying.
     ///
-    /// Deliberately the same decode the replay path performs, so the answer
-    /// cannot drift from the behaviour it describes.
+    /// Deliberately the same decode + validation the replay path performs, so
+    /// the answer cannot drift from the behaviour it describes.
     #[must_use]
     pub fn is_armed(&self) -> bool {
         let a = self.last_connect_args.clone();
         match self.backend.as_str() {
-            "wireguard" => serde_json::from_value::<crate::wireguard::WgConnectArgs>(a).is_ok(),
+            "wireguard" => serde_json::from_value::<crate::wireguard::WgConnectArgs>(a)
+                .is_ok_and(|args| {
+                    args.profile_id == self.profile_id
+                        && crate::wireguard::validate_connect_args(&args).is_ok()
+                }),
             "openvpn" => serde_json::from_value::<crate::openvpn::OvpnConnectArgs>(a)
-                .is_ok_and(|a| a.has_configuration()),
-            "ikev2" => serde_json::from_value::<crate::strongswan::ConnectArgs>(a).is_ok(),
+                .is_ok_and(|args| {
+                    args.profile_id == self.profile_id
+                        && args.has_configuration()
+                        && crate::openvpn::validate_connect_args(&args).is_ok()
+                }),
+            "ikev2" => serde_json::from_value::<crate::strongswan::ConnectArgs>(a)
+                .is_ok_and(|args| {
+                    args.profile_id == self.profile_id
+                        && crate::strongswan::validate_connect_args(&args).is_ok()
+                }),
             _ => false,
         }
     }
+}
+
+fn validate_profile_key(profile_id: &str) -> Result<()> {
+    if profile_id.is_empty()
+        || profile_id.len() > 128
+        || !profile_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        anyhow::bail!("invalid profile_id");
+    }
+    Ok(())
+}
+
+/// True when `args` is the GUI's pre-connect placeholder (`null`, `{}`, or
+/// `{"profile_id": "<same id>"}`), which enrols a profile in the unarmed state
+/// until the first successful manual connect populates full connect arguments.
+fn is_unarmed_placeholder(profile_id: &str, args: &serde_json::Value) -> bool {
+    match args {
+        serde_json::Value::Null => true,
+        serde_json::Value::Object(map) if map.is_empty() => true,
+        serde_json::Value::Object(map) if map.len() == 1 => {
+            map.get("profile_id").and_then(|v| v.as_str()) == Some(profile_id)
+        }
+        _ => false,
+    }
+}
+
+/// Validate auto-reconnect registration inputs with the same validators used by
+/// the corresponding connect RPCs before storing anything in memory or on disk.
+pub(crate) fn validate_enrollment(
+    profile_id: &str,
+    backend: &str,
+    args: &serde_json::Value,
+) -> Result<()> {
+    validate_profile_key(profile_id)?;
+    if !matches!(backend, "wireguard" | "openvpn" | "ikev2") {
+        anyhow::bail!("unsupported auto-reconnect backend '{backend}'");
+    }
+    if args.get("config_file").is_some() {
+        anyhow::bail!("config_file is not supported; pass inline configuration");
+    }
+    if is_unarmed_placeholder(profile_id, args) {
+        return Ok(());
+    }
+    match backend {
+        "wireguard" => {
+            let parsed: crate::wireguard::WgConnectArgs =
+                serde_json::from_value(args.clone()).context("invalid wireguard connect_args")?;
+            if parsed.profile_id != profile_id {
+                anyhow::bail!("connect_args.profile_id does not match profile_id");
+            }
+            crate::wireguard::validate_connect_args(&parsed)?;
+        }
+        "openvpn" => {
+            let parsed: crate::openvpn::OvpnConnectArgs =
+                serde_json::from_value(args.clone()).context("invalid openvpn connect_args")?;
+            if parsed.profile_id != profile_id {
+                anyhow::bail!("connect_args.profile_id does not match profile_id");
+            }
+            if parsed.has_configuration() {
+                crate::openvpn::validate_connect_args(&parsed)?;
+            }
+        }
+        "ikev2" => {
+            let parsed: crate::strongswan::ConnectArgs =
+                serde_json::from_value(args.clone()).context("invalid ikev2 connect_args")?;
+            if parsed.profile_id != profile_id {
+                anyhow::bail!("connect_args.profile_id does not match profile_id");
+            }
+            crate::strongswan::validate_connect_args(&parsed)?;
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
 }
 
 /// Process-wide state. Built up at startup by `spawn_watchdog`,
@@ -150,11 +237,14 @@ pub async fn spawn_watchdog(
                 }
                 Err(_) => HashMap::new(),
             };
-            // Purge any legacy RouteGuard entries that an older helper persisted
-            // to disk: manual connections do not survive restarts and their
-            // credentials must never linger on disk.
+            // Purge any legacy RouteGuard or invalid entries that an older
+            // helper persisted to disk.
             let before = map.len();
-            map.retain(|_, w| w.mode == WatchMode::AlwaysOn);
+            map.retain(|k, w| {
+                w.mode == WatchMode::AlwaysOn
+                    && k == &w.profile_id
+                    && validate_enrollment(&w.profile_id, &w.backend, &w.last_connect_args).is_ok()
+            });
             if map.len() != before {
                 let _ = persist(&map);
             }
@@ -189,6 +279,7 @@ pub async fn spawn_watchdog(
 }
 
 pub async fn enable(profile_id: String, backend: String, args: serde_json::Value) -> Result<()> {
+    validate_enrollment(&profile_id, &backend, &args)?;
     let state = STATE.get().context("watchdog not initialised")?.clone();
     let mut g = state.lock().await;
     g.watched.insert(
@@ -256,6 +347,7 @@ pub async fn refresh_args(
     backend: String,
     args: serde_json::Value,
 ) -> Result<()> {
+    validate_enrollment(profile_id, &backend, &args)?;
     let Some(state) = STATE.get() else {
         return Ok(());
     };
@@ -290,6 +382,7 @@ pub async fn guard_routes(
     backend: String,
     args: serde_json::Value,
 ) -> Result<()> {
+    validate_enrollment(&profile_id, &backend, &args)?;
     let state = STATE.get().context("watchdog not initialised")?.clone();
     let mut g = state.lock().await;
     if g.watched.contains_key(&profile_id) {
@@ -726,5 +819,59 @@ mod tests {
         assert_eq!(filtered.len(), 1);
         assert!(filtered.contains_key(&"always-1".to_owned()));
         assert!(!filtered.contains_key(&"manual-1".to_owned()));
+    }
+
+    #[test]
+    fn enrollment_validation_enforces_backend_rules_and_rejects_config_file() {
+        let uuid = "26b4fcc6-097a-41e7-932e-9a6d2a4663e5";
+
+        // Unarmed placeholders from the GUI before first manual connect are allowed.
+        assert!(validate_enrollment(uuid, "ikev2", &serde_json::json!({ "profile_id": uuid })).is_ok());
+        assert!(validate_enrollment(uuid, "ikev2", &serde_json::json!({})).is_ok());
+        assert!(validate_enrollment(uuid, "openvpn", &serde_json::Value::Null).is_ok());
+
+        // Valid inline WireGuard and OpenVPN configs succeed.
+        assert!(validate_enrollment(
+            uuid,
+            "wireguard",
+            &serde_json::json!({ "profile_id": uuid, "conf_content": "[Interface]\nAddress = 10.0.0.2/32\n" }),
+        )
+        .is_ok());
+        assert!(validate_enrollment(
+            uuid,
+            "openvpn",
+            &serde_json::json!({ "profile_id": uuid, "config": "client\nremote vpn.example.com 1194\n" }),
+        )
+        .is_ok());
+
+        // Legacy/file-reading `config_file`, hook-bearing WireGuard configs,
+        // script-bearing OpenVPN configs, mismatched profile_ids, and unknown
+        // backends are rejected before storage.
+        assert!(validate_enrollment(
+            uuid,
+            "openvpn",
+            &serde_json::json!({ "profile_id": uuid, "config_file": "/etc/hosts" }),
+        )
+        .is_err());
+        assert!(validate_enrollment(
+            uuid,
+            "openvpn",
+            &serde_json::json!({ "profile_id": uuid, "config": "client\nup /tmp/evil.sh\n" }),
+        )
+        .is_err());
+        assert!(validate_enrollment(
+            uuid,
+            "wireguard",
+            &serde_json::json!({ "profile_id": uuid, "conf_content": "[Interface]\nPostUp = id\n" }),
+        )
+        .is_err());
+        assert!(validate_enrollment(
+            uuid,
+            "wireguard",
+            &serde_json::json!({ "profile_id": "other", "conf_content": "[Interface]\n" }),
+        )
+        .is_err());
+        assert!(validate_enrollment("../etc/passwd", "ikev2", &serde_json::json!({})).is_err());
+        assert!(validate_enrollment(uuid, "tailscale", &serde_json::json!({})).is_err());
     }
 }

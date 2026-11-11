@@ -37,12 +37,21 @@ use crate::proc::Bounded as Command;
 /// plist would then point at a missing binary.
 const DAEMON_INSTALL_PATH: &str = "/Library/PrivilegedHelperTools/com.sybr.supermanager.tailscaled";
 
+/// Stable root-owned path for the `tailscale` CLI used by helper-side status
+/// and exit-node reconciliation.
+pub(crate) const CLI_INSTALL_PATH: &str =
+    "/Library/PrivilegedHelperTools/com.sybr.supermanager.tailscale";
+
 /// Where helpers up to 1.8.14 installed it.
 const LEGACY_INSTALL_PATH: &str = "/usr/local/sbin/supermanager-tailscaled";
 
 /// The identifier `bundle_tailscale.sh` and `release.sh` sign the bundled
 /// daemon with. An installed binary carries it, and SuperManager's team.
 const DAEMON_IDENTIFIER: &str = "com.sybr.supermanager.tailscaled";
+
+/// The identifier `bundle_tailscale.sh` and `release.sh` sign the bundled
+/// CLI with.
+const CLI_IDENTIFIER: &str = "com.sybr.supermanager.tailscale";
 
 /// Where launchd looks for system daemons. Anything in this directory
 /// owned by root with the right permissions is auto-bootstrapped at
@@ -146,10 +155,15 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
     // SuperManager's leaves the current install as it is. We copy (not
     // symlink) so the daemon keeps working after the user moves
     // SuperManager.app or trashes it temporarily.
-    install_binary(
-        Path::new(&args.bundled_daemon_path),
-        Path::new(DAEMON_INSTALL_PATH),
-    )?;
+    let bundled_daemon = Path::new(&args.bundled_daemon_path);
+    install_binary(bundled_daemon, Path::new(DAEMON_INSTALL_PATH))?;
+    if let Some(bundled_cli) = bundled_daemon
+        .parent()
+        .map(|dir| dir.join("tailscale"))
+        .filter(|path| path.is_file())
+    {
+        install_cli_binary(&bundled_cli, Path::new(CLI_INSTALL_PATH))?;
+    }
 
     // Make sure the state directory exists.
     fs::create_dir_all(STATE_DIR).context("creating tailscale state dir")?;
@@ -240,6 +254,14 @@ fn install_binary(source: &Path, target: &Path) -> Result<()> {
     })
 }
 
+/// Put a copy of `source` at `target` if the copy is `tailscale` as
+/// SuperManager signs it (`signed_file`).
+pub(crate) fn install_cli_binary(source: &Path, target: &Path) -> Result<()> {
+    crate::signed_file::install(source, target, |copy| {
+        crate::signed_file::signed_by_supermanager(copy, CLI_IDENTIFIER)
+    })
+}
+
 /// Uninstall the daemon. Removes the LaunchDaemon, the binary, and
 /// the launchd registration. Leaves the state directory intact —
 /// the user's node key + tailnet identity is in there, and a future
@@ -253,7 +275,7 @@ pub fn uninstall(_: UninstallArgs) -> Result<InstallResult> {
     if Path::new(LAUNCH_DAEMON_PLIST).exists() {
         let _ = fs::remove_file(LAUNCH_DAEMON_PLIST);
     }
-    for binary in [DAEMON_INSTALL_PATH, LEGACY_INSTALL_PATH] {
+    for binary in [DAEMON_INSTALL_PATH, CLI_INSTALL_PATH, LEGACY_INSTALL_PATH] {
         if Path::new(binary).exists() {
             let _ = fs::remove_file(binary);
         }
@@ -264,29 +286,57 @@ pub fn uninstall(_: UninstallArgs) -> Result<InstallResult> {
     })
 }
 
-/// Find PID of the running tailscaled. Used by exit-node setup to
-/// snapshot tailscaled's active underlay connections so we can
-/// pin them to the LOCAL default before flipping the split-default
-/// routes — without these pins the daemon's own WireGuard packets
-/// would loop through utun, killing the tunnel and the user's
-/// internet.
-fn find_tailscaled_pid() -> Option<u32> {
-    let out = Command::new("/bin/ps")
-        .args(["-Ao", "pid,command"])
-        .output()
-        .ok()?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
+/// Parse the top-level `pid = <N>` line from `launchctl print system/<label>`.
+/// Ignores nested blocks (`endpoints = { ... }`, `environment = { ... }`) so
+/// only the job's own PID is matched.
+fn parse_launchctl_pid(stdout: &str) -> Option<u32> {
+    let mut depth = 0usize;
     for line in stdout.lines() {
-        if line.contains("tailscaled") && !line.contains("ps -Ao") {
-            // First numeric token is the pid.
-            if let Some(pid) = line.split_whitespace().next() {
-                if let Ok(n) = pid.parse() {
-                    return Some(n);
+        let trimmed = line.trim();
+        if depth == 1 {
+            if let Some(rest) = trimmed.strip_prefix("pid = ") {
+                if let Ok(pid) = rest.trim().parse::<u32>() {
+                    if pid > 1 {
+                        return Some(pid);
+                    }
                 }
+            }
+        }
+        for b in trimmed.bytes() {
+            match b {
+                b'{' => depth = depth.saturating_add(1),
+                b'}' => depth = depth.saturating_sub(1),
+                _ => {}
             }
         }
     }
     None
+}
+
+/// Find PID of the running tailscaled. Queries `launchctl print` for the
+/// registered system job and verifies via kernel process info that the PID runs
+/// as root from the installed daemon path.
+fn find_tailscaled_pid() -> Option<u32> {
+    let out = Command::new("/bin/launchctl")
+        .args(["print", &format!("system/{LAUNCH_LABEL}")])
+        .budget(crate::proc::PROBE)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let pid = parse_launchctl_pid(&String::from_utf8_lossy(&out.stdout))?;
+    let pid_i32 = i32::try_from(pid).ok()?;
+    if crate::proc::process_uid(pid_i32) != Some(0) {
+        return None;
+    }
+    if crate::proc::process_is(pid_i32, Path::new(DAEMON_INSTALL_PATH))
+        || crate::proc::process_is(pid_i32, Path::new(LEGACY_INSTALL_PATH))
+    {
+        Some(pid)
+    } else {
+        None
+    }
 }
 
 /// The physical default route: the table's own `default` entry. Not
@@ -809,15 +859,23 @@ fn scutil_find_service_uuid() -> Option<String> {
 /// again. Pass `["1.1.1.1", "1.0.0.1"]` (or similar) for a
 /// known-good fallback when DHCP-provided DNS is broken.
 pub fn set_dns_servers(args: SetDnsArgs) -> Result<InstallResult> {
+    let clear = args.servers.is_empty()
+        || (args.servers.len() == 1 && args.servers[0].trim().eq_ignore_ascii_case("empty"));
+    let validated = if clear {
+        Vec::new()
+    } else {
+        dns_servers(&args.servers)?
+    };
+
     let service = detect_active_network_service().unwrap_or_else(|| "Wi-Fi".to_string());
 
     let mut cmd = Command::new("/usr/sbin/networksetup");
     cmd.arg("-setdnsservers").arg(&service);
-    if args.servers.is_empty() || args.servers == vec!["empty".to_string()] {
+    if clear {
         cmd.arg("empty");
     } else {
-        for s in &args.servers {
-            cmd.arg(s);
+        for addr in &validated {
+            cmd.arg(addr.to_string());
         }
     }
     let out = cmd.output().context("running networksetup")?;
@@ -839,10 +897,14 @@ pub fn set_dns_servers(args: SetDnsArgs) -> Result<InstallResult> {
         message: format!(
             "Set DNS on '{}' to {}",
             service,
-            if args.servers.is_empty() {
+            if clear {
                 "empty (DHCP)".to_string()
             } else {
-                args.servers.join(", ")
+                validated
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             }
         ),
     })
@@ -1127,31 +1189,81 @@ pub(crate) fn detect_tailscale_utun() -> Option<String> {
 /// When the daemon goes back to BackendState=Stopped (user
 /// disconnected), call with `install: false` so we leave a clean
 /// system. The file is owned by root:wheel, mode 0644.
-pub fn install_magicdns_resolver(args: MagicdnsResolverArgs) -> Result<InstallResult> {
-    let domain = args.tailnet_suffix.trim_matches('.');
-    if domain.is_empty() || !domain.contains('.') {
-        bail!("invalid tailnet_suffix '{}'", args.tailnet_suffix);
+/// Validate `tailnet_suffix` as a strict multi-label RFC-1123 DNS domain name
+/// (e.g. `tailb0b06a.ts.net`), normalized to lowercase without trailing dots.
+fn validate_magicdns_suffix(raw: &str) -> Result<String> {
+    let trimmed = raw.strip_suffix('.').unwrap_or(raw);
+    if trimmed.is_empty() || trimmed.len() > 253 {
+        bail!("invalid tailnet_suffix '{raw}'");
     }
-    // /etc/resolver/<domain> — macOS reads files in this dir and
-    // routes any DNS query for matching suffix to the listed
-    // nameservers.
-    let path = format!("/etc/resolver/{domain}");
-    if !args.install {
-        if Path::new(&path).exists() {
-            fs::remove_file(&path).with_context(|| format!("removing {path}"))?;
-            return Ok(InstallResult {
-                success: true,
-                message: format!("Removed {path}"),
-            });
+    let labels: Vec<&str> = trimmed.split('.').collect();
+    let valid = labels.len() >= 2
+        && labels.iter().all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label.as_bytes()[0].is_ascii_alphanumeric()
+                && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+        && !labels
+            .last()
+            .is_some_and(|tld| tld.bytes().all(|b| b.is_ascii_digit()));
+    if !valid {
+        bail!("invalid tailnet_suffix '{raw}'");
+    }
+    Ok(trimmed.to_ascii_lowercase())
+}
+
+fn write_or_remove_magicdns_resolver(
+    resolver_dir: &Path,
+    raw_suffix: &str,
+    install: bool,
+) -> Result<(bool, std::path::PathBuf, String)> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let domain = validate_magicdns_suffix(raw_suffix)?;
+    if let Ok(meta) = fs::symlink_metadata(resolver_dir) {
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            bail!(
+                "resolver directory {} is not a regular directory",
+                resolver_dir.display()
+            );
         }
-        return Ok(InstallResult {
-            success: true,
-            message: "no resolver file to remove".to_string(),
-        });
     }
-    // Make sure the dir exists. macOS creates it on demand for
-    // some installs but not all.
-    fs::create_dir_all("/etc/resolver").context("creating /etc/resolver")?;
+    let path = resolver_dir.join(&domain);
+    if !install {
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
+                bail!("refusing to remove non-regular resolver path {}", path.display());
+            }
+            Ok(_) => {
+                fs::remove_file(&path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+                return Ok((true, path, domain));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((false, path, domain));
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("stat {}", path.display()));
+            }
+        }
+    }
+
+    fs::create_dir_all(resolver_dir)
+        .with_context(|| format!("creating {}", resolver_dir.display()))?;
+    let meta = fs::symlink_metadata(resolver_dir)
+        .with_context(|| format!("stat {}", resolver_dir.display()))?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        bail!(
+            "resolver directory {} is not a regular directory",
+            resolver_dir.display()
+        );
+    }
+
     let content = "# Written by SuperManager helper — backstops macOS open-source\n\
                    # tailscaled which silently fails to install the per-domain\n\
                    # nameserver file. Removed automatically when the daemon stops.\n\
@@ -1159,10 +1271,40 @@ pub fn install_magicdns_resolver(args: MagicdnsResolverArgs) -> Result<InstallRe
                    nameserver fd7a:115c:a1e0::53\n\
                    port 53\n\
                    timeout 5\n";
-    fs::write(&path, content).with_context(|| format!("writing {path}"))?;
-    let _ = Command::new("/bin/chmod").args(["0644", &path]).status();
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o644)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)
+        .with_context(|| format!("writing {}", path.display()))?;
+    file.write_all(content.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("syncing {}", path.display()))?;
+    Ok((true, path, domain))
+}
+
+pub fn install_magicdns_resolver(args: MagicdnsResolverArgs) -> Result<InstallResult> {
+    let (changed, path, domain) =
+        write_or_remove_magicdns_resolver(Path::new("/etc/resolver"), &args.tailnet_suffix, args.install)?;
+    let path_str = path.display().to_string();
+    if !args.install {
+        return Ok(InstallResult {
+            success: true,
+            message: if changed {
+                format!("Removed {path_str}")
+            } else {
+                "no resolver file to remove".to_string()
+            },
+        });
+    }
+    let _ = Command::new("/bin/chmod")
+        .args(["0644", &path_str])
+        .status();
     let _ = Command::new("/usr/sbin/chown")
-        .args(["root:wheel", &path])
+        .args(["root:wheel", &path_str])
         .status();
     // Force macOS to pick up the new resolver file. Without this,
     // queries for the tailnet domain still fall through to the
@@ -1175,7 +1317,7 @@ pub fn install_magicdns_resolver(args: MagicdnsResolverArgs) -> Result<InstallRe
         .status();
     Ok(InstallResult {
         success: true,
-        message: format!("Wrote {path} (MagicDNS for {domain})"),
+        message: format!("Wrote {path_str} (MagicDNS for {domain})"),
     })
 }
 
@@ -1314,19 +1456,22 @@ pub struct PanicResetArgs {
     pub clear_pref: bool,
 }
 
-/// Locate the bundled/installed tailscale CLI (same candidates the panic path
-/// uses). Returns the first existing path.
+fn select_tailscale_cli<'a>(
+    candidate: &'a str,
+    is_file: impl Fn(&Path) -> bool,
+    check_owner: impl Fn(&Path, &str) -> Result<()>,
+) -> Option<&'a str> {
+    let path = Path::new(candidate);
+    (is_file(path) && check_owner(path, "tailscale CLI").is_ok()).then_some(candidate)
+}
+
+/// Locate the root-installed `tailscale` CLI inside `/Library/PrivilegedHelperTools`.
 fn tailscale_cli() -> Option<&'static str> {
-    // The app is built as SuperManagerMac.app. An install that was renamed,
-    // and that Sparkle has since updated in place, is SuperManager.app. The
-    // bundled CLI matches the bundled tailscaled, so it comes before Homebrew's.
-    const CANDIDATES: [&str; 4] = [
-        "/Applications/SuperManagerMac.app/Contents/Resources/tailscale-bin/tailscale",
-        "/Applications/SuperManager.app/Contents/Resources/tailscale-bin/tailscale",
-        "/opt/homebrew/bin/tailscale",
-        "/usr/local/bin/tailscale",
-    ];
-    CANDIDATES.into_iter().find(|p| Path::new(p).exists())
+    select_tailscale_cli(
+        CLI_INSTALL_PATH,
+        Path::is_file,
+        crate::vpn_runtime::ensure_root_owned,
+    )
 }
 
 /// tailscaled's prefs and status, as `tailscale debug prefs` and
@@ -2083,6 +2228,121 @@ mod tests {
         })
         .unwrap_err();
         assert!(err.to_string().contains("not an IP address"), "{err}");
+    }
+
+    #[test]
+    fn set_dns_servers_refuses_non_ip_before_running_networksetup() {
+        for bad in ["-setwebproxy", "dns.google", "1.1.1.1\n9.9.9.9", "1.1.1.1 8.8.8.8"] {
+            let err = set_dns_servers(SetDnsArgs {
+                servers: vec![bad.into()],
+            })
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("not an IP address"),
+                "{bad:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn magicdns_suffix_validation_accepts_only_multi_label_dns_names() {
+        assert_eq!(
+            validate_magicdns_suffix("TailB0B06A.ts.net.").unwrap(),
+            "tailb0b06a.ts.net"
+        );
+        assert_eq!(
+            validate_magicdns_suffix("corp-net.example.com").unwrap(),
+            "corp-net.example.com"
+        );
+        for bad in [
+            "",
+            ".",
+            "..",
+            "localhost",
+            ".ts.net",
+            "tail..ts.net",
+            "../../etc/passwd",
+            "../foo.bar",
+            "foo/bar.ts.net",
+            "-bad.ts.net",
+            "bad-.ts.net",
+            "1.2.3.4",
+            "foo bar.ts.net",
+        ] {
+            assert!(validate_magicdns_suffix(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn magicdns_resolver_writes_regular_file_and_refuses_symlinks() {
+        let dir = scratch_dir();
+        let (changed, path, domain) =
+            write_or_remove_magicdns_resolver(&dir, "Tail123.ts.net.", true).unwrap();
+        assert!(changed);
+        assert_eq!(domain, "tail123.ts.net");
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("nameserver 100.100.100.100"));
+
+        let (removed, _, _) =
+            write_or_remove_magicdns_resolver(&dir, "tail123.ts.net", false).unwrap();
+        assert!(removed);
+        assert!(!path.exists());
+
+        // A symlink at the target path must not be overwritten or unlinked.
+        let target = dir.join("outside");
+        fs::write(&target, "keep").unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("evil.ts.net")).unwrap();
+        assert!(write_or_remove_magicdns_resolver(&dir, "evil.ts.net", true).is_err());
+        assert!(write_or_remove_magicdns_resolver(&dir, "evil.ts.net", false).is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn tailscale_cli_requires_root_owned_privileged_helper_path() {
+        assert_eq!(CLI_INSTALL_PATH, "/Library/PrivilegedHelperTools/com.sybr.supermanager.tailscale");
+        assert_eq!(
+            select_tailscale_cli(CLI_INSTALL_PATH, |_| true, |_, _| Ok(())),
+            Some(CLI_INSTALL_PATH)
+        );
+        assert_eq!(
+            select_tailscale_cli(CLI_INSTALL_PATH, |_| false, |_, _| Ok(())),
+            None
+        );
+        assert_eq!(
+            select_tailscale_cli(
+                CLI_INSTALL_PATH,
+                |_| true,
+                |_, _| Err(anyhow::anyhow!("owned by uid 501")),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_launchctl_pid_reads_only_top_level_job_pid() {
+        let sample = "\
+system/com.sybr.tailscaled = {
+\tactive count = 1
+\tstate = running
+\tendpoints = {
+\t\tpid = 99999
+\t}
+\tpid = 4242
+\truns = 1
+}
+";
+        assert_eq!(parse_launchctl_pid(sample), Some(4242));
+        assert_eq!(
+            parse_launchctl_pid("system/com.sybr.tailscaled = {\n\tstate = waiting\n}\n"),
+            None
+        );
+        assert_eq!(
+            parse_launchctl_pid("system/com.sybr.tailscaled = {\n\tpid = 1\n}\n"),
+            None
+        );
     }
 
     /// The whole point of the reload rework: a plist that already matches
