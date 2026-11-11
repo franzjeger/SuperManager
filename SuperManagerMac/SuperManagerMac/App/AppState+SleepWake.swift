@@ -63,25 +63,39 @@ extension AppState {
             guard let self else { return }
             Task { @MainActor in await self.handleDidWake() }
         }
+
+        // Wake the status poller out of closed-window backoff immediately when
+        // the operator focuses SuperManager (`P3-8`).
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                self.bumpVpnFastPolling(seconds: 6)
+                await self.refreshMissingDependencies()
+            }
+        }
     }
 
     // MARK: - Handlers
 
     @MainActor
     private func handleWillSleep() async {
-        DebugLog.write("[sleep] willSleep — disconnecting all VPNs before sleep")
-        // Disconnect every profile cleanly. This fires the proper
-        // backend-specific RPC (swanctl --terminate, wg-quick down,
-        // ovpncli kill) so the tunnels are properly torn down while
-        // the network is still up. Failures are swallowed — if a
-        // tunnel disconnect fails here, the system-sleep RPC below
-        // sweeps it as belt-and-braces.
-        await disconnectAllVpns()
+        // Snapshot every VPN profile that was active right before sleep (`P2-8`)
+        // so `handleDidWake` restores the operator's active tunnels instead of
+        // leaving them permanently disconnected after every lid close.
+        let activeStates: Set<String> = ["connected", "connecting", "reconnecting"]
+        vpnProfilesActiveBeforeSleep = Set(
+            vpnProfiles
+                .map(\.id)
+                .filter { activeStates.contains(vpnConnectionStates[$0] ?? "") }
+        )
+        DebugLog.write("[sleep] willSleep — active before sleep=\(vpnProfilesActiveBeforeSleep); disconnecting all VPNs")
 
-        // Tell the helper to terminate any remaining IKEv2 SAs and
-        // kill ovpncli processes. Best-effort — if the helper is
-        // unreachable (rare race), we accept some cleanup happening
-        // on the wake side instead.
+        await disconnectAllVpns(suppressKillSwitchReleaseForSleepReconnect: false)
+
         _ = try? await HelperClient.shared.systemSleep()
 
         DebugLog.write("[sleep] pre-sleep teardown complete")
@@ -89,44 +103,51 @@ extension AppState {
 
     @MainActor
     private func handleDidWake() async {
-        DebugLog.write("[wake] didWake — resetting VPN state and cleaning up")
+        let toReconnect = vpnProfilesActiveBeforeSleep
+        vpnProfilesActiveBeforeSleep.removeAll()
+        DebugLog.write("[wake] didWake — resetting VPN state, cleaning up, will reconnect=\(toReconnect)")
 
-        // --- Optimistic reset ---
-        // Mark every profile as disconnected before the first poll
-        // returns. Any tunnel that legitimately auto-reconnected will
-        // be corrected by the poll below — but the user sees an
-        // honest "Disconnected" rather than a stale "Connected" while
-        // they wait.
         for id in vpnConnectionStates.keys {
+            bumpVpnGeneration(id)
             vpnConnectionStates[id] = "disconnected"
         }
-        // Drop all stale throughput/handshake metrics so the detail
-        // view doesn't show pre-sleep byte counts for a dead tunnel.
         vpnByteCounters.removeAll()
         vpnByteRates.removeAll()
         vpnLastByteSample.removeAll()
         vpnLastHandshakeUnix.removeAll()
         vpnPeerEndpoints.removeAll()
+        vpnLiveRouting.removeAll()
+        vpnLiveDetails.removeAll()
 
-        // --- Helper-side cleanup ---
-        // Reset route guardian snapshot + sweep stale strongSwan
-        // configs + kernel host routes. Fire-and-forget: if the
-        // helper isn't reachable yet (rare; it's a LaunchDaemon that
-        // doesn't sleep) the first poll will still reflect clean UI
-        // state from the reset above.
         _ = try? await HelperClient.shared.systemWake()
 
-        // --- Network settle ---
-        // On wake the network interface is typically not ready yet.
-        // Give it 2 seconds before polling so we don't flood the log
-        // with "helper not reachable" or false-negative "disconnected"
-        // entries from half-configured interfaces.
-        try? await Task.sleep(for: .seconds(2))
+        // Allow physical interface / Wi-Fi association + DHCP to settle on wake
+        // before polling and re-establishing pre-sleep tunnels.
+        try? await Task.sleep(for: .seconds(3))
 
-        // --- Reconcile ---
-        // Force a full poll. Any profile that auto-reconnected
-        // (always-on, ovpncli reconnect loop) will show as connected.
         await pollAllVpnStates()
+
+        if !toReconnect.isEmpty && !LockState.shared.isLocked {
+            for profileId in toReconnect {
+                let current = vpnConnectionStates[profileId] ?? "disconnected"
+                guard current != "connected" && current != "connecting" else { continue }
+                guard let summary = vpnProfiles.first(where: { $0.id == profileId }) else { continue }
+                if summary.backend.lowercased().contains("azure") {
+                    ActivityLog.shared.record(
+                        profileId: profileId,
+                        kind: .disconnectComplete,
+                        message: "Disconnected across system sleep (Azure Entra sign-in required to reconnect)"
+                    )
+                    continue
+                }
+                DebugLog.write("[wake] reconnecting pre-sleep VPN profile \(summary.name) (\(profileId))")
+                let result = await connectProfile(profileId: profileId, interactive: false)
+                if !result.success {
+                    DebugLog.write("[wake] post-wake reconnect failed for \(profileId): \(result.message)")
+                }
+            }
+            await pollAllVpnStates()
+        }
         DebugLog.write("[wake] post-wake states: \(vpnConnectionStates)")
     }
 }

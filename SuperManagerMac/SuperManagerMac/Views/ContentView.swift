@@ -24,8 +24,6 @@ struct ContentView: View {
     @State private var vpnImportTargeted = false
     /// Presents the VPN-client installer when a driver is missing.
     @State private var showingVpnDependencies = false
-    /// Bumped after an install so the missing-clients banner re-evaluates.
-    @State private var vpnDepRefresh = 0
     /// Last drop-import error (e.g. "unknown extension" or daemon
     /// rejection). Surfaced as a transient alert so it doesn't
     /// linger after the user moves on.
@@ -694,8 +692,7 @@ struct ContentView: View {
     /// nothing when every client is present.
     @ViewBuilder
     private var vpnDependencyBanner: some View {
-        let _ = vpnDepRefresh  // re-evaluate `Dependencies.missing` after an install
-        let missing = Dependencies.missing
+        let missing = appState.missingDependencies
         if !missing.isEmpty {
             Button {
                 showingVpnDependencies = true
@@ -767,17 +764,16 @@ struct ContentView: View {
                 vpnProfileList
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            vpnDepRefresh += 1
-        }
-        .sheet(isPresented: $showingVpnDependencies, onDismiss: { vpnDepRefresh += 1 }) {
+        .sheet(isPresented: $showingVpnDependencies, onDismiss: {
+            Task { await appState.refreshMissingDependencies() }
+        }) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Install VPN clients")
                     .font(.title3.weight(.semibold))
                 Text("SuperManager drives the real VPN clients rather than reimplementing them. Install the ones you need; Homebrew handles the first three.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                DependencyCard(onInstalled: { vpnDepRefresh += 1 })
+                DependencyCard()
                 HStack {
                     Spacer()
                     Button("Done") { showingVpnDependencies = false }

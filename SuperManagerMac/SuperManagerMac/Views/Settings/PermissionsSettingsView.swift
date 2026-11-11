@@ -230,7 +230,9 @@ struct PermissionsSettingsView: View {
     private func refreshTools() async {
         loadingTools = true
         defer { loadingTools = false }
-        let result = await appState.loadToolStatus()
+        async let daemonTools = appState.loadToolStatus()
+        await appState.refreshMissingDependencies()
+        let result = await daemonTools
         tools = result ?? []
     }
 

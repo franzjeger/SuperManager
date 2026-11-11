@@ -66,6 +66,61 @@ class AppState {
     /// goes down. Read by `tunnelConflicts`.
     var vpnLiveRouting: [String: VpnLiveRouting] = [:]
 
+    /// Live backend detail metadata populated by the single global VPN poller
+    /// (`P3-8`) so `VpnDetailView` never runs a second independent polling loop.
+    struct VpnLiveDetail: Equatable {
+        var stateDetail = ""
+        var reconnectReason: String?
+        var strongswanMissing = false
+        var interface = ""
+        var virtualIp = ""
+        var virtualGateway = ""
+        var routes: [String] = []
+        var routesInstalled: Bool?
+        var cipherSuite = ""
+    }
+    var vpnLiveDetails: [String: VpnLiveDetail] = [:]
+
+    /// Coalesces overlapping `pollAllVpnStates` calls (`P2-10`).
+    var vpnPollInFlight: Task<Void, Never>?
+    var vpnPollNeedsFollowUp = false
+    /// Monotonic per-profile mutation counter (`P2-10`): bumped on connect,
+    /// disconnect, delete, and wake reset so an in-flight poll never overwrites
+    /// a newer state transition.
+    var vpnProfileGeneration: [String: UInt64] = [:]
+
+    func bumpVpnGeneration(_ profileId: String) {
+        vpnProfileGeneration[profileId, default: 0] &+= 1
+    }
+
+    /// Profiles that were active immediately before `willSleep` (`P2-8`),
+    /// reconnected automatically after `didWake` once the network settles.
+    var vpnProfilesActiveBeforeSleep: Set<String> = []
+
+    /// Cached external VPN tool check (`P3-9`), refreshed off `@MainActor` so
+    /// SwiftUI `body` layout never blocks on filesystem `stat(2)` sweeps.
+    var missingDependencies: [Dependencies.Tool] = []
+    var brewAvailable = true
+
+    func refreshMissingDependencies() async {
+        let (missing, hasBrew) = await Task.detached(priority: .utility) {
+            (Dependencies.missing, Dependencies.brewPath != nil)
+        }.value
+        missingDependencies = missing
+        brewAvailable = hasBrew
+    }
+
+    /// Cached verdict for `TailscaleClient.usesNativeApp` (`P3-9`), refreshed
+    /// off `@MainActor` so SwiftUI views never spawn `tailscale version` inside `body`.
+    var tailscaleUsesNativeApp = false
+
+    func refreshTailscaleBinaryMode() async {
+        let native = await Task.detached(priority: .utility) {
+            TailscaleClient.usesNativeApp
+        }.value
+        tailscaleUsesNativeApp = native
+    }
+
     // MARK: - Tailscale
 
     /// Latest snapshot of `tailscale status --json`. Refreshed every
@@ -212,74 +267,109 @@ class AppState {
             daemonAvailable = false
             errorMessage = "Could not connect to daemon: \(error.localizedDescription)"
             showingError = true
+            startVpnStatusPolling()
         }
     }
 
-    /// Poll each known VPN profile's status from the helper, every
-    /// 4 seconds. Drives the per-profile dots in the sidebar list
-    /// so users can see at a glance which tunnel is up.
+    /// Reload daemon-owned state quietly after `DaemonSupervisor` respawns a
+    /// crashed `supermgrd-mac` (`P2-7`) or finishes a backup restore (`P2-11`).
+    func reconnectAfterDaemonRespawn() async {
+        do {
+            try await client.probe()
+            daemonAvailable = true
+            await refreshAll()
+            await pollAllVpnStates()
+        } catch {
+            daemonAvailable = false
+            DebugLog.write("[AppState] reconnectAfterDaemonRespawn failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Verify `supermgrd-mac` is still accepting connections and trigger
+    /// `DaemonSupervisor.recoverIfDown` if it exited (`P2-7`).
+    private func checkDaemonHealth() async {
+        guard !DaemonSupervisor.isSuspendedForMaintenance else { return }
+        do {
+            try await client.probe()
+            if !daemonAvailable {
+                await reconnectAfterDaemonRespawn()
+            }
+        } catch {
+            daemonAvailable = false
+            await DaemonSupervisor.recoverIfDown(appState: self)
+        }
+    }
+
+    private var hasVisibleMainWindow: Bool {
+        NSApp.windows.contains { $0.isVisible && ($0.canBecomeMain || $0.title == "SuperManager") }
+    }
+
+    /// Poll VPN status, daemon health, Tailscale, and helper events on a single
+    /// adaptive loop (`P3-8`):
+    /// - 500 ms during the post-action fast window (`vpnFastPollUntil`)
+    /// - 4 s when a window is visible and a tunnel is active/transitioning
+    /// - exponential backoff (`4s -> 8s -> 16s -> 30s`) when idle or windows closed
     private func startVpnStatusPolling() {
         vpnStatusPollTask?.cancel()
-        // First pass right now so the dots populate within a second
-        // of app start, not after the first 4 s sleep. Also ensure
-        // the bundled VPN runtime in /Library/PrivilegedHelperTools/SuperManagerVPN
-        // is refreshed immediately after an app update.
         Task { @MainActor in
+            await refreshMissingDependencies()
+            await refreshTailscaleBinaryMode()
             await installVPNRuntime()
+            await refreshMissingDependencies()
             await pollAllVpnStates()
         }
         vpnStatusPollTask = Task { @MainActor in
-            // Tailscale rides this loop on its own slower cadence. It used to be
-            // polled only by TailscaleListView's `.task`, which SwiftUI cancels
-            // the moment you leave the tab — so the toolbar's Tailscale pill,
-            // which is global, had no data anywhere else and reported a tailnet
-            // that was plainly up as unknown. Polling here makes the one place
-            // that owns the state also own the refresh.
             var lastTailscalePoll = Date.distantPast
-            // Host health rides here too, for the same reason and on an
-            // interval the operator chooses (0 = off, and off means no probe
-            // is ever sent — see `refreshHostHealth`).
             var lastHostHealthPoll = Date.distantPast
+            var lastDaemonProbe = Date.distantPast
+            var idleStreak = 0
             while !Task.isCancelled {
-                // Adaptive cadence: 4 s normally, 500 ms while a
-                // user action is "still settling" (the helper just
-                // accepted a connect / disconnect / etc and the
-                // tunnel state is mid-transition). The fast window
-                // is bounded so we drop back to 4 s once nothing
-                // is changing — keeps idle CPU low while making
-                // the UI feel instant right after user action.
-                let interval: Duration =
-                    (vpnFastPollUntil ?? .distantPast) > Date()
-                        ? .milliseconds(500)
-                        : .seconds(4)
+                let anyTunnelActive = vpnConnectionStates.values.contains { $0 != "disconnected" }
+                let windowOpen = hasVisibleMainWindow
+                let interval: Duration
+                if (vpnFastPollUntil ?? .distantPast) > Date() {
+                    idleStreak = 0
+                    interval = .milliseconds(500)
+                } else if windowOpen && anyTunnelActive {
+                    idleStreak = 0
+                    interval = .seconds(4)
+                } else if windowOpen {
+                    idleStreak = min(idleStreak + 1, 2)
+                    // 4s -> 8s -> 12s while visible with all tunnels disconnected
+                    let secs = min(12, 4 * (1 << max(0, idleStreak - 1)))
+                    interval = .seconds(secs)
+                } else if anyTunnelActive {
+                    idleStreak = 0
+                    interval = .seconds(15)
+                } else {
+                    idleStreak = min(idleStreak + 1, 4)
+                    // Closed window + no active tunnels: 8s -> 16s -> 30s cap
+                    let secs = min(30, 4 * (1 << idleStreak))
+                    interval = .seconds(secs)
+                }
+
                 try? await Task.sleep(for: interval)
+
+                if Date().timeIntervalSince(lastDaemonProbe) >= 5 || !daemonAvailable {
+                    lastDaemonProbe = Date()
+                    await checkDaemonHealth()
+                }
+
                 await pollAllVpnStates()
-                // Every ~5s regardless of the VPN loop's adaptive rate: a
-                // 500ms fast-poll window is for a tunnel mid-transition and
-                // shouldn't drag `tailscale status --json` along with it.
-                if Date().timeIntervalSince(lastTailscalePoll) >= 5 {
+
+                let tsCadence: TimeInterval = windowOpen ? 5 : 30
+                if Date().timeIntervalSince(lastTailscalePoll) >= tsCadence {
                     lastTailscalePoll = Date()
                     await refreshTailscale()
                 }
-                // Host health, opt-in. The setting is re-read every iteration
-                // rather than captured, so switching it on or off in Settings
-                // takes effect on the next tick without restarting anything —
-                // the same way every other runtime setting in this app is
-                // consumed. 0 means the operator turned it off, and then no
-                // probe is sent at all.
                 let healthInterval = AppSettings.shared.hostHealthIntervalSeconds
                 if healthInterval > 0,
+                   daemonAvailable,
                    Date().timeIntervalSince(lastHostHealthPoll) >= Double(healthInterval) {
                     lastHostHealthPoll = Date()
                     await refreshHostHealth()
                 }
-                // What the helper did on its own (auto-reconnect, watchdog
-                // fail-open), as activity entries and notifications.
                 await pollHelperEvents()
-                // The menu bar icon shows WHETHER a tunnel is up; the
-                // tooltip is where WHICH one lives. Refreshed here
-                // rather than from MenuBarView, which only exists while
-                // the menu is open — the hover has to work before that.
                 MenuBarTooltip.set(menuBarTooltipText)
             }
         }
@@ -386,6 +476,8 @@ class AppState {
     func refreshAll() async {
         isRefreshing = true
         defer { isRefreshing = false }
+        await refreshMissingDependencies()
+        await refreshTailscaleBinaryMode()
         await refreshHosts()
         await refreshKeys()
         await refreshProfiles()
@@ -1046,7 +1138,7 @@ class AppState {
     /// show "Install Tailscale daemon" — only meaningful when we
     /// actually have our own binary to install.
     var tailscaleIsBundled: Bool { TailscaleClient.bundledDaemonPath != nil }
-    var canInstallTailscaled: Bool { !TailscaleClient.usesNativeApp && tailscaleIsBundled }
+    var canInstallTailscaled: Bool { !tailscaleUsesNativeApp && tailscaleIsBundled }
 
     /// Last result of `tailscaled_status` from the helper. nil
     /// before the first poll. Drives the install/uninstall buttons
@@ -1154,21 +1246,12 @@ class AppState {
 }
 
 /// Top-level app sections that get a sidebar entry.
-///
-/// `console` (Claude AI) and `provisioning` (device-bringup playbooks)
-/// were carried over from the Linux build's roadmap but were rendered as
-/// "Coming in Phase N" placeholders. Empty placeholder tabs make a half-
-/// finished app feel half-finished — they're cut from the sidebar until
-/// the corresponding feature has at least a thin-slice MVP. The enum
-/// values are kept (commented below) so the eventual feature can wire
-/// itself back in without renaming things downstream.
 enum AppSection: String, CaseIterable, Identifiable {
     case ssh = "SSH"
     case vpn = "VPN"
     case tailscale = "Tailscale"
     case compliance = "Compliance"
     case provisioning = "Provisioning"
-    // case console = "Console"          — re-enable once we ship the Claude integration
 
     var id: String { rawValue }
 

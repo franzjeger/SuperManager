@@ -84,6 +84,17 @@ enum VPNKeychain {
         return s
     }
 
+    /// Fetch an optional UTF-8 string from the Data Protection Keychain:
+    /// returns `nil` ONLY when the item does not exist (`errSecItemNotFound`),
+    /// and throws on genuine Keychain errors (locked, missing entitlement, corrupt UTF-8).
+    static func getOptionalString(account: String) throws -> String? {
+        do {
+            return try getString(account: account)
+        } catch KeychainError.osStatus(let status, _) where status == errSecItemNotFound {
+            return nil
+        }
+    }
+
     /// Release gate: uses only a unique disposable account, never user secrets.
     /// Runs in the signed app process, because a separate test tool has different entitlements.
     static func selfTest() throws {
@@ -217,10 +228,15 @@ enum VPNKeychain {
     /// credentials, so the GUI carries those across itself. Entries the
     /// source doesn't have are skipped — a WireGuard profile has none of
     /// these, and that is not a failure.
-    static func copyAll(from sourceId: String, to targetId: String) {
+    static func copyAll(from sourceId: String, to targetId: String) throws {
         for (source, target) in zip(accounts(for: sourceId), accounts(for: targetId)) {
-            guard let data = try? getData(account: source) else { continue }
-            try? set(data, account: target)
+            let data: Data
+            do {
+                data = try getData(account: source)
+            } catch KeychainError.osStatus(let status, _) where status == errSecItemNotFound {
+                continue
+            }
+            try set(data, account: target)
         }
     }
 }

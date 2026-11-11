@@ -14,6 +14,8 @@ struct VpnPollSample {
     let peerEndpoint: String?
     /// What the tunnel routes, when its status says.
     var routing: VpnLiveRouting?
+    /// Live UI metadata populated by the single global poller (`P3-8`).
+    var detail: AppState.VpnLiveDetail = .init()
 
     static func disconnected(profileId: String) -> VpnPollSample {
         VpnPollSample(
@@ -54,7 +56,66 @@ extension AppState {
     /// causes user-visible flicker. Helper present but not answering:
     /// see below. Public so connect/disconnect actions can force a
     /// refresh without waiting for the timer.
+    /// Coalesced, non-reentrant sweep across all VPN profiles (`P2-10`, `P3-8`).
+    /// Concurrent callers join the in-flight task (scheduling one follow-up
+    /// sweep so post-action callers never read pre-action state), and per-profile
+    /// generation numbers prevent stale in-flight samples from overwriting a
+    /// newer explicit connect/disconnect/wake transition.
     func pollAllVpnStates() async {
+        if let inFlight = vpnPollInFlight {
+            vpnPollNeedsFollowUp = true
+            await inFlight.value
+            return
+        }
+        let task = Task { @MainActor in
+            repeat {
+                self.vpnPollNeedsFollowUp = false
+                await self.pollAllVpnStatesOnce()
+            } while self.vpnPollNeedsFollowUp && !Task.isCancelled
+        }
+        vpnPollInFlight = task
+        await task.value
+        vpnPollInFlight = nil
+    }
+
+    private func pollAllVpnStatesOnce() async {
+        let profilesSnapshot = vpnProfiles
+        let generationSnapshot = Dictionary(
+            uniqueKeysWithValues: profilesSnapshot.map { ($0.id, vpnProfileGeneration[$0.id] ?? 0) }
+        )
+        let pollStart = Date()
+
+        // Fast path (`P3-8`): single batched helper RPC returning kill-switch
+        // leases + every profile's backend status in ONE Unix-socket round trip.
+        do {
+            let response = try await HelperClient.shared.vpnPollAll(
+                profiles: profilesSnapshot.map { (id: $0.id, backend: $0.backend) }
+            )
+            helperHealth = .healthy
+            if let ksDict = response["kill_switch"] as? [String: Any],
+               let activeDict = ksDict["active"] as? [String: Any] {
+                killSwitchActiveProfiles = Set(activeDict.keys)
+            }
+            let rawProfiles = (response["profiles"] as? [String: [String: Any]]) ?? [:]
+            for summary in profilesSnapshot {
+                let raw = rawProfiles[summary.id] ?? ["state": "disconnected"]
+                let sample = Self.parseProfileSample(summary, raw: raw)
+                applyPollSample(
+                    sample,
+                    expectedGeneration: generationSnapshot[summary.id] ?? 0,
+                    pollStart: pollStart
+                )
+            }
+            let connectedCount = vpnConnectionStates.values.filter { $0 == "connected" }.count
+            DebugLog.write("[AppState] pollAllVpnStates (batched): \(vpnConnectionStates.count) profiles, \(connectedCount) connected")
+            return
+        } catch HelperClient.HelperError.rpcFailure(let code, _) where code == -32601 {
+            // Deployed helper predates `vpn_poll_all` — fall through to legacy path.
+        } catch {
+            // Helper unreachable or timed out — probe health once to distinguish
+            // `.absent` from `.unresponsive`.
+        }
+
         let health = await HelperClient.shared.health()
         helperHealth = health
         switch health {
@@ -62,12 +123,10 @@ extension AppState {
             DebugLog.write("[AppState] pollAllVpnStates: helper not reachable, leaving states alone")
             return
         case .unresponsive:
-            // A helper that accepts connections but doesn't answer can vouch
-            // for nothing. Feed "unknown" through the same debounce the status
-            // RPCs use, so a live dot turns to "problem" after the second
-            // silent poll instead of claiming "connected" for as long as the
-            // helper stays wedged.
-            for summary in vpnProfiles {
+            for summary in profilesSnapshot {
+                guard (vpnProfileGeneration[summary.id] ?? 0) == (generationSnapshot[summary.id] ?? 0) else {
+                    continue
+                }
                 var streak = vpnStatusMissStreak[summary.id] ?? 0
                 vpnConnectionStates[summary.id] = Self.stabilizedVpnState(
                     previous: vpnConnectionStates[summary.id] ?? "disconnected",
@@ -84,89 +143,75 @@ extension AppState {
         if let ks = try? await HelperClient.shared.killSwitchStatus() {
             killSwitchActiveProfiles = ks.active
         }
-        guard !vpnProfiles.isEmpty else {
-            DebugLog.write("[AppState] pollAllVpnStates: vpnProfiles empty, nothing to poll")
-            return
-        }
-        // Run the per-profile status calls in parallel. With 3+
-        // profiles a serial sweep takes seconds and stalls the dots
-        // visibly; concurrent gives us all states in one round-trip
-        // worth of latency.
-        let pollStart = Date()
+        guard !profilesSnapshot.isEmpty else { return }
+
         await withTaskGroup(of: VpnPollSample.self) { group in
-            for summary in vpnProfiles {
+            for summary in profilesSnapshot {
                 group.addTask {
                     await Self.fetchProfileStatus(summary)
                 }
             }
             for await sample in group {
-                let id = sample.profileId
-                // Anti-flicker debounce: a single slow/failed poll must not flip
-                // a live tunnel's dot. `stabilizedVpnState` rides out one bad
-                // sample and only commits a transition on a sustained run. All
-                // downstream state decisions below use `next`, not the raw
-                // sample, so byte counters + handshake don't get dropped while
-                // we're holding "connected" through a hiccup.
-                var streak = vpnStatusMissStreak[id] ?? 0
-                let next = Self.stabilizedVpnState(
-                    previous: vpnConnectionStates[id] ?? "disconnected",
-                    sample: sample.state,
-                    missStreak: &streak
+                applyPollSample(
+                    sample,
+                    expectedGeneration: generationSnapshot[sample.profileId] ?? 0,
+                    pollStart: pollStart
                 )
-                vpnStatusMissStreak[id] = streak
-                vpnConnectionStates[id] = next
-                if let (rx, tx) = sample.bytes {
-                    vpnByteCounters[id] = (rx: rx, tx: tx)
-                    // Derive bytes/sec from the delta against the
-                    // previous sample. UInt64 wraps to a small
-                    // value if the counter resets on reconnect —
-                    // detect that with `rx >= prev.rx` and only
-                    // emit a positive rate when monotonic.
-                    if let prev = vpnLastByteSample[id] {
-                        let dt = pollStart.timeIntervalSince(prev.at)
-                        if dt > 0.05 && rx >= prev.rx && tx >= prev.tx {
-                            let rxRate = Double(rx - prev.rx) / dt
-                            let txRate = Double(tx - prev.tx) / dt
-                            vpnByteRates[id] = (rxPerSec: rxRate, txPerSec: txRate)
-                        } else if rx < prev.rx || tx < prev.tx {
-                            // Counter went backwards (reconnect /
-                            // tunnel restart). Drop the stale rate
-                            // rather than emit a confusing zero.
-                            vpnByteRates.removeValue(forKey: id)
-                        }
-                    }
-                    vpnLastByteSample[id] = (rx: rx, tx: tx, at: pollStart)
-                } else if next != "connected" {
-                    // Drop counters + rate + history once tunnel
-                    // goes down so the detail view doesn't show
-                    // stale numbers.
-                    vpnByteCounters.removeValue(forKey: id)
-                    vpnByteRates.removeValue(forKey: id)
-                    vpnLastByteSample.removeValue(forKey: id)
-                }
-                // Handshake / endpoint enrichment (WG-only today).
-                // Same drop-on-disconnect logic as the byte counters
-                // — the detail view should never show a "12s ago"
-                // for a tunnel that's been down for an hour.
-                if next == "connected" {
-                    if let hs = sample.lastHandshakeUnix {
-                        vpnLastHandshakeUnix[id] = hs
-                    }
-                    if let ep = sample.peerEndpoint {
-                        vpnPeerEndpoints[id] = ep
-                    }
-                    if let routing = sample.routing {
-                        vpnLiveRouting[id] = routing
-                    }
-                } else {
-                    vpnLastHandshakeUnix.removeValue(forKey: id)
-                    vpnPeerEndpoints.removeValue(forKey: id)
-                    vpnLiveRouting.removeValue(forKey: id)
-                }
             }
         }
-        let connectedCount = vpnConnectionStates.values.filter { $0 == "connected" }.count
-        DebugLog.write("[AppState] pollAllVpnStates: \(vpnConnectionStates.count) profiles polled, \(connectedCount) connected, full map=\(vpnConnectionStates)")
+    }
+
+    private func applyPollSample(
+        _ sample: VpnPollSample,
+        expectedGeneration: UInt64,
+        pollStart: Date
+    ) {
+        let id = sample.profileId
+        guard (vpnProfileGeneration[id] ?? 0) == expectedGeneration else {
+            return
+        }
+        var streak = vpnStatusMissStreak[id] ?? 0
+        let next = Self.stabilizedVpnState(
+            previous: vpnConnectionStates[id] ?? "disconnected",
+            sample: sample.state,
+            missStreak: &streak
+        )
+        vpnStatusMissStreak[id] = streak
+        vpnConnectionStates[id] = next
+        vpnLiveDetails[id] = sample.detail
+        if let (rx, tx) = sample.bytes {
+            vpnByteCounters[id] = (rx: rx, tx: tx)
+            if let prev = vpnLastByteSample[id] {
+                let dt = pollStart.timeIntervalSince(prev.at)
+                if dt > 0.05 && rx >= prev.rx && tx >= prev.tx {
+                    let rxRate = Double(rx - prev.rx) / dt
+                    let txRate = Double(tx - prev.tx) / dt
+                    vpnByteRates[id] = (rxPerSec: rxRate, txPerSec: txRate)
+                } else if rx < prev.rx || tx < prev.tx {
+                    vpnByteRates.removeValue(forKey: id)
+                }
+            }
+            vpnLastByteSample[id] = (rx: rx, tx: tx, at: pollStart)
+        } else if next != "connected" {
+            vpnByteCounters.removeValue(forKey: id)
+            vpnByteRates.removeValue(forKey: id)
+            vpnLastByteSample.removeValue(forKey: id)
+        }
+        if next == "connected" {
+            if let hs = sample.lastHandshakeUnix {
+                vpnLastHandshakeUnix[id] = hs
+            }
+            if let ep = sample.peerEndpoint {
+                vpnPeerEndpoints[id] = ep
+            }
+            if let routing = sample.routing {
+                vpnLiveRouting[id] = routing
+            }
+        } else {
+            vpnLastHandshakeUnix.removeValue(forKey: id)
+            vpnPeerEndpoints.removeValue(forKey: id)
+            vpnLiveRouting.removeValue(forKey: id)
+        }
     }
 
     /// Anti-flicker hysteresis for one profile's displayed state.
@@ -223,94 +268,111 @@ extension AppState {
     /// Bytes / handshake / endpoint are all WG-only today; OpenVPN
     /// and strongSwan leave them nil and the detail view falls back
     /// to a more sparse "Connected" badge for those backends.
+    fileprivate static func parseProfileSample(
+        _ summary: VpnProfileSummary,
+        raw r: [String: Any]
+    ) -> VpnPollSample {
+        let backend = summary.backend.lowercased()
+        if backend.contains("wireguard") || backend.contains("wire_guard") {
+            let state = (r["state"] as? String) ?? "disconnected"
+            let rx = toUInt64(r["rx_bytes"])
+            let tx = toUInt64(r["tx_bytes"])
+            let bytes: (UInt64, UInt64)? = (rx != nil && tx != nil) ? (rx!, tx!) : nil
+            let handshake = toInt64(r["last_handshake_unix"])
+            let endpoint = r["peer_endpoint"] as? String
+            var live = VpnLiveDetail()
+            if state == "connected", let rx, let tx {
+                live.stateDetail = "rx \(rx) bytes · tx \(tx) bytes"
+            }
+            return VpnPollSample(
+                profileId: summary.id,
+                state: state,
+                bytes: bytes,
+                lastHandshakeUnix: handshake,
+                peerEndpoint: endpoint,
+                detail: live
+            )
+        }
+        if backend.contains("openvpn") || backend.contains("open_vpn") || backend.contains("azure") {
+            let state = (r["state"] as? String) ?? "disconnected"
+            let rx = toUInt64(r["rx_bytes"])
+            let tx = toUInt64(r["tx_bytes"])
+            let bytes: (UInt64, UInt64)? = (rx != nil && tx != nil) ? (rx!, tx!) : nil
+            var live = VpnLiveDetail()
+            live.reconnectReason = r["error_reason"] as? String
+            if state == "connected" {
+                if let pid = toInt64(r["pid"]) {
+                    live.stateDetail = "openvpn pid \(pid)"
+                }
+                live.interface = (r["interface"] as? String) ?? ""
+                live.virtualIp = (r["virtual_ip"] as? String) ?? ""
+                live.virtualGateway = (r["virtual_gateway"] as? String) ?? ""
+                live.routes = (r["active_routes"] as? [String]) ?? []
+                live.routesInstalled = r["routes_installed"] as? Bool
+                live.cipherSuite = (r["cipher_suite"] as? String) ?? ""
+            }
+            return VpnPollSample(
+                profileId: summary.id,
+                state: state,
+                bytes: bytes,
+                lastHandshakeUnix: nil,
+                peerEndpoint: nil,
+                routing: Self.ovpnRouting(r),
+                detail: live
+            )
+        }
+        if backend.contains("fortigate") || backend.contains("forti_gate") || backend.contains("ikev2") || backend.contains("ipsec") {
+            var state = (r["state"] as? String) ?? "disconnected"
+            let detailText = (r["detail"] as? String) ?? ""
+            if state == "connecting" && detailText.contains("timed out") {
+                state = "unknown"
+            }
+            let rx = toUInt64(r["bytes_in"])
+            let tx = toUInt64(r["bytes_out"])
+            let bytes: (UInt64, UInt64)? = (rx != nil && tx != nil) ? (rx!, tx!) : nil
+            var live = VpnLiveDetail()
+            live.stateDetail = detailText
+            live.strongswanMissing = detailText.contains("strongSwan not installed")
+            if state == "connected" {
+                live.interface = (r["interface"] as? String) ?? ""
+                live.virtualIp = (r["virtual_ip"] as? String) ?? ""
+                live.virtualGateway = (r["virtual_gateway"] as? String) ?? ""
+                live.routes = (r["active_routes"] as? [String]) ?? []
+                live.routesInstalled = r["routes_installed"] as? Bool
+                live.cipherSuite = (r["cipher_suite"] as? String) ?? ""
+            }
+            return VpnPollSample(
+                profileId: summary.id,
+                state: state,
+                bytes: bytes,
+                lastHandshakeUnix: nil,
+                peerEndpoint: nil,
+                routing: VpnLiveRouting.ikev2(selectors: (r["active_routes"] as? [String]) ?? []),
+                detail: live
+            )
+        }
+        return VpnPollSample.disconnected(profileId: summary.id)
+    }
+
     fileprivate static func fetchProfileStatus(_ summary: VpnProfileSummary) async -> VpnPollSample {
         let backend = summary.backend.lowercased()
         do {
             if backend.contains("wireguard") || backend.contains("wire_guard") {
                 let r = try await HelperClient.shared.wgStatus(profileId: summary.id)
-                let state = (r["state"] as? String) ?? "disconnected"
-                let rx = toUInt64(r["rx_bytes"])
-                let tx = toUInt64(r["tx_bytes"])
-                let bytes: (UInt64, UInt64)? = (rx != nil && tx != nil) ? (rx!, tx!) : nil
-                let handshake = toInt64(r["last_handshake_unix"])
-                let endpoint = r["peer_endpoint"] as? String
-                return VpnPollSample(
-                    profileId: summary.id,
-                    state: state,
-                    bytes: bytes,
-                    lastHandshakeUnix: handshake,
-                    peerEndpoint: endpoint
-                )
+                return parseProfileSample(summary, raw: r)
             }
-            if backend.contains("openvpn") || backend.contains("open_vpn") {
+            if backend.contains("openvpn") || backend.contains("open_vpn") || backend.contains("azure") {
                 let r = try await HelperClient.shared.ovpnStatus(profileId: summary.id)
-                let rx = toUInt64(r["rx_bytes"])
-                let tx = toUInt64(r["tx_bytes"])
-                let bytes: (UInt64, UInt64)? = (rx != nil && tx != nil) ? (rx!, tx!) : nil
-                return VpnPollSample(
-                    profileId: summary.id,
-                    state: (r["state"] as? String) ?? "disconnected",
-                    bytes: bytes,
-                    lastHandshakeUnix: nil,
-                    peerEndpoint: nil,
-                    routing: Self.ovpnRouting(r)
-                )
-            }
-            // Azure VPN tunnels are spawned via the same OpenVPN
-            // binary as the OpenVPN backend (ovpncli on macOS,
-            // openvpn 2.x as fallback). Status polling lands on
-            // the same `ovpn_status` RPC, which now also returns
-            // `rx_bytes` / `tx_bytes` parsed from `netstat -ibn`
-            // for the tunnel interface.
-            if backend.contains("azure") {
-                let r = try await HelperClient.shared.ovpnStatus(profileId: summary.id)
-                let rx = toUInt64(r["rx_bytes"])
-                let tx = toUInt64(r["tx_bytes"])
-                let bytes: (UInt64, UInt64)? = (rx != nil && tx != nil) ? (rx!, tx!) : nil
-                return VpnPollSample(
-                    profileId: summary.id,
-                    state: (r["state"] as? String) ?? "disconnected",
-                    bytes: bytes,
-                    lastHandshakeUnix: nil,
-                    peerEndpoint: nil,
-                    routing: Self.ovpnRouting(r)
-                )
+                return parseProfileSample(summary, raw: r)
             }
             if backend.contains("fortigate") || backend.contains("forti_gate") || backend.contains("ikev2") || backend.contains("ipsec") {
                 let r = try await HelperClient.shared.vpnStatus(profileId: summary.id)
-                var state = (r["state"] as? String) ?? "disconnected"
-                // The helper reports "connecting" both for a genuine handshake
-                // AND for a 5s `swanctl --list-sas` timeout (charon busy). The
-                // timeout is not a real state change — map it to "unknown" so
-                // the debounce holds the last state instead of blinking a live
-                // tunnel to "Connecting…".
-                let detail = (r["detail"] as? String) ?? ""
-                if state == "connecting" && detail.contains("timed out") {
-                    state = "unknown"
-                }
-                // IKEv2 does expose counters — swanctl prints them on the
-                // child SA's in/out lines, inside the block the helper
-                // already parses for the traffic selectors. This used to
-                // pass nil on the belief that it didn't.
-                let rx = (r["bytes_in"] as? NSNumber)?.uint64Value
-                let tx = (r["bytes_out"] as? NSNumber)?.uint64Value
-                let bytes: (UInt64, UInt64)? = (rx != nil && tx != nil) ? (rx!, tx!) : nil
-                return VpnPollSample(
-                    profileId: summary.id,
-                    state: state,
-                    bytes: bytes,
-                    lastHandshakeUnix: nil,
-                    peerEndpoint: nil,
-                    routing: VpnLiveRouting.ikev2(selectors: (r["active_routes"] as? [String]) ?? [])
-                )
+                return parseProfileSample(summary, raw: r)
             }
             DebugLog.write("fetchProfileStatus: unknown backend \(summary.backend) for \(summary.id)")
             return VpnPollSample.disconnected(profileId: summary.id)
         } catch {
             DebugLog.write("fetchProfileStatus: \(summary.backend) \(summary.id) threw \(error)")
-            // The status RPC threw (socket hiccup, helper mid bootout/bootstrap).
-            // That is "unknown", NOT a real disconnect — return the sentinel so
-            // the debounce holds the last state rather than flipping the dot.
             return VpnPollSample(
                 profileId: summary.id,
                 state: "unknown",
@@ -389,7 +451,7 @@ extension AppState {
                 "vpn_duplicate_profile",
                 params: ["profile_id": profileId]
             )
-            VPNKeychain.copyAll(from: profileId, to: result.id)
+            try VPNKeychain.copyAll(from: profileId, to: result.id)
             await refreshProfiles()
             // Select the duplicate so it's immediately visible —
             // matches the import-flow UX.
@@ -480,7 +542,7 @@ extension AppState {
             autoReconnectEnabled = Set(r.watched)
             autoReconnectUnarmed = Set(r.unarmed)
         } catch {
-            // Silent; not critical for steady-state.
+            DebugLog.write("[auto-reconnect] autoReconnectList failed: \(error.localizedDescription)")
             return
         }
 
@@ -503,12 +565,23 @@ extension AppState {
                 rearmedAny = true
             } catch {
                 autoReconnectRearmFailed.insert(profileId)
+                ActivityLog.shared.record(
+                    profileId: profileId,
+                    kind: .connectFailed,
+                    message: "Always-on could not re-arm: \(error.localizedDescription)"
+                )
                 DebugLog.write("[auto-reconnect] could not re-arm \(profileId): \(error.localizedDescription)")
+                handleError(error)
             }
         }
-        if rearmedAny, let updated = try? await HelperClient.shared.autoReconnectList() {
-            autoReconnectEnabled = Set(updated.watched)
-            autoReconnectUnarmed = Set(updated.unarmed)
+        if rearmedAny {
+            do {
+                let updated = try await HelperClient.shared.autoReconnectList()
+                autoReconnectEnabled = Set(updated.watched)
+                autoReconnectUnarmed = Set(updated.unarmed)
+            } catch {
+                DebugLog.write("[auto-reconnect] post-rearm list failed: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -557,10 +630,10 @@ extension AppState {
                 "config": try String(contentsOfFile: cfg.configFile, encoding: .utf8),
                 "kill_switch": profile.killSwitch,
             ]
-            if let u = try? VPNKeychain.getString(account: "vpn/\(profileId)/ovpn-username") {
+            if let u = try VPNKeychain.getOptionalString(account: "vpn/\(profileId)/ovpn-username") {
                 args["username"] = u
             }
-            if let p = try? VPNKeychain.getString(account: "vpn/\(profileId)/ovpn-password") {
+            if let p = try VPNKeychain.getOptionalString(account: "vpn/\(profileId)/ovpn-password") {
                 args["password"] = p
             }
             return ("openvpn", args)
@@ -692,10 +765,8 @@ extension AppState {
 
     func deleteVpnProfile(_ id: String, profileName: String? = nil) async {
         let summary = vpnProfiles.first(where: { $0.id == id })
+        bumpVpnGeneration(id)
         do {
-            // Unenroll from Always-on, clear helper kill-switch intent/lease,
-            // and tear down the tunnel using the profile's actual backend
-            // (WireGuard, OpenVPN, Azure VPN, or strongSwan IKEv2).
             _ = try? await HelperClient.shared.autoReconnectDisable(profileId: id)
             _ = try? await HelperClient.shared.killSwitchSetIntent(profileId: id, enabled: false)
             if let summary {
@@ -722,6 +793,8 @@ extension AppState {
             vpnLastHandshakeUnix.removeValue(forKey: id)
             vpnPeerEndpoints.removeValue(forKey: id)
             vpnLiveRouting.removeValue(forKey: id)
+            vpnLiveDetails.removeValue(forKey: id)
+            vpnProfileGeneration.removeValue(forKey: id)
 
             await refreshProfiles()
             if selectedProfileId == id { selectedProfileId = nil }
@@ -820,16 +893,9 @@ extension AppState {
     func wireguardConnect(profileId: String) async -> (success: Bool, message: String) {
         ActivityLog.shared.record(profileId: profileId, kind: .connectStarted,
                                   message: "User clicked Connect (WireGuard)")
-        // Optimistic update — sidebar dot flips to orange immediately
-        // rather than waiting for the next 4 s poll. Verified by
-        // `pollAllVpnStates()` at the bottom of this method, which
-        // either confirms or corrects.
+        bumpVpnGeneration(profileId)
         vpnConnectionStates[profileId] = "connecting"
         await installVPNRuntime()
-        // Drop poll cadence to 500 ms for the next 30 s so the
-        // user sees the dot flip green within half a second of
-        // the tunnel actually coming up, not after the next 4 s
-        // tick.
         bumpVpnFastPolling()
         do {
             struct RenderedConf: Decodable {
@@ -868,13 +934,12 @@ extension AppState {
                 kind: success ? .connectSucceeded : .connectFailed,
                 message: message
             )
-            // Optimistic post-action update + immediate poll. Pull
-            // ground-truth status now rather than relying on the
-            // background timer's next tick.
+            bumpVpnGeneration(profileId)
             vpnConnectionStates[profileId] = success ? "connected" : "disconnected"
             await pollAllVpnStates()
             return (success, message)
         } catch {
+            bumpVpnGeneration(profileId)
             vpnConnectionStates[profileId] = "disconnected"
             ActivityLog.shared.record(profileId: profileId, kind: .connectFailed,
                                       message: error.localizedDescription)
@@ -886,9 +951,7 @@ extension AppState {
     func wireguardDisconnect(profileId: String) async -> (success: Bool, message: String) {
         ActivityLog.shared.record(profileId: profileId, kind: .disconnectRequested,
                                   message: "User clicked Disconnect (WireGuard)")
-        // Optimistic disconnect — even if the RPC bombs, we want
-        // the dot to leave green so the user sees the action took
-        // effect somewhere. The poll afterwards reconciles.
+        bumpVpnGeneration(profileId)
         vpnConnectionStates[profileId] = "disconnected"
         bumpVpnFastPolling()
         do {
@@ -904,13 +967,6 @@ extension AppState {
         }
     }
 
-    /// Bring up an OpenVPN tunnel. The .ovpn lives at the path
-    /// stored on the profile (`OpenVpnConfig.config_file`). If the
-    /// profile has stored credentials in DPK
-    /// (`vpn/<id>/ovpn-username` + `vpn/<id>/ovpn-password`), we
-    /// fetch them and pass to the helper for the
-    /// `--auth-user-pass`-driven login. Profiles without stored
-    /// creds connect without — fine for cert-only setups.
     @discardableResult
     func openVPNConnect(
         profileId: String,
@@ -918,15 +974,22 @@ extension AppState {
     ) async -> (success: Bool, message: String) {
         ActivityLog.shared.record(profileId: profileId, kind: .connectStarted,
                                   message: "User clicked Connect (OpenVPN)")
-        let username = try? VPNKeychain.getString(account: "vpn/\(profileId)/ovpn-username")
-        let password = try? VPNKeychain.getString(account: "vpn/\(profileId)/ovpn-password")
+        let username: String?
+        let password: String?
+        do {
+            username = try VPNKeychain.getOptionalString(account: "vpn/\(profileId)/ovpn-username")
+            password = try VPNKeychain.getOptionalString(account: "vpn/\(profileId)/ovpn-password")
+        } catch {
+            ActivityLog.shared.record(profileId: profileId, kind: .connectFailed,
+                                      message: error.localizedDescription)
+            return (false, error.localizedDescription)
+        }
         let config: String
         do {
             config = try String(contentsOfFile: configFile, encoding: .utf8)
         } catch {
             return (false, error.localizedDescription)
         }
-        // The helper passes credentials only when it has both.
         if username == nil || password == nil, OpenVPNCredentials.areAsked(in: config) {
             let message = "This profile asks for a username and password, and none are stored "
                 + "for it. Add them with Edit credentials, then connect."
@@ -934,6 +997,7 @@ extension AppState {
             return (false, message)
         }
 
+        bumpVpnGeneration(profileId)
         vpnConnectionStates[profileId] = "connecting"
         bumpVpnFastPolling()
         do {
@@ -961,17 +1025,22 @@ extension AppState {
                 kind: success ? .connectSucceeded : .connectFailed,
                 message: message
             )
+            bumpVpnGeneration(profileId)
             vpnConnectionStates[profileId] = success ? "connected" : "disconnected"
             await pollAllVpnStates()
             return (success, message)
         } catch {
+            bumpVpnGeneration(profileId)
             vpnConnectionStates[profileId] = "disconnected"
+            ActivityLog.shared.record(profileId: profileId, kind: .connectFailed,
+                                      message: error.localizedDescription)
             return (false, error.localizedDescription)
         }
     }
 
     @discardableResult
     func openVPNDisconnect(profileId: String) async -> (success: Bool, message: String) {
+        bumpVpnGeneration(profileId)
         vpnConnectionStates[profileId] = "disconnected"
         bumpVpnFastPolling()
         do {
@@ -985,39 +1054,149 @@ extension AppState {
         }
     }
 
+    /// Connect an IKEv2 / FortiGate profile from `AppState` (used by Menu Bar
+    /// Connect and post-wake reconnect).
+    @discardableResult
+    func ikev2Connect(profileId: String) async -> (success: Bool, message: String) {
+        ActivityLog.shared.record(profileId: profileId, kind: .connectStarted,
+                                  message: "Connecting IKEv2 tunnel")
+        do {
+            let profile: VpnProfile = try await client.call("vpn_get_profile", params: ["id": profileId])
+            guard case .ikev2(let cfg) = profile.config else {
+                return (false, "Profile has no IKEv2 configuration")
+            }
+            let credentials = try VPNKeychain.ikev2Credentials(
+                passwordAccount: cfg.password,
+                pskAccount: cfg.psk
+            )
+            try await HelperInstaller.install()
+            helperHealth = .healthy
+            bumpVpnGeneration(profileId)
+            vpnConnectionStates[profileId] = "connecting"
+            bumpVpnFastPolling()
+            let result = try await HelperClient.shared.vpnConnect(
+                profileId: profile.id,
+                name: profile.name,
+                host: cfg.host,
+                username: cfg.username,
+                password: credentials.password,
+                sharedSecret: credentials.sharedSecret,
+                fullTunnel: profile.fullTunnel,
+                routes: cfg.routes,
+                dnsServers: cfg.dnsServers,
+                localId: cfg.localId,
+                killSwitch: profile.killSwitch
+            )
+            let ok = (result["ok"] as? Bool) == true
+            let message = (result["message"] as? String) ?? (ok ? "Connected" : "Connect failed")
+            if ok && profile.killSwitch {
+                ActivityLog.shared.record(
+                    profileId: profile.id,
+                    kind: .killSwitchEngaged,
+                    message: "Kill-switch installed for IKEv2 tunnel"
+                )
+            }
+            ActivityLog.shared.record(
+                profileId: profile.id,
+                kind: ok ? .connectSucceeded : .connectFailed,
+                message: message
+            )
+            bumpVpnGeneration(profileId)
+            vpnConnectionStates[profileId] = ok ? "connected" : "disconnected"
+            await pollAllVpnStates()
+            return (ok, message)
+        } catch {
+            bumpVpnGeneration(profileId)
+            vpnConnectionStates[profileId] = "disconnected"
+            ActivityLog.shared.record(profileId: profileId, kind: .connectFailed,
+                                      message: error.localizedDescription)
+            return (false, error.localizedDescription)
+        }
+    }
+
+    /// Backend-aware connect entry point for the Menu Bar (`P2-9`) and
+    /// post-sleep wake recovery (`P2-8`).
+    @discardableResult
+    func connectProfile(
+        profileId: String,
+        interactive: Bool = true
+    ) async -> (success: Bool, message: String) {
+        guard !vpnBusyProfiles.contains(profileId) else {
+            return (false, "An operation is already in flight for this profile")
+        }
+        guard let summary = vpnProfiles.first(where: { $0.id == profileId }) else {
+            return (false, "Profile not found")
+        }
+        let b = summary.backend.lowercased()
+        if b.contains("azure") {
+            if interactive {
+                selectedSection = .vpn
+                selectedProfileId = profileId
+                for window in NSApp.windows where window.title == "SuperManager" || window.contentViewController != nil {
+                    window.makeKeyAndOrderFront(nil)
+                    break
+                }
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            return (false, "Azure VPN requires Entra ID sign-in in the SuperManager window")
+        }
+
+        vpnBusyProfiles.insert(profileId)
+        defer { vpnBusyProfiles.remove(profileId) }
+
+        do {
+            try await HelperInstaller.install()
+            helperHealth = .healthy
+        } catch {
+            if interactive { handleError(error) }
+            return (false, error.localizedDescription)
+        }
+
+        let outcome: (success: Bool, message: String)
+        if b.contains("wireguard") || b.contains("wire_guard") {
+            outcome = await wireguardConnect(profileId: profileId)
+        } else if b.contains("openvpn") || b.contains("open_vpn") {
+            do {
+                let profile: VpnProfile = try await client.call("vpn_get_profile", params: ["id": profileId])
+                guard case .openvpn(let cfg) = profile.config else {
+                    return (false, "Profile has no OpenVPN configuration")
+                }
+                outcome = await openVPNConnect(profileId: profileId, configFile: cfg.configFile)
+            } catch {
+                outcome = (false, error.localizedDescription)
+            }
+        } else if b.contains("fortigate") || b.contains("forti_gate") || b.contains("ikev2") || b.contains("ipsec") {
+            outcome = await ikev2Connect(profileId: profileId)
+        } else {
+            outcome = (false, "Unsupported VPN backend: \(summary.backend)")
+        }
+
+        if !outcome.success && interactive {
+            errorMessage = outcome.message
+            showingError = true
+        }
+        return outcome
+    }
+
     // MARK: - Force / fleet disconnect
 
-    /// Walk every known VPN profile, fire the backend's disconnect
-    /// RPC, and rebuild the connection-state map. Used for the
-    /// "Disconnect All" toolbar action and as a reset when the UI
-    /// state has gotten out of sync with the actual tunnel state.
-    ///
-    /// We don't trust `vpnConnectionStates` to know which tunnels
-    /// are up — we ask each backend's helper RPC to disconnect
-    /// regardless. Disconnect is idempotent on every backend
-    /// (`wg-quick down` on a non-existent name, `swanctl --terminate`
-    /// on a non-existent SA, `kill` on a missing PID — all
-    /// no-ops). So this is the nuke-button: when in doubt, click.
-    func disconnectAllVpns() async {
-        // Tear down kill-switch FIRST so the user isn't trapped
-        // with all tunnels down + pf rules still blocking traffic.
-        _ = try? await HelperClient.shared.killSwitchDisable()
+    func disconnectAllVpns(suppressKillSwitchReleaseForSleepReconnect: Bool = false) async {
+        if !suppressKillSwitchReleaseForSleepReconnect, await HelperClient.shared.health() == .healthy {
+            do {
+                _ = try await HelperClient.shared.killSwitchDisable()
+            } catch {
+                DebugLog.write("[kill-switch] killSwitchDisable failed in disconnectAllVpns: \(error.localizedDescription)")
+                handleError(error)
+            }
+        }
         for summary in vpnProfiles {
+            bumpVpnGeneration(summary.id)
             await dispatchDisconnect(profileId: summary.id, backend: summary.backend)
             vpnConnectionStates[summary.id] = "disconnected"
         }
         await pollAllVpnStates()
     }
 
-    /// Disconnect a single profile by id. Backend-aware. Used by
-    /// the per-profile "Force Disconnect" menu item — fires the
-    /// right RPC even if the UI thinks the profile is already
-    /// disconnected. Belt-and-braces: also tries every backend's
-    /// disconnect (idempotent on every one) so a misclassified
-    /// profile still gets torn down.
-    /// Surface "user mashed Force Disconnect" events. Treated as
-    /// noteworthy because it usually indicates the regular UI is
-    /// out-of-sync — and we want a record of how often that happens.
     fileprivate func _logForceDisconnect(_ profileId: String) {
         ActivityLog.shared.record(profileId: profileId, kind: .forceDisconnect,
                                   message: "User force-disconnected")
@@ -1025,16 +1204,26 @@ extension AppState {
 
     func forceDisconnect(profileId: String) async {
         _logForceDisconnect(profileId)
+        bumpVpnGeneration(profileId)
         bumpVpnFastPolling()
         if let summary = vpnProfiles.first(where: { $0.id == profileId }) {
             await dispatchDisconnect(profileId: profileId, backend: summary.backend)
         } else {
-            // Profile no longer in our list? Try them all.
             _ = try? await HelperClient.shared.vpnDisconnect(profileId: profileId)
             _ = try? await HelperClient.shared.wgDisconnect(profileId: profileId)
             _ = try? await HelperClient.shared.ovpnDisconnect(profileId: profileId)
         }
-        _ = try? await HelperClient.shared.killSwitchDisable(profileId: profileId)
+        do {
+            _ = try await HelperClient.shared.killSwitchDisable(profileId: profileId)
+        } catch {
+            ActivityLog.shared.record(
+                profileId: profileId,
+                kind: .connectFailed,
+                message: "Could not release kill-switch: \(error.localizedDescription)"
+            )
+            DebugLog.write("[kill-switch] killSwitchDisable(\(profileId)) failed: \(error.localizedDescription)")
+            handleError(error)
+        }
         vpnConnectionStates[profileId] = "disconnected"
         await pollAllVpnStates()
     }

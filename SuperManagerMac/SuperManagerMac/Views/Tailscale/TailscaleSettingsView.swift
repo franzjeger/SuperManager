@@ -353,7 +353,7 @@ struct TailscaleSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            if TailscaleClient.usesNativeApp {
+            if appState.tailscaleUsesNativeApp {
                 Toggle("Auto-update Tailscale",
                        isOn: bindAutoUpdate)
                 .help("Only takes effect on installs from the Tailscale installer — Homebrew / App Store builds ignore this and update via their own channel.")

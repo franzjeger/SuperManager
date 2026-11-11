@@ -56,6 +56,14 @@ final class MenuBarTooltipTextTests: XCTestCase {
         XCTAssertEqual(text, "Connecting: Ferro")
     }
 
+    func testProblemTunnelIsReportedAsAttentionNeeded() {
+        let text = MenuBarTooltipText.build(
+            daemonAvailable: true,
+            tunnels: [MenuBarTunnel(name: "Ferro", state: "problem")],
+            tailscale: nil)
+        XCTAssertEqual(text, "Attention needed: Ferro")
+    }
+
     func testTailscaleLineAppendedWhenPresent() {
         let text = MenuBarTooltipText.build(
             daemonAvailable: true,

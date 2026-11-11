@@ -28,7 +28,7 @@ enum Dependencies {
         /// Set when installation is not a brew formula.
         let manualNote: String?
 
-        @MainActor var isInstalled: Bool { binaries.contains { Dependencies.isPresent($0) } }
+        nonisolated var isInstalled: Bool { binaries.contains { Dependencies.isPresent($0) } }
     }
 
     /// Search paths. Homebrew differs by architecture, and MacPorts
@@ -39,7 +39,7 @@ enum Dependencies {
         "/usr/local/sbin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
     ]
 
-    static func isPresent(_ binary: String) -> Bool {
+    nonisolated static func isPresent(_ binary: String) -> Bool {
         if binary == "openvpn" || binary == "openvpn3" {
             if hasProtectedOpenVPN(requireOpenVPN3: binary == "openvpn3", available: isRootOwnedExecutable) {
                 return true
@@ -70,7 +70,7 @@ enum Dependencies {
 
     /// Ordinary profiles can use the helper's protected OpenVPN 3 fallback;
     /// Azure profiles specifically require it and must never accept version 2.
-    static func hasProtectedOpenVPN(requireOpenVPN3: Bool, available: (String) -> Bool) -> Bool {
+    nonisolated static func hasProtectedOpenVPN(requireOpenVPN3: Bool, available: (String) -> Bool) -> Bool {
         let runtime = "/Library/PrivilegedHelperTools/SuperManagerVPN"
         let v3 = ["openvpn3", "bin/openvpn3"]
         let programs = requireOpenVPN3 ? v3 : ["openvpn", "sbin/openvpn", "bin/openvpn"] + v3
@@ -80,7 +80,7 @@ enum Dependencies {
     /// The helper validates the canonical executable and every parent.
     /// Repeat the ownership check here so the dependency UI reflects what
     /// Release can use; the helper remains responsible for enforcement.
-    static func isRootOwnedExecutable(_ path: String) -> Bool {
+    nonisolated static func isRootOwnedExecutable(_ path: String) -> Bool {
         guard FileManager.default.isExecutableFile(atPath: path),
               let attrs = try? FileManager.default.attributesOfItem(atPath: path),
               let owner = attrs[.ownerAccountID] as? NSNumber,
@@ -92,7 +92,7 @@ enum Dependencies {
         }
     }
 
-    static func hasRootOwnedParents(
+    nonisolated static func hasRootOwnedParents(
         _ canonicalPath: String,
         attributes: (String) throws -> [FileAttributeKey: Any]
     ) -> Bool {
@@ -107,12 +107,12 @@ enum Dependencies {
         }
     }
 
-    static func hasBundledRuntime(for id: String) -> Bool {
+    nonisolated static func hasBundledRuntime(for id: String) -> Bool {
         guard let dir = HelperClient.bundledVPNRuntime else { return false }
         return hasBundledRuntime(for: id, directory: dir)
     }
 
-    static func hasBundledRuntime(for id: String, directory: String) -> Bool {
+    nonisolated static func hasBundledRuntime(for id: String, directory: String) -> Bool {
         let programs: [String]
         switch id {
         case "openvpn": programs = ["openvpn", "openvpn3"]
@@ -123,12 +123,12 @@ enum Dependencies {
     }
 
     /// Homebrew itself — everything else depends on it.
-    static var brewPath: String? {
+    nonisolated static var brewPath: String? {
         ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
             .first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    static let all: [Tool] = [
+    nonisolated static let all: [Tool] = [
         Tool(id: "wireguard-tools",
              feature: "WireGuard profiles",
              binaries: ["wg-quick"],
@@ -154,7 +154,7 @@ enum Dependencies {
                  + "does not meet the privileged helper's requirements."),
     ]
 
-    static var missing: [Tool] { all.filter { !$0.isInstalled } }
+    nonisolated static var missing: [Tool] { all.filter { !$0.isInstalled } }
 
     /// For a tool Homebrew can't supply (`formula == nil`), the shell
     /// command that builds and installs it from the scripts sealed inside
@@ -209,7 +209,7 @@ enum Dependencies {
     /// The helper verifies and installs bundled programs. Homebrew runs
     /// as the logged-in user because it refuses to run as root.
     nonisolated static func install(_ tool: Tool) async throws -> String {
-        if await hasBundledRuntime(for: tool.id) {
+        if hasBundledRuntime(for: tool.id) {
             try await HelperInstaller.install()
             try await HelperClient.shared.installBundledVPNRuntime()
             return "VPN runtime installed."
@@ -217,7 +217,7 @@ enum Dependencies {
         guard let note = tool.formula else {
             throw InstallError.notBrewInstallable(tool.manualNote ?? "Not installable automatically.")
         }
-        guard let brew = await brewPath else { throw InstallError.noHomebrew }
+        guard let brew = brewPath else { throw InstallError.noHomebrew }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: brew)

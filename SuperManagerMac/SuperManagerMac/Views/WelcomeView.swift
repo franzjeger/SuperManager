@@ -147,7 +147,7 @@ struct WelcomeView: View {
     // ----- Tailscale-card state machine -----
 
     private var tailscaleSubtitle: String {
-        if TailscaleClient.usesNativeApp {
+        if appState.tailscaleUsesNativeApp {
             return "Tailscale.app is installed. Manage its connection from Tailscale in the sidebar."
         }
         if (appState.tailscaledInstalled ?? false) {
@@ -160,7 +160,7 @@ struct WelcomeView: View {
     }
 
     private var tailscalePrimary: String {
-        if TailscaleClient.usesNativeApp || (appState.tailscaledInstalled ?? false) {
+        if appState.tailscaleUsesNativeApp || (appState.tailscaledInstalled ?? false) {
             return "Open Tailscale"
         }
         if appState.canInstallTailscaled {
@@ -170,7 +170,7 @@ struct WelcomeView: View {
     }
 
     private var tailscalePrimaryAction: () -> Void {
-        if TailscaleClient.usesNativeApp || (appState.tailscaledInstalled ?? false) {
+        if appState.tailscaleUsesNativeApp || (appState.tailscaledInstalled ?? false) {
             return { appState.selectedSection = .tailscale }
         }
         if appState.canInstallTailscaled {

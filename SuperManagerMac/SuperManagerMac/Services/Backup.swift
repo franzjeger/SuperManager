@@ -272,8 +272,9 @@ enum Backup {
     }
 
     /// Restore an encrypted (`SMBKUP01`) or legacy `.tar.gz` archive into
-    /// `targetDir` (defaults to `dataDir`), verifying decryption BEFORE moving
-    /// the existing directory aside and rolling back automatically on tar failure.
+    /// `targetDir` (defaults to `dataDir`), extracting into a `0700` sibling
+    /// staging directory FIRST so a corrupt or truncated tar never leaves
+    /// `targetDir` empty, then swapping `stageDir` into place atomically.
     static func restore(
         from archive: URL,
         password: String? = nil,
@@ -281,6 +282,8 @@ enum Backup {
     ) throws {
         let fm = FileManager.default
         let dir = targetDir ?? dataDir
+        let parentDir = dir.deletingLastPathComponent()
+        try fm.createDirectory(at: parentDir, withIntermediateDirectories: true)
 
         let work = fm.temporaryDirectory
             .appendingPathComponent("supermgr-restore-\(UUID().uuidString)", isDirectory: true)
@@ -303,13 +306,43 @@ enum Backup {
             tarToExtract = archive
         }
 
+        // Extract into a sibling staging directory on the SAME filesystem as
+        // `dir` so the final swap is an atomic `rename(2)` and a failed `tar`
+        // never touches the live directory.
+        let stageDir = parentDir
+            .appendingPathComponent("SuperManager.restore-staging-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: stageDir, withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: 0o700])
+        defer { try? fm.removeItem(at: stageDir) }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        process.arguments = ["-xzf", tarToExtract.path, "-C", stageDir.path]
+        let stderr = Pipe()
+        process.standardError = stderr
+        do {
+            try process.run()
+        } catch {
+            throw BackupError.restoreFailed("tar launch: \(error.localizedDescription)")
+        }
+        process.waitUntilExit()
+
+        if process.terminationStatus != 0 {
+            let errBytes = stderr.fileHandleForReading.readDataToEndOfFile()
+            let errStr = String(data: errBytes, encoding: .utf8) ?? "unknown"
+            throw BackupError.tarFailed(process.terminationStatus, errStr)
+        }
+
+        // Never carry stale Unix sockets or lock files into the live directory.
+        try? fm.removeItem(at: stageDir.appendingPathComponent("supermgrd.sock"))
+        try? fm.removeItem(at: stageDir.appendingPathComponent("secrets.lock"))
+
         var quarantineURL: URL?
         if fm.fileExists(atPath: dir.path) {
             let formatter = DateFormatter()
             formatter.dateFormat = "yyyy-MM-dd-HHmmss"
             let backupName = "SuperManager.before-restore-\(formatter.string(from: Date()))-\(UUID().uuidString.prefix(6))"
-            let quarantine = dir.deletingLastPathComponent()
-                .appendingPathComponent(backupName, isDirectory: true)
+            let quarantine = parentDir.appendingPathComponent(backupName, isDirectory: true)
             do {
                 try fm.moveItem(at: dir, to: quarantine)
                 quarantineURL = quarantine
@@ -320,41 +353,17 @@ enum Backup {
             }
         }
 
-        let rollbackQuarantine = {
+        do {
+            try fm.moveItem(at: stageDir, to: dir)
+            try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        } catch {
             if let q = quarantineURL {
                 try? fm.removeItem(at: dir)
                 try? fm.moveItem(at: q, to: dir)
             }
-        }
-
-        do {
-            try fm.createDirectory(at: dir, withIntermediateDirectories: true,
-                                   attributes: [.posixPermissions: 0o700])
-        } catch {
-            rollbackQuarantine()
             throw BackupError.restoreFailed(
-                "Couldn't create data dir: \(error.localizedDescription)"
+                "Couldn't swap staged restore into place: \(error.localizedDescription)"
             )
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-        process.arguments = ["-xzf", tarToExtract.path, "-C", dir.path]
-        let stderr = Pipe()
-        process.standardError = stderr
-        do {
-            try process.run()
-        } catch {
-            rollbackQuarantine()
-            throw BackupError.restoreFailed("tar launch: \(error.localizedDescription)")
-        }
-        process.waitUntilExit()
-
-        if process.terminationStatus != 0 {
-            let errBytes = stderr.fileHandleForReading.readDataToEndOfFile()
-            let errStr = String(data: errBytes, encoding: .utf8) ?? "unknown"
-            rollbackQuarantine()
-            throw BackupError.tarFailed(process.terminationStatus, errStr)
         }
     }
 }
