@@ -31,6 +31,7 @@ extension AppState {
     }
 
     fileprivate func refreshTailscaleInner() async {
+        await refreshTailscaleBinaryMode()
         async let statusTask = TailscaleClient.status()
         async let prefsTask: TailscalePrefs? = {
             // Prefs only readable when the daemon is responsive.
@@ -121,7 +122,7 @@ extension AppState {
         let running = tailscaleStatus?.backendState == "Running"
         let corpDNS = tailscalePrefs?.corpDNS ?? false
         let suffix = tailscaleStatus?.magicDNSSuffix ?? ""
-        let shouldInstall = !TailscaleClient.usesNativeApp && running && corpDNS && !suffix.isEmpty
+        let shouldInstall = !tailscaleUsesNativeApp && running && corpDNS && !suffix.isEmpty
         let target: String? = shouldInstall ? suffix : nil
         if target == lastInstalledMagicDNSDomain { return }
         if let suf = target {

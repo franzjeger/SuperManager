@@ -30,54 +30,48 @@ struct VpnDetailView: View {
             polled: appState.vpnConnectionStates[profileId]
         )
     }
-    @State private var stateDetail: String = ""
-    /// Last error surfaced from the VPN log when state is "reconnecting"
-    /// or "disconnected" — e.g. "EVENT: TRANSPORT_ERROR NETWORK_EOF_ERROR".
-    /// Shown as a small caption below the status pill so the user knows
-    /// WHY the connection is retrying without having to open the log viewer.
-    @State private var reconnectReason: String? = nil
-    /// What the tunnel looks like right now, as the helper reports it. Empty
-    /// when nothing's connected, so the "Live tunnel" section hides itself.
-    ///
-    /// One struct rather than four loose `@State`s so that switching profiles
-    /// drops all of it in a single assignment. As four fields they had to be
-    /// listed by hand in `.task(id: profileId)`'s reset, and they never were:
-    /// select a connected Azure profile, then click an IKEv2 one, and Azure's
-    /// interface, assigned IP and pushed routes were still on screen —
-    /// attributed to a profile that doesn't even report them.
+    /// Live backend enrichment populated by the single global VPN poller (`P3-8`).
+    private var liveDetail: AppState.VpnLiveDetail {
+        appState.vpnLiveDetails[profileId] ?? .init()
+    }
+    private var stateDetail: String { liveDetail.stateDetail }
+    private var reconnectReason: String? { liveDetail.reconnectReason }
+    private var strongswanMissing: Bool { liveDetail.strongswanMissing }
+
     struct LiveTunnel: Equatable {
         var interface = ""
         var virtualIp = ""
         var virtualGateway = ""
         var routes: [String] = []
-        /// Helper's verdict on whether the kernel routes for `routes` actually
-        /// point at `interface`. nil = helper couldn't determine (or an older
-        /// helper that doesn't report it) — say nothing rather than guess.
         var routesInstalled: Bool?
-        /// Negotiated IKE proposal. IKEv2 only; empty for every other
-        /// backend, and empty against a helper too old to report it.
         var cipherSuite = ""
 
-        /// Nothing measured. Also the test for whether the section renders at
-        /// all — an empty tunnel has nothing to say.
         var isEmpty: Bool {
             interface.isEmpty && virtualIp.isEmpty && routes.isEmpty
         }
 
-        /// A full tunnel the gateway narrowed: asked for everything, it
-        /// granted only `routes`, so everything else goes out directly.
-        /// IKEv2 only, where `routes` are the negotiated selectors.
         func narrows(fullTunnel: Bool) -> Bool {
             fullTunnel && !routes.isEmpty && !routes.contains("0.0.0.0/0")
         }
     }
 
-    @State private var live = LiveTunnel()
+    private var live: LiveTunnel {
+        let d = liveDetail
+        return LiveTunnel(
+            interface: d.interface,
+            virtualIp: d.virtualIp,
+            virtualGateway: d.virtualGateway,
+            routes: d.routes,
+            routesInstalled: d.routesInstalled,
+            cipherSuite: d.cipherSuite
+        )
+    }
+    /// Cached OpenVPN username read off the main thread in `.task` (`P3-9`).
+    @State private var storedOvpnUsername = ""
     /// The helper's socket is missing or refusing — the next action is
     /// installing or approving it. Not yet probed (`nil`) is not missing,
     /// and a helper that exists but doesn't answer needs no reinstall.
     private var helperMissing: Bool { appState.helperHealth == .absent }
-    @State private var pollTask: Task<Void, Never>?
 
     /// The "helper isn't up yet" banner surfaced during a boot race (the
     /// app probed the socket before launchd finished spawning the daemon).
@@ -123,12 +117,6 @@ struct VpnDetailView: View {
     @State private var renameDraft = ""
     @FocusState private var renameFocused: Bool
 
-    /// Set to true when the helper reports its strongSwan probe failed.
-    /// First-run users won't have brew strongSwan; we put a banner above
-    /// the connect bar with a one-click "copy install command" + open
-    /// Terminal.
-    @State private var strongswanMissing = false
-
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -162,21 +150,17 @@ struct VpnDetailView: View {
             .padding()
         }
         .task(id: profileId) {
-            // Everything below describes the profile we just navigated AWAY
-            // from. None of it survives the switch — the poll for the new
-            // profile refills what applies to it, and a backend that doesn't
-            // report a given field leaves it empty rather than inheriting the
-            // last profile's answer.
-            stateDetail = ""
             actionError = nil
             missingIKEv2Credentials = nil
-            strongswanMissing = false
-            reconnectReason = nil
-            live = LiveTunnel()
+            storedOvpnUsername = ""
             await load()
+            await appState.pollAllVpnStates()
         }
-        .onAppear { startPolling() }
-        .onDisappear { stopPolling() }
+        .onChange(of: appState.helperHealth) { _, newValue in
+            if newValue == .healthy, actionError == Self.helperSocketPendingMessage {
+                actionError = nil
+            }
+        }
         .alert(
             "Tunnels in each other's way",
             isPresented: Binding(
@@ -193,8 +177,7 @@ struct VpnDetailView: View {
         .sheet(isPresented: $showingLog) { logSheet }
         .sheet(isPresented: $editingOvpnCreds) {
             EditOvpnCredentialsSheet(profileId: profileId, onSaved: {
-                // Reading the stored username inline in `details(_:)`
-                // already updates on next render; nothing else to do.
+                Task { await refreshStoredOvpnUsername(for: profileId) }
             })
         }
         .sheet(isPresented: $editingRouting) {
@@ -234,10 +217,10 @@ struct VpnDetailView: View {
             // from owning its own Task lifetime.
             if let az = azureSummaryForSignIn {
                 AzureSignInSheet(profileId: profileId, summary: az) {
-                    // Tunnel just came up — fast-path a status
-                    // refresh so the dot flips green without
-                    // waiting for the 3-second poll cycle.
-                    Task { await refreshHelperState() }
+                    Task {
+                        appState.bumpVpnFastPolling()
+                        await appState.pollAllVpnStates()
+                    }
                 }
             }
         }
@@ -370,7 +353,7 @@ struct VpnDetailView: View {
         case .azure:      id = "openvpn3"
         case .unsupported: return nil
         }
-        return Dependencies.missing.contains { $0.id == id } ? id : nil
+        return appState.missingDependencies.contains { $0.id == id } ? id : nil
     }
 
     private var alwaysOnBinding: Binding<Bool> {
@@ -652,10 +635,6 @@ struct VpnDetailView: View {
                     Button("Force Disconnect", role: .destructive) {
                         Task {
                             await appState.forceDisconnect(profileId: profileId)
-                            // The state follows the global map, which
-                            // forceDisconnect just reset; clear what
-                            // described the tunnel that's gone.
-                            stateDetail = ""
                             actionError = nil
                         }
                     }
@@ -975,13 +954,8 @@ struct VpnDetailView: View {
                 "Config file",
                 URL(fileURLWithPath: cfg.configFile).lastPathComponent
             ))
-            // The daemon-side `OpenVpnConfig.username` is empty on import; the
-            // creds live in the login Keychain. Reading is cheap.
-            let storedUser = (try? VPNKeychain.getString(
-                account: "vpn/\(profile.id)/ovpn-username"
-            )) ?? ""
-            if !storedUser.isEmpty {
-                rows.append(DefinitionRow("Username", storedUser))
+            if !storedOvpnUsername.isEmpty {
+                rows.append(DefinitionRow("Username", storedOvpnUsername))
             }
 
         case .unsupported(let backend):
@@ -1275,137 +1249,24 @@ struct VpnDetailView: View {
                 params: ["id": profileId]
             )
             profile = p
+            if case .openvpn = p.config {
+                await refreshStoredOvpnUsername(for: p.id)
+            } else {
+                storedOvpnUsername = ""
+            }
         } catch {
             loadError = error.localizedDescription
         }
         loading = false
     }
 
-    private func startPolling() {
-        pollTask?.cancel()
-        pollTask = Task {
-            while !Task.isCancelled {
-                await refreshHelperState()
-                try? await Task.sleep(for: .seconds(3))
-            }
+    private func refreshStoredOvpnUsername(for id: String) async {
+        let user = await Task.detached(priority: .utility) {
+            (try? VPNKeychain.getOptionalString(account: "vpn/\(id)/ovpn-username")) ?? ""
+        }.value
+        if id == profileId {
+            storedOvpnUsername = user
         }
-    }
-
-    private func stopPolling() {
-        pollTask?.cancel()
-        pollTask = nil
-    }
-
-    private func refreshHelperState() async {
-        // Stand down while a user action on this profile is in flight: the
-        // action owns the card until it returns, and a status call now would
-        // queue behind the helper's backend lock only to describe a tunnel
-        // mid-change.
-        if busy { return }
-        appState.helperHealth = await HelperClient.shared.health()
-        // Boot-race recovery: the daemon's Unix socket appears a few
-        // seconds after login, but the app may probe (and latch a scary
-        // "helper isn't up" banner) before launchd finishes spawning it.
-        // Once the socket is actually live, drop that stale banner so a
-        // reboot doesn't leave the profile looking permanently broken.
-        // Only the helper-availability message is cleared — a real connect
-        // error, set while the helper was already reachable, is never it
-        // and so is left untouched.
-        if appState.helperHealth == .healthy,
-           actionError == Self.helperSocketPendingMessage {
-            actionError = nil
-        }
-        guard appState.helperHealth == .healthy, let profile = profile else {
-            // Helper briefly unreachable (mid bootout/bootstrap, or a socket
-            // hiccup). HOLD the last state — do NOT flip to "disconnected", that
-            // was a flicker source. The global poller owns the state and leaves
-            // it alone too when the helper is unreachable.
-            return
-        }
-        // SINGLE SOURCE OF TRUTH: `vpnState` is read from the global
-        // debounced poller's `vpnConnectionStates[profileId]`.
-        // This local poll no longer writes `vpnState` or
-        // `vpnConnectionStates` — it used to write a RAW, un-debounced per-poll
-        // status straight into the shared map, which bypassed the debounce and
-        // was the primary cause of the constant connected/connecting blink.
-        // It now only fetches backend-specific ENRICHMENT (the detail line,
-        // strongSwan-missing flag, reconnect reason, live-tunnel metadata),
-        // gated on the raw connected-ness of THIS poll (fine for descriptive
-        // text; it never touches the dot).
-        do {
-            switch profile.config {
-            case .ikev2:
-                let result = try await HelperClient.shared.vpnStatus(profileId: profileId)
-                stateDetail = result["detail"] as? String ?? ""
-                strongswanMissing = stateDetail.contains("strongSwan not installed")
-                // strongSwan reports the same four fields as OpenVPN now, from
-                // the IKE SA's virtual IP and its child SAs' traffic selectors.
-                applyLiveTunnelMetadata(
-                    from: result,
-                    connected: (result["state"] as? String) == "connected"
-                )
-            case .wireguard:
-                let result = try await HelperClient.shared.wgStatus(profileId: profileId)
-                let rawConnected = (result["state"] as? String) == "connected"
-                if let rx = result["rx_bytes"] as? Int,
-                   let tx = result["tx_bytes"] as? Int,
-                   rawConnected {
-                    stateDetail = "rx \(rx) bytes · tx \(tx) bytes"
-                } else {
-                    stateDetail = ""
-                }
-            case .openvpn:
-                let result = try await HelperClient.shared.ovpnStatus(profileId: profileId)
-                let rawConnected = (result["state"] as? String) == "connected"
-                reconnectReason = result["error_reason"] as? String
-                if let pid = result["pid"] as? Int, rawConnected {
-                    stateDetail = "openvpn pid \(pid)"
-                } else {
-                    stateDetail = ""
-                }
-                applyLiveTunnelMetadata(from: result, connected: rawConnected)
-            case .azure:
-                // Azure → OpenVPN tunnel (helper spawns ovpncli /
-                // openvpn 2.x via the same `ovpnConnect` RPC the
-                // OpenVPN backend uses), so status flows through
-                // the same `ovpn_status` endpoint.
-                let result = try await HelperClient.shared.ovpnStatus(profileId: profileId)
-                let rawConnected = (result["state"] as? String) == "connected"
-                // Surface the last transport error so the user knows
-                // why the connection is in a retry loop.
-                reconnectReason = result["error_reason"] as? String
-                if let pid = result["pid"] as? Int, rawConnected {
-                    stateDetail = "openvpn pid \(pid)"
-                } else {
-                    stateDetail = ""
-                }
-                applyLiveTunnelMetadata(from: result, connected: rawConnected)
-            case .unsupported:
-                stateDetail = ""
-            }
-        } catch {
-            // Don't surface poll errors — they spam the UI. Log to console.
-            print("vpn status poll error: \(error)")
-        }
-    }
-
-    /// Copy `interface` / `virtual_ip` / `virtual_gateway` /
-    /// `active_routes` out of an `ovpn_status` JSON dict into the
-    /// `live*` @State fields. Clears them on disconnect so the
-    /// "Live tunnel" section disappears cleanly.
-    private func applyLiveTunnelMetadata(from result: [String: Any], connected: Bool) {
-        guard connected else {
-            live = LiveTunnel()
-            return
-        }
-        live = LiveTunnel(
-            interface: (result["interface"] as? String) ?? "",
-            virtualIp: (result["virtual_ip"] as? String) ?? "",
-            virtualGateway: (result["virtual_gateway"] as? String) ?? "",
-            routes: (result["active_routes"] as? [String]) ?? [],
-            routesInstalled: result["routes_installed"] as? Bool,
-            cipherSuite: (result["cipher_suite"] as? String) ?? ""
-        )
     }
 
     // MARK: - Actions
@@ -1538,8 +1399,10 @@ struct VpnDetailView: View {
             // the card falls back to the global state, which otherwise still
             // holds the state from before the connect: the poller's status
             // call was queued behind the strongSwan lock the connect held.
-            // The fast poll verifies it.
+            // The fast poll verifies it and refreshes live metadata.
+            appState.bumpVpnGeneration(profileId)
             appState.vpnConnectionStates[profileId] = ok ? "connected" : "disconnected"
+            await appState.pollAllVpnStates()
         } catch let missing as VPNKeychain.MissingIKEv2Credentials {
             missingIKEv2Credentials = missing
             actionError = missing.localizedDescription
@@ -1560,7 +1423,9 @@ struct VpnDetailView: View {
             // Down on the helper's word, published for the same reason as
             // connect's verdict. Left to the poller, the debounce would also
             // hold "connected" through the first sample that says otherwise.
+            appState.bumpVpnGeneration(profileId)
             appState.vpnConnectionStates[profileId] = "disconnected"
+            await appState.pollAllVpnStates()
         } catch {
             actionError = error.localizedDescription
         }
@@ -1580,40 +1445,18 @@ struct VpnDetailView: View {
             actionState = "disconnected"
         } else {
             // The helper's word, shown until the action returns; the global
-            // state the card then goes back to was published and verified
-            // by `wireguardConnect`.
+            // state and live details the card then reads were published and
+            // verified by `wireguardConnect`.
             actionState = "connected"
-            stateDetail = message
         }
-        try? await Task.sleep(for: .milliseconds(500))
-        await refreshWireGuardDetail(profile)
     }
 
     private func disconnectWireGuard(_ profile: VpnProfile) async {
         beginAction()
         defer { appState.vpnBusyProfiles.remove(profileId) }
-        let (_, message) = await appState.wireguardDisconnect(profileId: profile.id)
-        stateDetail = message
-        try? await Task.sleep(for: .milliseconds(500))
-        await refreshWireGuardDetail(profile)
-    }
-
-    /// Poll `wg_status` for the byte counters under the card. The state
-    /// itself is the global poller's, which `wireguardConnect` and
-    /// `wireguardDisconnect` bring up to date before they return.
-    private func refreshWireGuardDetail(_ profile: VpnProfile) async {
-        do {
-            let result = try await HelperClient.shared.wgStatus(profileId: profile.id)
-            // Surface byte counters as a secondary line — same place
-            // strongSwan's `local_ts` / `remote_ts` lands.
-            if let rx = result["rx_bytes"] as? Int,
-               let tx = result["tx_bytes"] as? Int {
-                stateDetail = "rx \(rx) bytes · tx \(tx) bytes"
-            }
-        } catch {
-            // Don't surface poll errors as connect errors — the user
-            // is staring at the result of an action they took, the
-            // poll is background plumbing.
+        let (ok, message) = await appState.wireguardDisconnect(profileId: profile.id)
+        if !ok {
+            actionError = message
         }
     }
 
@@ -1638,33 +1481,17 @@ struct VpnDetailView: View {
             actionState = "disconnected"
         } else {
             actionState = "connected"
-            stateDetail = message
         }
-        try? await Task.sleep(for: .milliseconds(500))
-        await refreshOpenVPNDetail(profile)
     }
 
     private func disconnectOpenVPN(_ profile: VpnProfile) async {
         beginAction()
         defer { appState.vpnBusyProfiles.remove(profileId) }
-        let (_, message) = await appState.openVPNDisconnect(profileId: profile.id)
-        stateDetail = message
-        try? await Task.sleep(for: .milliseconds(500))
-        await refreshOpenVPNDetail(profile)
-    }
-
-    /// The OpenVPN counterpart of `refreshWireGuardDetail`.
-    private func refreshOpenVPNDetail(_ profile: VpnProfile) async {
-        do {
-            let result = try await HelperClient.shared.ovpnStatus(profileId: profile.id)
-            if let pid = result["pid"] as? Int {
-                stateDetail = "openvpn pid \(pid)"
-            }
-        } catch {
-            // Same rationale as WireGuard's poll — silent on errors.
+        let (ok, message) = await appState.openVPNDisconnect(profileId: profile.id)
+        if !ok {
+            actionError = message
         }
     }
-
 }
 
 // MARK: - Action-error parser

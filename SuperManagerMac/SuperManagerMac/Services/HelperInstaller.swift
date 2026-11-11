@@ -150,7 +150,7 @@ enum HelperInstaller {
         // Shipped Developer-ID builds never fall back to osascript.
         if await isDeveloperIDSignedBundle() {
             throw registrationError ?? InstallError.registrationFailed(
-                "helper registered with launchd (status: \(status())), but socket did not become ready; check /var/log/supermanager-helper.log"
+                "helper registered with launchd (status: \(svc.status.rawValue)), but socket did not become ready; check /var/log/supermanager-helper.log"
             )
         }
 
@@ -340,19 +340,6 @@ enum HelperInstaller {
         """
     }
 
-    /// Removes the daemon. Best-effort: errors don't propagate because
-    /// uninstall is most useful from disposable test environments.
-    static func uninstall() async {
-        let q: (String) -> String = { Self.shellQuote($0) }
-        let script = """
-        launchctl bootout system/\(helperLabel) >/dev/null 2>&1 || true
-        rm -f \(q(systemPlistPath)) \(q(systemBinaryPath))
-        echo OK
-        """
-        let osa = "do shell script \(appleScriptStringLiteral(script)) with administrator privileges"
-        _ = try? await runOsascript(osa)
-    }
-
     /// Execute `/usr/bin/osascript -e <osa>` off `@MainActor` so waiting on
     /// macOS's administrator password dialog never stalls the main runloop.
     nonisolated private static func runOsascript(_ osa: String) async throws -> (status: Int32, output: String) {
@@ -371,20 +358,7 @@ enum HelperInstaller {
         }.value
     }
 
-    /// SMAppService status, mostly for diagnostics.
-    static func status() -> String {
-        guard #available(macOS 13.0, *) else { return "unsupported" }
-        let svc = SMAppService.daemon(plistName: plistName)
-        switch svc.status {
-        case .notRegistered: return "notRegistered"
-        case .enabled: return "enabled"
-        case .requiresApproval: return "requiresApproval"
-        case .notFound: return "notFound"
-        @unknown default: return "unknown"
-        }
-    }
-
-    static func openLoginItemsSettings() {
+    private static func openLoginItemsSettings() {
         if #available(macOS 13.0, *) {
             SMAppService.openSystemSettingsLoginItems()
         }

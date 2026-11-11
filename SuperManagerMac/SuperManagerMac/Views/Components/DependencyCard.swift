@@ -16,15 +16,12 @@ struct DependencyCard: View {
     /// Called after a successful install so the caller can re-check.
     var onInstalled: (() -> Void)? = nil
 
+    @Environment(AppState.self) private var appState
     @State private var installing: String?
     @State private var failure: String?
-    /// Bumped after each install to force `isInstalled` to be re-read —
-    /// it hits the filesystem, so nothing else would invalidate it.
-    @State private var refresh = 0
 
     private var tools: [Dependencies.Tool] {
-        _ = refresh
-        let missing = Dependencies.missing
+        let missing = appState.missingDependencies
         guard let only else { return missing }
         return missing.filter { only.contains($0.id) }
     }
@@ -32,7 +29,7 @@ struct DependencyCard: View {
     var body: some View {
         if !tools.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
-                if Dependencies.brewPath == nil,
+                if !appState.brewAvailable,
                    tools.contains(where: { !Dependencies.hasBundledRuntime(for: $0.id) }) {
                     // We never install Homebrew silently — it is a large
                     // third-party install the user should start knowingly.
@@ -70,8 +67,10 @@ struct DependencyCard: View {
             .padding(12)
             .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-                refresh += 1
-                onInstalled?()
+                Task {
+                    await appState.refreshMissingDependencies()
+                    onInstalled?()
+                }
             }
         }
     }
@@ -102,7 +101,7 @@ struct DependencyCard: View {
             } else if tool.formula != nil {
                 Button("Install") { install(tool) }
                     .controlSize(.small)
-                    .disabled(Dependencies.brewPath == nil || installing != nil)
+                    .disabled(!appState.brewAvailable || installing != nil)
             } else if Dependencies.terminalBuildCommand(for: tool.id) != nil {
                 // No brew formula: build it in Terminal, where the
                 // multi-minute compile and its sudo prompt are visible.
@@ -162,7 +161,7 @@ struct DependencyCard: View {
             defer { installing = nil }
             do {
                 _ = try await Dependencies.install(tool)
-                refresh += 1
+                await appState.refreshMissingDependencies()
                 onInstalled?()
             } catch {
                 failure = error.localizedDescription

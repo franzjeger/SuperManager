@@ -15,15 +15,6 @@ fn main() {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     println!("cargo:rustc-env=HELPER_BUILD_TIMESTAMP={ts}");
-    // NOTE: the IOKit power monitor (power.rs) needs IOKit + CoreFoundation
-    // framework links here, but linking system frameworks makes the cargo
-    // linker-signed ad-hoc signature unacceptable to AMFI for a root
-    // LaunchDaemon (OS_REASON_CODESIGNING crash-loop). The module is therefore
-    // disabled in dev/ad-hoc builds; re-enable these links + `mod power` only
-    // in the Developer-ID-signed release flow (scripts/release.sh) where the
-    // proper signature is applied.
-    //   println!("cargo:rustc-link-lib=framework=IOKit");
-    //   println!("cargo:rustc-link-lib=framework=CoreFoundation");
     // Re-run whenever the helper's own source changes, which is what
     // makes the timestamp mean something.
     //

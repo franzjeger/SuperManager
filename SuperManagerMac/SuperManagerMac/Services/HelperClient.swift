@@ -73,17 +73,12 @@ final class HelperClient {
         }
     }
 
-    /// True when the helper answered a ping. Callers that act on the
-    /// difference between "not installed" and "not answering" use `health()`.
-    func isReachable() async -> Bool {
-        await health() == .healthy
-    }
-
     // MARK: - High-level RPCs
 
-    @discardableResult
-    func ping() async throws -> [String: Any] {
-        try await call("ping", params: [:])
+    /// Batched VPN status + kill-switch lease query in a single helper round-trip (`P3-8`).
+    func vpnPollAll(profiles: [(id: String, backend: String)]) async throws -> [String: Any] {
+        let payload = profiles.map { ["profile_id": $0.id, "backend": $0.backend] }
+        return try await call("vpn_poll_all", params: ["profiles": payload])
     }
 
     @discardableResult
@@ -174,7 +169,7 @@ final class HelperClient {
     /// The VPN programs this app bundles, in
     /// `Contents/Resources/vpn-runtime`. Nil when a development build bundles
     /// none. Release helpers require protected, installed programs.
-    static var bundledVPNRuntime: String? {
+    nonisolated static var bundledVPNRuntime: String? {
         guard let dir = Bundle.main.resourceURL?.appendingPathComponent("vpn-runtime"),
               ["bash", "wg", "wg-quick", "wireguard-go"].allSatisfy({
                   FileManager.default.isExecutableFile(atPath: dir.appendingPathComponent($0).path)
@@ -562,6 +557,8 @@ final class HelperClient {
         case "ping", "events_since", "kill_switch_status":
             // Neither waits on anything in the helper, and both are polled.
             return .seconds(3)
+        case "vpn_poll_all":
+            return .seconds(15)
         case "tailscaled_install", "tailscale_panic_reset":
             // `launchctl bootstrap` / `ipconfig set … DHCP` run on 60 s budgets.
             return .seconds(120)

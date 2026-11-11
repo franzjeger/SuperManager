@@ -60,11 +60,6 @@ mod openvpn;
 mod openvpn_config;
 mod private_file;
 mod proc;
-// `power` (IOKit system-power monitor) is disabled in dev/ad-hoc builds: it
-// links IOKit + CoreFoundation, and a cargo linker-signed ad-hoc signature on
-// a framework-linking root daemon is rejected by AMFI (OS_REASON_CODESIGNING).
-// Re-enable in the Developer-ID-signed release flow only. See build.rs.
-// mod power;
 mod route_guardian;
 mod route_table;
 mod signed_file;
@@ -166,6 +161,7 @@ fn helper_version_info() -> serde_json::Value {
         "vpn_connect",
         "vpn_disconnect",
         "vpn_status",
+        "vpn_poll_all",
         "vpn_runtime_install",
         "wg_connect",
         "wg_disconnect",
@@ -330,10 +326,6 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = tailscale_routes::spawn() {
         tracing::warn!("could not spawn the Tailscale route keeper: {e:#}");
     }
-
-    // (IOKit power monitor disabled in dev/ad-hoc builds — see `mod power`
-    // note above. The wall-clock wake detector below covers the GUI-closed
-    // POST-wake case without linking any framework.)
 
     // Helper-side wake detector — covers the GUI-CLOSED wake case (post-wake
     // cleanup even when the app is closed) without linking any framework.
@@ -781,6 +773,86 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
             }
             Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
         },
+
+        // Batched status sweep (`P3-8`): returns kill-switch state plus per-profile
+        // backend status in a single Unix-socket round trip instead of `2 + N` RPCs.
+        "vpn_poll_all" => {
+            #[derive(Deserialize)]
+            struct PollItem {
+                profile_id: String,
+                backend: String,
+            }
+            #[derive(Deserialize)]
+            struct PollAllArgs {
+                #[serde(default)]
+                profiles: Vec<PollItem>,
+            }
+            match serde_json::from_value::<PollAllArgs>(req.params) {
+                Ok(args) => {
+                    let ks = blocking(kill_switch::status).await;
+                    let mut statuses = serde_json::Map::with_capacity(args.profiles.len());
+                    for item in args.profiles {
+                        let b = item.backend.to_ascii_lowercase();
+                        let entry = if b.contains("wireguard") || b.contains("wire_guard") {
+                            let q = wireguard::WgStatusArgs {
+                                profile_id: item.profile_id.clone(),
+                            };
+                            let mut wg = wireguard.lock().await;
+                            wg.status(&q)
+                                .await
+                                .and_then(|v| serde_json::to_value(v).map_err(Into::into))
+                        } else if b.contains("openvpn")
+                            || b.contains("open_vpn")
+                            || b.contains("azure")
+                        {
+                            let q = openvpn::OvpnStatusArgs {
+                                profile_id: item.profile_id.clone(),
+                            };
+                            let mut ov = openvpn.lock().await;
+                            ov.status(&q)
+                                .await
+                                .and_then(|v| serde_json::to_value(v).map_err(Into::into))
+                        } else if b.contains("fortigate")
+                            || b.contains("forti_gate")
+                            || b.contains("ikev2")
+                            || b.contains("ipsec")
+                        {
+                            let q = strongswan::StatusArgs {
+                                profile_id: item.profile_id.clone(),
+                            };
+                            let mut sw = strongswan.lock().await;
+                            sw.status(&q)
+                                .await
+                                .and_then(|v| serde_json::to_value(v).map_err(Into::into))
+                        } else {
+                            Ok(serde_json::json!({ "state": "disconnected" }))
+                        };
+                        match entry {
+                            Ok(v) => {
+                                statuses.insert(item.profile_id, v);
+                            }
+                            Err(e) => {
+                                statuses.insert(
+                                    item.profile_id,
+                                    serde_json::json!({
+                                        "state": "unknown",
+                                        "detail": format!("{e:#}"),
+                                    }),
+                                );
+                            }
+                        }
+                    }
+                    Response::ok(
+                        id,
+                        serde_json::json!({
+                            "kill_switch": ks,
+                            "profiles": statuses,
+                        }),
+                    )
+                }
+                Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
+            }
+        }
 
         // -- WireGuard --
         // The programs WireGuard runs with, from the app bundle into a

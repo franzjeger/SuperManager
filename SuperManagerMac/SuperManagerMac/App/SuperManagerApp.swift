@@ -32,6 +32,153 @@ extension ProcessInfo {
 }
 
 @MainActor
+enum DaemonSupervisor {
+    private(set) static var isSuspendedForMaintenance = false
+    private static var respawnInFlight = false
+    private static var consecutiveFailures = 0
+    private static var nextAllowedRespawn = Date.distantPast
+
+    static func stopDaemon() async {
+        await Task.detached(priority: .userInitiated) {
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+            task.arguments = ["-x", "-U", String(getuid()), "supermgrd-mac"]
+            task.standardOutput = FileHandle.nullDevice
+            task.standardError = FileHandle.nullDevice
+            do {
+                try task.run()
+                task.waitUntilExit()
+            } catch {
+                // pkill not available, or no matching process — both fine.
+            }
+        }.value
+        try? await Task.sleep(for: .milliseconds(300))
+        try? FileManager.default.removeItem(atPath: ServiceClient.socketPath)
+    }
+
+    @discardableResult
+    static func startFresh(appState: AppState) async -> Bool {
+        await stopDaemon()
+
+        let masterKeyHex: String?
+        do {
+            let keyData = try VPNKeychain.getOrCreateEngineMasterKey()
+            masterKeyHex = keyData.map { String(format: "%02x", $0) }.joined()
+        } catch {
+            #if !DEBUG
+            appState.handleError(error)
+            return false
+            #else
+            DebugLog.write("[daemon] Data Protection Keychain unavailable in debug build: \(error.localizedDescription)")
+            masterKeyHex = nil
+            #endif
+        }
+
+        for path in daemonBinaryCandidates() {
+            guard FileManager.default.isExecutableFile(atPath: path) else { continue }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: path)
+            let stdinPipe: Pipe?
+            if masterKeyHex != nil {
+                process.arguments = ["--key-stdin"]
+                let p = Pipe()
+                process.standardInput = p
+                stdinPipe = p
+            } else {
+                stdinPipe = nil
+            }
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            do {
+                try process.run()
+            } catch {
+                try? stdinPipe?.fileHandleForWriting.close()
+                continue
+            }
+            if let hex = masterKeyHex, let pipe = stdinPipe {
+                try? pipe.fileHandleForWriting.write(contentsOf: Data((hex + "\n").utf8))
+                try? pipe.fileHandleForWriting.close()
+            }
+            for _ in 0..<50 {
+                try? await Task.sleep(for: .milliseconds(100))
+                if (try? UnixSocketRPC.probe(path: ServiceClient.socketPath)) != nil {
+                    return true
+                }
+            }
+            return false
+        }
+        return false
+    }
+
+    static func pauseForRestore(appState: AppState) async {
+        isSuspendedForMaintenance = true
+        appState.daemonAvailable = false
+        await stopDaemon()
+    }
+
+    static func resumeAfterRestore(appState: AppState) async {
+        isSuspendedForMaintenance = false
+        consecutiveFailures = 0
+        nextAllowedRespawn = .distantPast
+        let started = await startFresh(appState: appState)
+        if started {
+            await appState.reconnectAfterDaemonRespawn()
+        } else {
+            appState.daemonAvailable = false
+        }
+    }
+
+    /// Called by `AppState` when a periodic daemon liveness probe fails (`P2-7`).
+    /// Respawns `supermgrd-mac` with bounded exponential backoff (`1s..60s`).
+    static func recoverIfDown(appState: AppState) async {
+        guard !isSuspendedForMaintenance,
+              !respawnInFlight,
+              !ProcessInfo.processInfo.isUnitTestHost
+        else { return }
+        appState.daemonAvailable = false
+        guard Date() >= nextAllowedRespawn else { return }
+
+        respawnInFlight = true
+        defer { respawnInFlight = false }
+
+        DebugLog.write("[daemon] supermgrd-mac unreachable; attempting respawn (attempt \(consecutiveFailures + 1))")
+        let alive = await startFresh(appState: appState)
+        if alive {
+            consecutiveFailures = 0
+            nextAllowedRespawn = .distantPast
+            await appState.reconnectAfterDaemonRespawn()
+            DebugLog.write("[daemon] supermgrd-mac respawned and reconnected")
+        } else {
+            consecutiveFailures += 1
+            let delay = min(60.0, pow(2.0, Double(min(consecutiveFailures - 1, 6))))
+            nextAllowedRespawn = Date().addingTimeInterval(delay)
+            DebugLog.write("[daemon] respawn failed; next retry in \(Int(delay))s")
+        }
+    }
+
+    private static func daemonBinaryCandidates() -> [String] {
+        let bundleURL = Bundle.main.bundleURL
+        let bundled = bundleURL.appendingPathComponent("Contents/MacOS/supermgrd-mac").path
+        #if !DEBUG
+        return [bundled]
+        #else
+        let projectRoot = bundleURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return [
+            bundled,
+            projectRoot.appendingPathComponent("target/debug/supermgrd-mac").path,
+            projectRoot.appendingPathComponent("target/release/supermgrd-mac").path,
+            "\(home)/.cargo/bin/supermgrd-mac",
+            "/usr/local/bin/supermgrd-mac",
+        ]
+        #endif
+    }
+}
+
+@MainActor
 private enum AppRuntimeGuard {
     static var didBootstrap = false
     static var daemonStarted = false
@@ -316,117 +463,7 @@ struct SuperManagerApp: App {
     private func startDaemon() async {
         guard !AppRuntimeGuard.daemonStarted else { return }
         AppRuntimeGuard.daemonStarted = true
-
-        // 1. Kill any existing daemon — fire-and-forget, but wait for
-        //    the process to actually exit before continuing so the
-        //    socket file isn't held by a zombie.
-        await Task.detached(priority: .userInitiated) {
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-            // Our own processes named exactly that. `-f` matched the text
-            // anywhere in any process's arguments, so a shell command that
-            // merely mentioned the daemon was killed along with it.
-            task.arguments = ["-x", "-U", String(getuid()), "supermgrd-mac"]
-            task.standardOutput = FileHandle.nullDevice
-            task.standardError = FileHandle.nullDevice
-            do {
-                try task.run()
-                task.waitUntilExit()
-            } catch {
-                // pkill not available, or no matching process — both fine.
-            }
-        }.value
-        // pkill is asynchronous w.r.t. the kernel — give the OS a
-        // moment to reap before we try to bind the same socket.
-        try? await Task.sleep(for: .milliseconds(300))
-
-        // 2. Remove any stale socket file. The new daemon would
-        //    overwrite it on `bind()` anyway, but cleaning up here
-        //    makes the `isDaemonAlive()` probe immediately accurate.
-        let sockPath = ServiceClient.socketPath
-        try? FileManager.default.removeItem(atPath: sockPath)
-
-        // 3. Obtain the 32-byte engine secrets wrapping key from the Data
-        //    Protection Keychain and deliver it to `supermgrd-mac` over an
-        //    anonymous stdin pipe (never argv or env).
-        let masterKeyHex: String?
-        do {
-            let keyData = try VPNKeychain.getOrCreateEngineMasterKey()
-            masterKeyHex = keyData.map { String(format: "%02x", $0) }.joined()
-        } catch {
-            #if !DEBUG
-            appState.errorBanner = error.localizedDescription
-            return
-            #else
-            DebugLog.write("[daemon] Data Protection Keychain unavailable in debug build: \(error.localizedDescription)")
-            masterKeyHex = nil
-            #endif
-        }
-
-        // 4. Spawn fresh from the first available binary path. In
-        //    a packaged build that's `Contents/MacOS/supermgrd-mac`;
-        //    in dev (running the binary out of DerivedData with cargo
-        //    rebuilds in `target/`) the fallbacks let us pick up the
-        //    just-rebuilt binary without re-bundling.
-        for path in daemonBinaryCandidates() {
-            guard FileManager.default.isExecutableFile(atPath: path) else { continue }
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: path)
-            let stdinPipe: Pipe?
-            if masterKeyHex != nil {
-                process.arguments = ["--key-stdin"]
-                let p = Pipe()
-                process.standardInput = p
-                stdinPipe = p
-            } else {
-                stdinPipe = nil
-            }
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            do {
-                try process.run()
-            } catch {
-                try? stdinPipe?.fileHandleForWriting.close()
-                continue
-            }
-            if let hex = masterKeyHex, let pipe = stdinPipe {
-                try? pipe.fileHandleForWriting.write(contentsOf: Data((hex + "\n").utf8))
-                try? pipe.fileHandleForWriting.close()
-            }
-            // Poll for the socket to come up (up to ~5 s). The daemon
-            // does its `DaemonState::load_*` here, which can take a
-            // moment with lots of profiles.
-            for _ in 0..<50 {
-                try? await Task.sleep(for: .milliseconds(100))
-                if isDaemonAlive() { return }
-            }
-            return
-        }
-    }
-
-    /// Candidate locations for the daemon binary, in priority order.
-    /// Release builds ONLY launch the signed executable embedded inside the app bundle.
-    private func daemonBinaryCandidates() -> [String] {
-        let bundleURL = Bundle.main.bundleURL
-        let bundled = bundleURL.appendingPathComponent("Contents/MacOS/supermgrd-mac").path
-        #if !DEBUG
-        return [bundled]
-        #else
-        // In dev the .app lives at <project>/SuperManagerMac/build/SuperManager.app,
-        // so the cargo output is three directories above the bundle.
-        let projectRoot = bundleURL
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return [
-            bundled,
-            projectRoot.appendingPathComponent("target/debug/supermgrd-mac").path,
-            projectRoot.appendingPathComponent("target/release/supermgrd-mac").path,
-            "\(home)/.cargo/bin/supermgrd-mac",
-            "/usr/local/bin/supermgrd-mac",
-        ]
-        #endif
+        _ = await DaemonSupervisor.startFresh(appState: appState)
     }
 
     /// Start the auto-lock timer + activity observer.
@@ -491,10 +528,16 @@ struct SuperManagerApp: App {
            prefs.currentExitNode(in: peers) != nil {
             return "arrow.up.forward.circle.fill"
         }
-        // Any VPN profile in connected state.
-        let anyVpnUp = appState.vpnConnectionStates.values.contains("connected")
-        if anyVpnUp {
+        // Any VPN profile in problem / connected / connecting state.
+        let states = Set(appState.vpnConnectionStates.values)
+        if states.contains("problem") {
+            return "exclamationmark.shield.fill"
+        }
+        if states.contains("connected") {
             return "lock.shield.fill"
+        }
+        if states.contains("connecting") || states.contains("reconnecting") {
+            return "lock.shield"
         }
         // Tailscale is up but no exit-node — quietly connected.
         if appState.tailscaleStatus?.backendState == "Running" {
@@ -505,16 +548,6 @@ struct SuperManagerApp: App {
         return "shield"
     }
 
-    /// JavaScript snippet the user drags into their browser
-    /// bookmarks bar. On any page it builds a `supermgr://`
-    /// URL from the current `window.location` and passes the
-    /// page title for vendor sniffing. The OS routes the URL
-    /// to `.onOpenURL` above, which lands on WebCaptureSheet
-    /// with pre-filled fields.
-    ///
-    /// Kept as a single string with `void(...)` wrapping so it
-    /// works when pasted as the bookmark's URL field in
-    /// Safari / Chrome / Firefox without any modifications.
     static let webCaptureBookmarklet: String =
         "javascript:void("
         + "window.location='supermgr://addhost?ip='"
@@ -522,35 +555,6 @@ struct SuperManagerApp: App {
         + "+'&port='+encodeURIComponent(location.port||'')"
         + "+'&title='+encodeURIComponent(document.title)"
         + "+'&source='+encodeURIComponent(location.href))"
-
-    /// Probe the daemon socket — `connect()` fails fast with ECONNREFUSED
-    /// when the file exists but no daemon is listening.
-    private func isDaemonAlive() -> Bool {
-        let path = ServiceClient.socketPath
-        guard FileManager.default.fileExists(atPath: path) else { return false }
-        let sock = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard sock >= 0 else { return false }
-        defer { close(sock) }
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let pathBytes = Array(path.utf8)
-        let sunPathCap = MemoryLayout.size(ofValue: addr.sun_path)
-        guard pathBytes.count < sunPathCap else { return false }
-        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
-            ptr.withMemoryRebound(to: CChar.self, capacity: sunPathCap) { dst in
-                for (i, b) in pathBytes.enumerated() {
-                    dst[i] = CChar(bitPattern: b)
-                }
-                dst[pathBytes.count] = 0
-            }
-        }
-        let result = withUnsafePointer(to: &addr) { ptr -> Int32 in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                Darwin.connect(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        return result == 0
-    }
 }
 
 /// "Check for Updates…" menu item, wired up to `SparkleUpdater`.

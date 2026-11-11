@@ -79,16 +79,40 @@ struct MenuBarView: View {
 
         Divider()
 
-        // ----- VPN profiles (only show connected/connecting) -----
-        let connectedProfiles = appState.vpnProfiles.filter { p in
+        // ----- VPN profiles (active + problem + connect actions) -----
+        let activeStates: Set<String> = ["connected", "connecting", "reconnecting", "problem"]
+        let activeProfiles = appState.vpnProfiles.filter { p in
             let s = appState.vpnConnectionStates[p.id] ?? "disconnected"
-            return s == "connected" || s == "connecting"
+            return activeStates.contains(s)
         }
-        if connectedProfiles.isEmpty {
+        let disconnectedProfiles = appState.vpnProfiles.filter { p in
+            let s = appState.vpnConnectionStates[p.id] ?? "disconnected"
+            return !activeStates.contains(s)
+        }
+        if activeProfiles.isEmpty {
             Label("VPN: no active tunnels", systemImage: "lock.shield")
         } else {
-            ForEach(connectedProfiles, id: \.id) { p in
+            ForEach(activeProfiles, id: \.id) { p in
                 vpnRow(for: p)
+            }
+        }
+        if !disconnectedProfiles.isEmpty {
+            if disconnectedProfiles.count <= 5 {
+                ForEach(disconnectedProfiles, id: \.id) { p in
+                    Button("Connect \(p.name)") {
+                        Task { _ = await appState.connectProfile(profileId: p.id) }
+                    }
+                    .disabled(appState.vpnBusyProfiles.contains(p.id))
+                }
+            } else {
+                Menu("Connect VPN") {
+                    ForEach(disconnectedProfiles, id: \.id) { p in
+                        Button(p.name) {
+                            Task { _ = await appState.connectProfile(profileId: p.id) }
+                        }
+                        .disabled(appState.vpnBusyProfiles.contains(p.id))
+                    }
+                }
             }
         }
 
@@ -105,7 +129,7 @@ struct MenuBarView: View {
         Button("Disconnect All VPNs") {
             Task { await appState.disconnectAllVpns() }
         }
-        .disabled(connectedProfiles.isEmpty)
+        .disabled(activeProfiles.isEmpty)
 
         Divider()
 
@@ -134,11 +158,32 @@ struct MenuBarView: View {
     private func vpnRow(for p: VpnProfileSummary) -> some View {
         let s = appState.vpnConnectionStates[p.id] ?? "disconnected"
         let ao = appState.autoReconnectEnabled.contains(p.id)
-        let icon = s == "connected" ? "lock.shield.fill" : "lock.shield"
-        let stateText = s == "connected" ? "connected" : "connecting…"
+        let icon: String = {
+            switch s {
+            case "connected": return "lock.shield.fill"
+            case "problem": return "exclamationmark.shield.fill"
+            default: return "lock.shield"
+            }
+        }()
+        let stateText: String = {
+            switch s {
+            case "connected": return "connected"
+            case "reconnecting": return "reconnecting…"
+            case "problem": return "problem"
+            default: return "connecting…"
+            }
+        }()
         let aoSuffix = ao ? " · always-on" : ""
         let title = "\(p.name): \(stateText)\(aoSuffix)"
         Label(title, systemImage: icon)
+        if s == "problem" {
+            Button("Reconnect \(p.name)") {
+                Task {
+                    await appState.forceDisconnect(profileId: p.id)
+                    _ = await appState.connectProfile(profileId: p.id)
+                }
+            }
+        }
         Button("Disconnect \(p.name)") {
             Task { await appState.forceDisconnect(profileId: p.id) }
         }

@@ -264,7 +264,8 @@ struct BackupSettingsView: View {
         lastWarning = nil
         Task.detached(priority: .userInitiated) {
             do {
-                try Backup.export(to: url, password: password)
+                let key = try? VPNKeychain.getData(account: VPNKeychain.engineSecretsMasterKeyAccount)
+                try Backup.export(to: url, password: password, masterKey: key)
                 let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
                 let sizeStr = ByteCountFormatter.string(fromByteCount: Int64(size),
                                                         countStyle: .file)
@@ -296,9 +297,12 @@ struct BackupSettingsView: View {
         Task { @MainActor in
             do {
                 let result = try await PortableBackup.export(client: appState.client)
-                try result.data.write(to: url, options: [.atomic])
-                try? FileManager.default.setAttributes(
-                    [.posixPermissions: 0o600], ofItemAtPath: url.path)
+                let exportBytes = result.data
+                try await Task.detached(priority: .userInitiated) {
+                    try exportBytes.write(to: url, options: [.atomic])
+                    try? FileManager.default.setAttributes(
+                        [.posixPermissions: 0o600], ofItemAtPath: url.path)
+                }.value
                 let size = ByteCountFormatter.string(
                     fromByteCount: Int64(result.data.count), countStyle: .file)
                 status = .idle
@@ -340,7 +344,9 @@ struct BackupSettingsView: View {
         lastWarning = nil
         Task { @MainActor in
             do {
-                let data = try Data(contentsOf: url)
+                let data = try await Task.detached(priority: .userInitiated) {
+                    try Data(contentsOf: url)
+                }.value
                 let summary = try await PortableBackup.restore(
                     from: data, client: appState.client)
                 await appState.refreshProfiles()
@@ -430,18 +436,20 @@ struct BackupSettingsView: View {
         status = .restoring
         lastResult = nil
         lastWarning = nil
-        Task.detached(priority: .userInitiated) {
+        let state = appState
+        Task { @MainActor in
+            await DaemonSupervisor.pauseForRestore(appState: state)
             do {
-                try Backup.restore(from: url, password: password)
-                await MainActor.run {
-                    self.status = .idle
-                    self.lastResult = "Restored from \(url.lastPathComponent). Quit and re-open SuperManager to load the restored state."
-                }
+                try await Task.detached(priority: .userInitiated) {
+                    try Backup.restore(from: url, password: password)
+                }.value
+                await DaemonSupervisor.resumeAfterRestore(appState: state)
+                status = .idle
+                lastResult = "Restored from \(url.lastPathComponent) and reloaded daemon state."
             } catch {
-                await MainActor.run {
-                    self.status = .idle
-                    self.error = error.localizedDescription
-                }
+                await DaemonSupervisor.resumeAfterRestore(appState: state)
+                status = .idle
+                self.error = error.localizedDescription
             }
         }
     }

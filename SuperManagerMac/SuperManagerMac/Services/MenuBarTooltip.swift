@@ -82,8 +82,9 @@ enum MenuBarTooltipText {
 
         let connected = tunnels.filter { $0.state == "connected" }
         let connecting = tunnels.filter { $0.state == "connecting" || $0.state == "reconnecting" }
+        let problem = tunnels.filter { $0.state == "problem" }
 
-        if connected.isEmpty && connecting.isEmpty {
+        if connected.isEmpty && connecting.isEmpty && problem.isEmpty {
             lines.append("No VPN connected")
         } else {
             if !connected.isEmpty {
@@ -91,6 +92,9 @@ enum MenuBarTooltipText {
             }
             if !connecting.isEmpty {
                 lines.append("Connecting: " + connecting.map(\.name).joined(separator: ", "))
+            }
+            if !problem.isEmpty {
+                lines.append("Attention needed: " + problem.map(\.name).joined(separator: ", "))
             }
         }
 
