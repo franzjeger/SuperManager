@@ -41,13 +41,13 @@ pub fn spawn() -> anyhow::Result<()> {
         .spawn(|| loop {
             let (lock, cvar) = &ROUTE_SIGNAL;
             let changed = lock.lock().unwrap_or_else(PoisonError::into_inner);
-            if !*changed {
+            if *changed {
+                let mut guard = changed;
+                *guard = false;
+            } else {
                 let (mut guard, _) = cvar
                     .wait_timeout(changed, BACKSTOP_INTERVAL)
                     .unwrap_or_else(PoisonError::into_inner);
-                *guard = false;
-            } else {
-                let mut guard = changed;
                 *guard = false;
             }
             if crate::tailscale::has_managed_daemon() {
@@ -172,11 +172,17 @@ mod tests {
             nets(&["172.172.172.0/24", "192.168.200.0/24", "192.168.201.0/24"])
         );
 
-        assert!(accepted_subnets(&serde_json::json!({ "RouteAll": false }), &status()).is_empty());
+        assert_eq!(
+            accepted_subnets(&serde_json::json!({ "RouteAll": false }), &status()),
+            Vec::<IpNet>::new()
+        );
         let mut stopped = status();
         stopped["BackendState"] = "Stopped".into();
-        assert!(accepted_subnets(&accepting, &stopped).is_empty());
-        assert!(accepted_subnets(&accepting, &serde_json::json!({})).is_empty());
+        assert_eq!(accepted_subnets(&accepting, &stopped), Vec::<IpNet>::new());
+        assert_eq!(
+            accepted_subnets(&accepting, &serde_json::json!({})),
+            Vec::<IpNet>::new()
+        );
     }
 
     /// Against this Mac's tailscaled and routing table. Reads only:
@@ -208,7 +214,7 @@ mod tests {
                 .to_owned(),
             )
         };
-        assert!(missing(&subnets, at_home).is_empty());
+        assert_eq!(missing(&subnets, at_home), Vec::<IpNet>::new());
 
         let at_work =
             |net: &IpNet| (net.to_string() != "192.168.200.0/24").then(|| "utun0".to_owned());

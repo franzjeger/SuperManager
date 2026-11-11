@@ -247,24 +247,7 @@ impl WireGuard {
         if let Some(Err(e)) = self.native_down(&name).await {
             tracing::warn!("leftover WireGuard tunnel {name}: {e:#}");
         } else if read_name_mapping(&name).is_some() {
-            let wg_quick = crate::vpn_runtime::wg_quick(self.policy)?;
-            let _ = crate::proc::bounded_async(
-                wg_quick.command().arg("down").arg(&conf_path),
-                WG_QUICK_BUDGET,
-            )
-            .await;
-            // Belt-and-braces: if there's a residual utunN, force-
-            // destroy it. wg-quick down can leave the device when
-            // its bash bits choke on missing utilities.
-            if let Some(utun) = read_name_mapping(&name) {
-                let _ = crate::proc::bounded_async(
-                    Command::new("/sbin/ifconfig").args([&utun, "destroy"]),
-                    crate::proc::MUTATE,
-                )
-                .await;
-                let _ = std::fs::remove_file(format!("/var/run/wireguard/{name}.name"));
-                let _ = std::fs::remove_file(format!("/var/run/wireguard/{utun}.sock"));
-            }
+            self.cleanup_stale_wg_quick(&name, &conf_path).await?;
         }
 
         if args.native {
@@ -274,38 +257,17 @@ impl WireGuard {
             }
             if res.success && want_kill_switch {
                 let iface = res.interface.clone().unwrap_or_default();
-                let pid_for_ks = args.profile_id.clone();
-                let ks_res = tokio::task::spawn_blocking(move || {
-                    crate::kill_switch::activate_for_profile(
-                        &pid_for_ks,
-                        &iface,
-                        endpoints,
-                        crate::kill_switch::KillSwitchBackend::Wireguard,
-                    )
-                })
-                .await
-                .context("kill-switch blocking task")?;
-                if let Err(e) = ks_res {
-                    tracing::error!(tunnel = %name, "kill-switch activation failed; tearing down tunnel: {e:#}");
-                    let _ = self
-                        .disconnect(&WgDisconnectArgs {
-                            profile_id: args.profile_id.clone(),
-                        })
-                        .await;
-                    return Ok(WgConnectResult {
-                        success: false,
-                        message: format!(
-                            "Kill-switch activation failed (tunnel rolled back): {e:#}"
-                        ),
-                        interface: None,
-                    });
+                if let Some(failed) = self
+                    .activate_kill_switch_or_rollback(&name, &args.profile_id, &iface, endpoints)
+                    .await?
+                {
+                    return Ok(failed);
                 }
             }
             return Ok(res);
         }
         let wg_quick = crate::vpn_runtime::wg_quick(self.policy)?;
 
-        // Make sure the parent dir exists with restrictive mode.
         std::fs::create_dir_all(WG_CONF_DIR).with_context(|| format!("create {WG_CONF_DIR}"))?;
         std::fs::set_permissions(
             WG_CONF_DIR,
@@ -313,19 +275,6 @@ impl WireGuard {
         )
         .with_context(|| format!("chmod 700 {WG_CONF_DIR}"))?;
 
-        // Write the conf with mode 0600 + O_NOFOLLOW from creation, guarded so
-        // any spawn/timeout error before tunnel setup completes unlinks it.
-        struct WgConfGuard {
-            path: std::path::PathBuf,
-            keep: bool,
-        }
-        impl Drop for WgConfGuard {
-            fn drop(&mut self) {
-                if !self.keep {
-                    let _ = std::fs::remove_file(&self.path);
-                }
-            }
-        }
         let mut conf_guard = WgConfGuard {
             path: conf_path.clone(),
             keep: false,
@@ -333,11 +282,6 @@ impl WireGuard {
         crate::private_file::write(&conf_path, args.conf_content.as_bytes())
             .with_context(|| format!("write {}", conf_path.display()))?;
 
-        // Run `wg-quick up /etc/wireguard/<name>.conf` — absolute path,
-        // not `wg-quick up <name>`. wg-quick on Mac (brew build) has
-        // `CONFIG_PATH=/opt/homebrew/etc/wireguard` baked in, so the
-        // bare-name path resolves there, not in `/etc/wireguard`.
-        // Passing the absolute path bypasses the search.
         let output = crate::proc::bounded_async(
             wg_quick.command().arg("up").arg(&conf_path),
             WG_QUICK_BUDGET,
@@ -359,7 +303,7 @@ impl WireGuard {
         }
         conf_guard.keep = true;
 
-        let interface = detect_interface(&name).await.ok();
+        let interface = detect_interface(&name).ok();
         tracing::info!(tunnel = %name, interface = ?interface, wg_quick = %wg_quick.describe(), "WireGuard tunnel up");
 
         let dns_owner = format!("wg-{name}");
@@ -377,29 +321,11 @@ impl WireGuard {
 
         if want_kill_switch {
             let iface = interface.clone().unwrap_or_default();
-            let pid_for_ks = args.profile_id.clone();
-            let ks_res = tokio::task::spawn_blocking(move || {
-                crate::kill_switch::activate_for_profile(
-                    &pid_for_ks,
-                    &iface,
-                    endpoints,
-                    crate::kill_switch::KillSwitchBackend::Wireguard,
-                )
-            })
-            .await
-            .context("kill-switch blocking task")?;
-            if let Err(e) = ks_res {
-                tracing::error!(tunnel = %name, "kill-switch activation failed; tearing down tunnel: {e:#}");
-                let _ = self
-                    .disconnect(&WgDisconnectArgs {
-                        profile_id: args.profile_id.clone(),
-                    })
-                    .await;
-                return Ok(WgConnectResult {
-                    success: false,
-                    message: format!("Kill-switch activation failed (tunnel rolled back): {e:#}"),
-                    interface: None,
-                });
+            if let Some(failed) = self
+                .activate_kill_switch_or_rollback(&name, &args.profile_id, &iface, endpoints)
+                .await?
+            {
+                return Ok(failed);
             }
         }
 
@@ -408,6 +334,60 @@ impl WireGuard {
             message: format!("WireGuard tunnel '{name}' up"),
             interface,
         })
+    }
+
+    async fn cleanup_stale_wg_quick(&self, name: &str, conf_path: &Path) -> anyhow::Result<()> {
+        let wg_quick = crate::vpn_runtime::wg_quick(self.policy)?;
+        let _ = crate::proc::bounded_async(
+            wg_quick.command().arg("down").arg(conf_path),
+            WG_QUICK_BUDGET,
+        )
+        .await;
+        if let Some(utun) = read_name_mapping(name) {
+            let _ = crate::proc::bounded_async(
+                Command::new("/sbin/ifconfig").args([&utun, "destroy"]),
+                crate::proc::MUTATE,
+            )
+            .await;
+            let _ = std::fs::remove_file(format!("/var/run/wireguard/{name}.name"));
+            let _ = std::fs::remove_file(format!("/var/run/wireguard/{utun}.sock"));
+        }
+        Ok(())
+    }
+
+    async fn activate_kill_switch_or_rollback(
+        &mut self,
+        name: &str,
+        profile_id: &str,
+        iface: &str,
+        endpoints: Vec<std::net::IpAddr>,
+    ) -> anyhow::Result<Option<WgConnectResult>> {
+        let pid_for_ks = profile_id.to_owned();
+        let iface_owned = iface.to_owned();
+        let ks_res = tokio::task::spawn_blocking(move || {
+            crate::kill_switch::activate_for_profile(
+                &pid_for_ks,
+                &iface_owned,
+                endpoints,
+                crate::kill_switch::KillSwitchBackend::Wireguard,
+            )
+        })
+        .await
+        .context("kill-switch blocking task")?;
+        if let Err(e) = ks_res {
+            tracing::error!(tunnel = %name, "kill-switch activation failed; tearing down tunnel: {e:#}");
+            let _ = self
+                .disconnect(&WgDisconnectArgs {
+                    profile_id: profile_id.to_owned(),
+                })
+                .await;
+            return Ok(Some(WgConnectResult {
+                success: false,
+                message: format!("Kill-switch activation failed (tunnel rolled back): {e:#}"),
+                interface: None,
+            }));
+        }
+        Ok(None)
     }
 
     /// Bring the tunnel down + delete the conf.
@@ -492,66 +472,23 @@ impl WireGuard {
             messages.push(format!("wg-quick down failed ({err})"));
         }
 
-        // 3. Always verify the interface is actually gone. Some
-        //    wg-quick failure modes (bash version mismatch, missing
-        //    `route` in PATH) report success but leave the utun up;
-        //    others report failure but already torn things down.
-        //    Source of truth is `ifconfig`.
         if let Some(ref utun) = utun_name_before {
-            if interface_exists(utun) {
-                // Force-destroy via ifconfig — root, no shell.
-                match crate::proc::bounded_async(
-                    Command::new("/sbin/ifconfig").args([utun, "destroy"]),
-                    crate::proc::MUTATE,
-                )
-                .await
-                {
-                    Ok(out) if out.status.success() => {
-                        messages.push(format!("force-destroyed {utun}"));
-                    }
-                    Ok(out) => {
-                        messages.push(format!(
-                            "ifconfig {utun} destroy failed: {}",
-                            String::from_utf8_lossy(&out.stderr).trim()
-                        ));
-                    }
-                    Err(e) => {
-                        messages.push(format!("ifconfig {utun} destroy: {e}"));
-                    }
-                }
-            }
+            force_destroy_wg_quick_interface(utun, &mut messages).await;
         }
 
-        // 4. Clean up wg-quick's `/var/run/wireguard/*` cookies if
-        //    they're still there. wg-quick removes them on a clean
-        //    `down`, but a fallback path leaves them and confuses a
-        //    later `up`.
         let _ = std::fs::remove_file(format!("/var/run/wireguard/{name}.name"));
         if let Some(ref utun) = utun_name_before {
             let _ = std::fs::remove_file(format!("/var/run/wireguard/{utun}.sock"));
         }
-
-        // 5. Always remove the conf file. Leaving a private key on
-        //    disk is worse than a dangling interface.
         let _ = std::fs::remove_file(conf_path_for(&name));
 
-        // 6. Always restore DNS — unconditionally, regardless of
-        //    whether wg-quick down succeeded or the fallback ran.
-        //    wg-quick sets DNS via `networksetup` (Setup store) when
-        //    it brings the tunnel up; its `down` path clears it, but
-        //    the `ifconfig destroy` fallback above does not. Calling
-        //    `clear_vpn_dns` here covers both paths and also removes
-        //    any State-store entries, matching macOS best-practice.
         let _ = tokio::task::spawn_blocking(move || {
             crate::dns::clear_vpn_dns_for(&dns_owner);
         })
         .await;
 
         // Final verdict: success iff the interface is gone now.
-        let final_alive = utun_name_before
-            .as_deref()
-            .map(interface_exists)
-            .unwrap_or(false);
+        let final_alive = utun_name_before.as_deref().is_some_and(interface_exists);
         if final_alive {
             tracing::warn!(tunnel = %name, "WireGuard tunnel still up: {}", messages.join("; "));
         } else {
@@ -585,19 +522,16 @@ impl WireGuard {
     pub async fn status(&mut self, args: &WgStatusArgs) -> anyhow::Result<WgStatusResult> {
         let name = interface_name(&args.profile_id);
 
-        let utun_name = match read_name_mapping(&name) {
-            Some(u) => u,
-            None => {
-                // No mapping file → tunnel was never up, or it was
-                // brought down (wg-quick removes the file on `down`).
-                return Ok(WgStatusResult {
-                    state: WgState::Disconnected,
-                    rx_bytes: None,
-                    tx_bytes: None,
-                    last_handshake_unix: None,
-                    peer_endpoint: None,
-                });
-            }
+        let Some(utun_name) = read_name_mapping(&name) else {
+            // No mapping file → tunnel was never up, or it was
+            // brought down (wg-quick removes the file on `down`).
+            return Ok(WgStatusResult {
+                state: WgState::Disconnected,
+                rx_bytes: None,
+                tx_bytes: None,
+                last_handshake_unix: None,
+                peer_endpoint: None,
+            });
         };
 
         let wg_bin = crate::vpn_runtime::wg(self.policy)?;
@@ -698,12 +632,54 @@ impl WireGuard {
 /// name limit is 15 chars (IFNAMSIZ-1). UUIDs are way over that, so
 /// we hash to 8 hex chars and prefix with "smwg" (sm = SuperManager,
 /// wg = WireGuard) for a tight, human-readable interface name.
+struct WgConfGuard {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl Drop for WgConfGuard {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+async fn force_destroy_wg_quick_interface(utun: &str, messages: &mut Vec<String>) {
+    if !interface_exists(utun) {
+        return;
+    }
+    match crate::proc::bounded_async(
+        Command::new("/sbin/ifconfig").args([utun, "destroy"]),
+        crate::proc::MUTATE,
+    )
+    .await
+    {
+        Ok(out) if out.status.success() => {
+            messages.push(format!("force-destroyed {utun}"));
+        }
+        Ok(out) => {
+            messages.push(format!(
+                "ifconfig {utun} destroy failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Err(e) => {
+            messages.push(format!("ifconfig {utun} destroy: {e}"));
+        }
+    }
+}
+
 fn interface_name(profile_id: &str) -> String {
     use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
     let mut hasher = Sha256::new();
     hasher.update(profile_id.as_bytes());
     let digest = hasher.finalize();
-    let hex: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
+    let mut hex = String::with_capacity(8);
+    for b in digest.iter().take(4) {
+        let _ = write!(hex, "{b:02x}");
+    }
     format!("smwg{hex}")
 }
 
@@ -747,13 +723,12 @@ fn interface_exists(name: &str) -> bool {
         .arg(name)
         .budget(crate::proc::PROBE)
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 /// `wg-quick` wraps the real device name (`utunN`) — read it from
 /// the mapping file rather than re-deriving it via `wg show`.
-async fn detect_interface(name: &str) -> anyhow::Result<String> {
+fn detect_interface(name: &str) -> anyhow::Result<String> {
     read_name_mapping(name)
         .ok_or_else(|| anyhow!("no /var/run/wireguard/{name}.name mapping — tunnel didn't come up"))
 }

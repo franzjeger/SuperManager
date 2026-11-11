@@ -11,7 +11,8 @@
 //! A development build that bundles no runtime runs Homebrew's WireGuard as
 //! before, and the log says so.
 
-use std::os::unix::fs::MetadataExt as _;
+use std::io::Write as _;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
@@ -54,7 +55,7 @@ const OPTIONAL_SIGNED: [(&str, &str); 4] = [
 /// `src/wg-quick/darwin.bash`. The build refuses to bundle any other.
 const WG_QUICK_SHA256: &str = include_str!("wg-quick.sha256");
 
-const BREW_PREFIXES: &[&str] = &["/opt/homebrew", "/usr/local"];
+pub(crate) const BREW_PREFIXES: &[&str] = &["/opt/homebrew", "/usr/local"];
 
 #[derive(Debug, Deserialize)]
 pub struct InstallArgs {
@@ -208,7 +209,6 @@ fn install_strongswan_config(dir: &Path) -> Result<()> {
         ("swanctl/swanctl.conf", "include conf.d/*.conf\n"),
     ] {
         let path = etc.join(name);
-        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -216,7 +216,6 @@ fn install_strongswan_config(dir: &Path) -> Result<()> {
             .open(&path)
         {
             Ok(mut file) => {
-                use std::io::Write as _;
                 file.write_all(content.as_bytes())?;
                 file.sync_all()?;
             }

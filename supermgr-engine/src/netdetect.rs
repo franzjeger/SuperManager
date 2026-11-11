@@ -116,12 +116,16 @@ async fn fetch_public_ip() -> Result<String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .build()?;
-    let resp = client.get("https://ifconfig.me").send().await?;
-    // Cap response at 1 KB — ifconfig.me returns 16 bytes for an
-    // IPv4. Anything bigger is a malicious or misrouted reply.
-    let bytes = resp.bytes().await?;
-    if bytes.len() > 1024 {
-        anyhow::bail!("ifconfig.me response too large: {} bytes", bytes.len());
+    let mut resp = client.get("https://ifconfig.me").send().await?;
+    // Stream up to 1 KiB — ifconfig.me returns <=45 bytes for an IP.
+    // Reject oversize responses while streaming rather than buffering first (`P3-11`).
+    const MAX_IP_RESP_BYTES: usize = 1024;
+    let mut bytes = Vec::with_capacity(64);
+    while let Some(chunk) = resp.chunk().await? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_IP_RESP_BYTES {
+            anyhow::bail!("ifconfig.me response exceeded {MAX_IP_RESP_BYTES} bytes");
+        }
+        bytes.extend_from_slice(&chunk);
     }
     let text = String::from_utf8_lossy(&bytes).trim().to_owned();
     if text.is_empty() || text.len() > 64 {

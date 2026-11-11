@@ -122,12 +122,12 @@ fn parse_net(value: &str) -> Result<IpNet> {
     Ok(IpNet::from(ip))
 }
 
-fn parse_list(value: &str, mut each: impl FnMut(&str) -> Result<()>) -> Result<()> {
+fn parse_list(value: &str, each: impl FnMut(&str) -> Result<()>) -> Result<()> {
     value
         .split(',')
         .map(str::trim)
         .filter(|item| !item.is_empty())
-        .try_for_each(|item| each(item))
+        .try_for_each(each)
 }
 
 fn set_once<T>(slot: &mut Option<T>, value: T, key: &str) -> Result<()> {
@@ -137,13 +137,58 @@ fn set_once<T>(slot: &mut Option<T>, value: T, key: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum KeepaliveSetting {
+    Off,
+    Seconds(u16),
+}
+
+impl KeepaliveSetting {
+    fn seconds(self) -> Option<u16> {
+        match self {
+            Self::Off => None,
+            Self::Seconds(secs) => Some(secs),
+        }
+    }
+}
+
 #[derive(Default)]
 struct PeerFields {
     public_key: Option<Key>,
     preshared_key: Option<Key>,
     endpoint: Option<Endpoint>,
     allowed_ips: Vec<IpNet>,
-    persistent_keepalive: Option<Option<u16>>,
+    persistent_keepalive: Option<KeepaliveSetting>,
+}
+
+fn apply_peer_field(peer: &mut PeerFields, key: &str, lower: &str, value: &str) -> Result<()> {
+    match lower {
+        "publickey" => Key::parse(value).and_then(|k| set_once(&mut peer.public_key, k, key)),
+        "presharedkey" => Key::parse(value).and_then(|k| set_once(&mut peer.preshared_key, k, key)),
+        "endpoint" => Endpoint::parse(value).and_then(|e| set_once(&mut peer.endpoint, e, key)),
+        "allowedips" => parse_list(value, |item| {
+            peer.allowed_ips.push(parse_net(item)?.trunc());
+            Ok(())
+        }),
+        "persistentkeepalive" => {
+            let interval = if value.eq_ignore_ascii_case("off") {
+                Ok(KeepaliveSetting::Off)
+            } else {
+                value
+                    .parse::<u16>()
+                    .map(|secs| {
+                        if secs > 0 {
+                            KeepaliveSetting::Seconds(secs)
+                        } else {
+                            KeepaliveSetting::Off
+                        }
+                    })
+                    .map_err(|_| anyhow!("{value:?} is not a number of seconds"))
+            };
+            interval.and_then(|i| set_once(&mut peer.persistent_keepalive, i, key))
+        }
+        _ => Err(anyhow!("not a key SuperManager sets up")),
+    }
 }
 
 pub fn parse(text: &str) -> Result<Config> {
@@ -186,56 +231,31 @@ pub fn parse(text: &str) -> Result<Config> {
             .ok_or_else(|| anyhow!("{}: not key = value", at()))?;
         let (key, value) = (key.trim(), value.trim());
         let lower = key.to_ascii_lowercase();
-        let result =
-            match (&section, lower.as_str()) {
-                (Section::None, _) => Err(anyhow!("{key} comes before [Interface]")),
-                (Section::Interface, "privatekey") => {
-                    Key::parse(value).and_then(|k| set_once(&mut private_key, k, key))
-                }
-                (Section::Interface, "listenport") => value
-                    .parse()
-                    .map_err(|_| anyhow!("{value:?} is not a port"))
-                    .and_then(|port| set_once(&mut listen_port, port, key)),
-                (Section::Interface, "address") => parse_list(value, |item| {
-                    addresses.push(parse_net(item)?);
-                    Ok(())
-                }),
-                (Section::Interface, "mtu") => value
-                    .parse::<u32>()
-                    .ok()
-                    .filter(|mtu| (576..=65535).contains(mtu))
-                    .ok_or_else(|| anyhow!("{value:?} is not an MTU"))
-                    .and_then(|m| set_once(&mut mtu, m, key)),
-                (Section::Peer, _) => {
-                    let peer = peers.last_mut().expect("a [Peer] line pushed it");
-                    match lower.as_str() {
-                        "publickey" => {
-                            Key::parse(value).and_then(|k| set_once(&mut peer.public_key, k, key))
-                        }
-                        "presharedkey" => Key::parse(value)
-                            .and_then(|k| set_once(&mut peer.preshared_key, k, key)),
-                        "endpoint" => Endpoint::parse(value)
-                            .and_then(|e| set_once(&mut peer.endpoint, e, key)),
-                        "allowedips" => parse_list(value, |item| {
-                            peer.allowed_ips.push(parse_net(item)?.trunc());
-                            Ok(())
-                        }),
-                        "persistentkeepalive" => {
-                            let interval = if value.eq_ignore_ascii_case("off") {
-                                Ok(None)
-                            } else {
-                                value
-                                    .parse::<u16>()
-                                    .map(|secs| (secs > 0).then_some(secs))
-                                    .map_err(|_| anyhow!("{value:?} is not a number of seconds"))
-                            };
-                            interval.and_then(|i| set_once(&mut peer.persistent_keepalive, i, key))
-                        }
-                        _ => Err(anyhow!("not a key SuperManager sets up")),
-                    }
-                }
-                (Section::Interface, _) => Err(anyhow!("not a key SuperManager sets up")),
-            };
+        let result = match (&section, lower.as_str()) {
+            (Section::None, _) => Err(anyhow!("{key} comes before [Interface]")),
+            (Section::Interface, "privatekey") => {
+                Key::parse(value).and_then(|k| set_once(&mut private_key, k, key))
+            }
+            (Section::Interface, "listenport") => value
+                .parse()
+                .map_err(|_| anyhow!("{value:?} is not a port"))
+                .and_then(|port| set_once(&mut listen_port, port, key)),
+            (Section::Interface, "address") => parse_list(value, |item| {
+                addresses.push(parse_net(item)?);
+                Ok(())
+            }),
+            (Section::Interface, "mtu") => value
+                .parse::<u32>()
+                .ok()
+                .filter(|mtu| (576..=65535).contains(mtu))
+                .ok_or_else(|| anyhow!("{value:?} is not an MTU"))
+                .and_then(|m| set_once(&mut mtu, m, key)),
+            (Section::Peer, _) => {
+                let peer = peers.last_mut().expect("a [Peer] line pushed it");
+                apply_peer_field(peer, key, &lower, value)
+            }
+            (Section::Interface, _) => Err(anyhow!("not a key SuperManager sets up")),
+        };
         result.with_context(|| format!("{}: {key}", at()))?;
     }
 
@@ -261,7 +281,9 @@ pub fn parse(text: &str) -> Result<Config> {
                     .into_iter()
                     .filter(|net| unique.insert(*net))
                     .collect(),
-                persistent_keepalive: fields.persistent_keepalive.flatten(),
+                persistent_keepalive: fields
+                    .persistent_keepalive
+                    .and_then(KeepaliveSetting::seconds),
             })
         })
         .collect::<Result<Vec<_>>>()?;

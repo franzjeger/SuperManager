@@ -59,7 +59,9 @@ async fn main() -> anyhow::Result<()> {
         let s = FileSecretStore::from_hex_key(secrets_path, &line)?;
         line.replace_range(.., "");
         s
-    } else if let Ok(dpk_key) = supermgr_engine::secrets::keychain::try_load_or_create_dpk_master_key() {
+    } else if let Ok(dpk_key) =
+        supermgr_engine::secrets::keychain::try_load_or_create_dpk_master_key()
+    {
         FileSecretStore::with_master_key(secrets_path, *dpk_key)
     } else {
         tracing::warn!(

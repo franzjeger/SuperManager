@@ -53,15 +53,19 @@ pub async fn enumerate(domain: &str) -> Result<SubdomainResult> {
         .user_agent("SuperManager/1.0 (Subdomain enum via CT logs)")
         .build()?;
 
-    let resp = client.get(&url).send().await.context("crt.sh GET")?;
+    let mut resp = client.get(&url).send().await.context("crt.sh GET")?;
     if !resp.status().is_success() {
         anyhow::bail!("crt.sh returned {}", resp.status());
     }
-    // Cap at 50 MB. A domain with a million certs would still
-    // fit in this; anything bigger is suspect.
-    let bytes = resp.bytes().await.context("crt.sh body")?;
-    if bytes.len() > 50 * 1024 * 1024 {
-        anyhow::bail!("crt.sh response too large: {} bytes", bytes.len());
+    // Stream response chunks up to 32 MiB so a giant / corrupted upstream
+    // cannot OOM the daemon (`P3-11`).
+    const MAX_CRTSH_BYTES: usize = 32 * 1024 * 1024;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await.context("crt.sh body")? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_CRTSH_BYTES {
+            anyhow::bail!("crt.sh response exceeded {MAX_CRTSH_BYTES} bytes");
+        }
+        bytes.extend_from_slice(&chunk);
     }
     let entries: Vec<CrtEntry> = serde_json::from_slice(&bytes).context("parse crt.sh JSON")?;
     let cert_count = entries.len() as u32;

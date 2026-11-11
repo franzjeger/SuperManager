@@ -10,7 +10,7 @@
 //! - `wg addconf`: [`uapi::set`], with each endpoint resolved first.
 //! - `ifconfig`: the addresses; the MTU, the config's or the primary
 //!   interface's less 80; up.
-//! - A route per AllowedIPs prefix, the most specific first. All of IPv4
+//! - A route per `AllowedIPs` prefix, the most specific first. All of IPv4
 //!   or IPv6 becomes its two halves, which win over the default route
 //!   without replacing it; each peer's endpoint then keeps a host route
 //!   the way the default route goes, so the tunnel's own packets stay out
@@ -66,7 +66,7 @@ struct State {
     pid: i32,
     /// The config's MTU. None follows the primary interface's.
     mtu: Option<u32>,
-    /// AllowedIPs take all of IPv4 / IPv6, so endpoints need host routes.
+    /// `AllowedIPs` take all of IPv4 / IPv6, so endpoints need host routes.
     all4: bool,
     all6: bool,
     #[serde(default)]
@@ -318,7 +318,7 @@ struct RoutePlan {
     all6: bool,
 }
 
-/// The routes for a tunnel's AllowedIPs, the most specific first, as
+/// The routes for a tunnel's `AllowedIPs`, the most specific first, as
 /// wg-quick added them: all of IPv4 or IPv6 as its two halves.
 fn plan_routes<'a>(allowed: impl IntoIterator<Item = &'a IpNet>) -> RoutePlan {
     let mut nets: Vec<IpNet> = allowed
@@ -349,15 +349,14 @@ fn plan_routes<'a>(allowed: impl IntoIterator<Item = &'a IpNet>) -> RoutePlan {
 /// The config's MTU, or the primary interface's less 80 for WireGuard's
 /// own headers, as wg-quick chose it.
 async fn apply_mtu(state: &State) -> Result<()> {
-    let mtu = match state.mtu {
-        Some(mtu) => mtu,
-        None => {
-            let base = match net::default_route(true).await.1 {
-                Some(primary) => net::mtu(&primary).await,
-                None => None,
-            };
-            base.unwrap_or(1500).saturating_sub(80)
-        }
+    let mtu = if let Some(mtu) = state.mtu {
+        mtu
+    } else {
+        let base = match net::default_route(true).await.1 {
+            Some(primary) => net::mtu(&primary).await,
+            None => None,
+        };
+        base.unwrap_or(1500).saturating_sub(80)
     };
     if net::mtu(&state.interface).await != Some(mtu) {
         net::set_mtu(&state.interface, mtu).await?;
@@ -519,17 +518,14 @@ async fn teardown(state: &State, mut child: Option<Child>) {
     let _ = std::fs::remove_file(uapi::socket(&state.interface));
     if !gone(&state.interface, Duration::from_secs(3)).await {
         tracing::warn!(interface = %state.interface, "wireguard-go is still running without its socket; stopping it");
-        match child.as_mut() {
-            Some(child) => {
-                let _ = child.kill().await;
-            }
-            None => {
-                let program = Path::new(crate::vpn_runtime::RUNTIME_DIR).join("wireguard-go");
-                if crate::proc::process_is(state.pid, &program) {
-                    // SAFETY: a signal to the pid just seen running wireguard-go.
-                    unsafe {
-                        libc::kill(state.pid, libc::SIGKILL);
-                    }
+        if let Some(child) = child.as_mut() {
+            let _ = child.kill().await;
+        } else {
+            let program = Path::new(crate::vpn_runtime::RUNTIME_DIR).join("wireguard-go");
+            if crate::proc::process_is(state.pid, &program) {
+                // SAFETY: a signal to the pid just seen running wireguard-go.
+                unsafe {
+                    libc::kill(state.pid, libc::SIGKILL);
                 }
             }
         }
@@ -665,7 +661,7 @@ mod tests {
             false,
         );
         // Only the family the tunnel takes whole needs one.
-        assert!(first.delete.is_empty());
+        assert_eq!(first.delete, Vec::<IpAddr>::new());
         assert_eq!(
             first.add,
             vec![(ips(&["198.51.100.7"])[0], gateway("192.168.2.1"))]

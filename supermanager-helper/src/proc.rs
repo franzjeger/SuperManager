@@ -262,8 +262,9 @@ fn poll_until(fds: &mut [libc::pollfd], deadline: Instant) -> io::Result<bool> {
             return Ok(false);
         }
         let ms = libc::c_int::try_from(left.as_millis()).unwrap_or(libc::c_int::MAX);
+        let nfds = libc::nfds_t::try_from(fds.len()).unwrap_or(libc::nfds_t::MAX);
         // SAFETY: `fds` is a valid, exclusively borrowed pollfd array.
-        let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms.max(1)) };
+        let n = unsafe { libc::poll(fds.as_mut_ptr(), nfds, ms.max(1)) };
         if n > 0 {
             return Ok(true);
         }
@@ -300,7 +301,7 @@ fn wait_for_exit(child: &Child, deadline: Instant) -> io::Result<bool> {
     // SAFETY: `kq` is a valid descriptor that nothing else owns.
     let kq = unsafe { OwnedFd::from_raw_fd(kq) };
     let watch = libc::kevent {
-        ident: pid as libc::uintptr_t,
+        ident: libc::uintptr_t::try_from(pid).unwrap_or(0),
         filter: libc::EVFILT_PROC,
         flags: libc::EV_ADD | libc::EV_ONESHOT,
         fflags: libc::NOTE_EXIT,
@@ -335,7 +336,7 @@ fn wait_for_exit(child: &Child, deadline: Instant) -> io::Result<bool> {
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         let timeout = libc::timespec {
-            tv_sec: left.as_secs() as libc::time_t,
+            tv_sec: libc::time_t::try_from(left.as_secs()).unwrap_or(libc::time_t::MAX),
             tv_nsec: libc::c_long::from(left.subsec_nanos()),
         };
         // SAFETY: an all-zero kevent is a valid value to be overwritten.
@@ -409,7 +410,7 @@ fn exited_unreaped(pid: libc::pid_t) -> io::Result<bool> {
     let rc = unsafe {
         libc::waitid(
             libc::P_PID,
-            pid as libc::id_t,
+            pid.cast_unsigned(),
             &raw mut info,
             libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
         )
@@ -570,19 +571,18 @@ pub fn process_file_name_in(pid: i32, names: &[&str]) -> bool {
 pub async fn bounded_async(cmd: &mut tokio::process::Command, secs: u64) -> io::Result<Output> {
     let label = describe(cmd.as_std());
     cmd.kill_on_drop(true);
-    match tokio::time::timeout(Duration::from_secs(secs), cmd.output()).await {
-        Ok(result) => result,
-        Err(_) => {
-            tracing::warn!(
-                command = %label,
-                budget_secs = secs,
-                "external command exceeded its budget — killed"
-            );
-            Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("`{label}` timed out after {secs}s"),
-            ))
-        }
+    if let Ok(result) = tokio::time::timeout(Duration::from_secs(secs), cmd.output()).await {
+        result
+    } else {
+        tracing::warn!(
+            command = %label,
+            budget_secs = secs,
+            "external command exceeded its budget — killed"
+        );
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("`{label}` timed out after {secs}s"),
+        ))
     }
 }
 

@@ -1,5 +1,5 @@
 //! Install / uninstall the bundled `tailscaled` binary as a
-//! system-level LaunchDaemon.
+//! system-level `LaunchDaemon`.
 //!
 //! Why this lives in the privileged helper: macOS `tailscaled`
 //! requires root because it manages the kernel TUN device, the
@@ -10,14 +10,14 @@
 //!
 //! Lifecycle:
 //!   • install: copy `tailscaled` next to the helper, check that the
-//!     copy is SuperManager's signed build, write
-//!     /Library/LaunchDaemons/com.sybr.tailscaled.plist, bootstrap.
+//!     copy is `SuperManager`'s signed build, write
+//!     `/Library/LaunchDaemons/com.sybr.tailscaled.plist`, bootstrap.
 //!   • status:  read-only check that the launchd job is bootstrapped
 //!     and reports a process running.
 //!   • uninstall: bootout, remove plist + binary + state.
 //!
 //! State directory: `/var/lib/tailscale` — same path the official
-//! Tailscale.app uses, so users who later reinstall the App Store
+//! `Tailscale.app` uses, so users who later reinstall the App Store
 //! version pick up their existing tailnet membership without
 //! having to re-auth.
 
@@ -42,7 +42,7 @@ pub(crate) fn lock_tailscale_ops() -> MutexGuard<'static, ()> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Zero-fork check whether SuperManager's managed `tailscaled` LaunchDaemon
+/// Zero-fork check whether `SuperManager`'s managed `tailscaled` `LaunchDaemon`
 /// plist and live Unix socket are present (`P3-1`).
 pub(crate) fn has_managed_daemon() -> bool {
     Path::new(LAUNCH_DAEMON_PLIST).is_file() && Path::new("/var/run/tailscaled.socket").exists()
@@ -52,8 +52,8 @@ pub(crate) fn has_managed_daemon() -> bool {
 /// directory only root can write, so nothing but the helper replaces
 /// the program launchd runs as root. The helper copies the bundled
 /// `tailscaled` here on install. We don't run it directly from inside
-/// the .app bundle because that location moves whenever the user moves
-/// SuperManager.app, drags it into Trash, etc., and the LaunchDaemon
+/// the `.app` bundle because that location moves whenever the user moves
+/// `SuperManager.app`, drags it into Trash, etc., and the `LaunchDaemon`
 /// plist would then point at a missing binary.
 const DAEMON_INSTALL_PATH: &str = "/Library/PrivilegedHelperTools/com.sybr.supermanager.tailscaled";
 
@@ -66,7 +66,7 @@ pub(crate) const CLI_INSTALL_PATH: &str =
 const LEGACY_INSTALL_PATH: &str = "/usr/local/sbin/supermanager-tailscaled";
 
 /// The identifier `bundle_tailscale.sh` and `release.sh` sign the bundled
-/// daemon with. An installed binary carries it, and SuperManager's team.
+/// daemon with. An installed binary carries it, and `SuperManager`'s team.
 const DAEMON_IDENTIFIER: &str = "com.sybr.supermanager.tailscaled";
 
 /// The identifier `bundle_tailscale.sh` and `release.sh` sign the bundled
@@ -80,26 +80,26 @@ const LAUNCH_DAEMON_PLIST: &str = "/Library/LaunchDaemons/com.sybr.tailscaled.pl
 
 /// Tailscale's standard state directory. We follow the official
 /// daemon's convention so the user's tailnet membership survives
-/// switching between SuperManager and Tailscale.app.
+/// switching between `SuperManager` and `Tailscale.app`.
 const STATE_DIR: &str = "/var/lib/tailscale";
 
 /// Launchd label for the job. Used in `launchctl print`,
 /// `bootstrap`, `bootout`. Mirrors the bundle id pattern we use
-/// for the SuperManager helper itself.
+/// for the `SuperManager` helper itself.
 const LAUNCH_LABEL: &str = "com.sybr.tailscaled";
 
 #[derive(Deserialize, Debug)]
 pub struct InstallArgs {
     /// Absolute path to the bundled `tailscaled` binary inside the
-    /// SuperManager app bundle. The Swift caller passes
+    /// `SuperManager` app bundle. The Swift caller passes
     /// `Bundle.main.url(forResource: "tailscaled", ...)`.
     pub bundled_daemon_path: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone, Copy)]
 pub struct UninstallArgs {}
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone, Copy)]
 pub struct DaemonStatusArgs {}
 
 #[derive(Serialize, Debug)]
@@ -146,7 +146,7 @@ pub fn status(_: DaemonStatusArgs) -> Result<DaemonStatus> {
     // `launchctl print system/<label>` returns 0 if the job exists
     // and includes its current state. We grep for `state = running`.
     let out = Command::new("/bin/launchctl")
-        .args(["print", &format!("system/{}", LAUNCH_LABEL)])
+        .args(["print", &format!("system/{LAUNCH_LABEL}")])
         .output()
         .context("running launchctl print")?;
 
@@ -166,10 +166,10 @@ pub fn status(_: DaemonStatusArgs) -> Result<DaemonStatus> {
 }
 
 /// Install (and start) the bundled `tailscaled` as a system
-/// LaunchDaemon. Idempotent — calling on an already-installed
+/// `LaunchDaemon`. Idempotent — calling on an already-installed
 /// daemon re-copies the binary (in case the version bundled with
-/// SuperManager has changed) and re-bootstraps.
-pub fn install(args: InstallArgs) -> Result<InstallResult> {
+/// `SuperManager` has changed) and re-bootstraps.
+pub fn install(args: &InstallArgs) -> Result<InstallResult> {
     let _guard = lock_tailscale_ops();
     // 1. Copy the bundled binary to its stable location and check the
     // copy, before touching the running daemon: a binary that is not
@@ -210,7 +210,7 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
     // bootstrap below races a daemon that is still going away.
     let _ = remove_exit_routes_inner(ExitRoutesArgs::default());
     let _ = Command::new("/bin/launchctl")
-        .args(["bootout", &format!("system/{}", LAUNCH_LABEL)])
+        .args(["bootout", &format!("system/{LAUNCH_LABEL}")])
         .budget(crate::proc::SLOW)
         .status();
     // An install by an older helper leaves its copy behind.
@@ -244,7 +244,9 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
                 bootstrapped = true;
                 break;
             }
-            Ok(o) => last_err = String::from_utf8_lossy(&o.stderr).trim().to_owned(),
+            Ok(o) => String::from_utf8_lossy(&o.stderr)
+                .trim()
+                .clone_into(&mut last_err),
             Err(e) => last_err = e.to_string(),
         }
         if attempt < 5 {
@@ -253,11 +255,11 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
     }
 
     if !bootstrapped {
-        bail!("launchctl bootstrap failed: {}", last_err);
+        bail!("launchctl bootstrap failed: {last_err}");
     }
 
     let _ = Command::new("/bin/launchctl")
-        .args(["kickstart", "-k", &format!("system/{}", LAUNCH_LABEL)])
+        .args(["kickstart", "-k", &format!("system/{LAUNCH_LABEL}")])
         .budget(crate::proc::SLOW)
         .status();
 
@@ -268,7 +270,7 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
 }
 
 /// Put a copy of `source` at `target` if the copy is `tailscaled` as
-/// SuperManager signs it (`signed_file`).
+/// `SuperManager` signs it (`signed_file`).
 fn install_binary(source: &Path, target: &Path) -> Result<()> {
     crate::signed_file::install(source, target, |copy| {
         crate::signed_file::signed_by_supermanager(copy, DAEMON_IDENTIFIER)
@@ -276,23 +278,23 @@ fn install_binary(source: &Path, target: &Path) -> Result<()> {
 }
 
 /// Put a copy of `source` at `target` if the copy is `tailscale` as
-/// SuperManager signs it (`signed_file`).
+/// `SuperManager` signs it (`signed_file`).
 pub(crate) fn install_cli_binary(source: &Path, target: &Path) -> Result<()> {
     crate::signed_file::install(source, target, |copy| {
         crate::signed_file::signed_by_supermanager(copy, CLI_IDENTIFIER)
     })
 }
 
-/// Uninstall the daemon. Removes the LaunchDaemon, the binary, and
+/// Uninstall the daemon. Removes the `LaunchDaemon`, the binary, and
 /// the launchd registration. Leaves the state directory intact —
 /// the user's node key + tailnet identity is in there, and a future
-/// reinstall (whether ours or Tailscale.app's) will pick it up.
-pub fn uninstall(_: UninstallArgs) -> Result<InstallResult> {
+/// reinstall (whether ours or `Tailscale.app`'s) will pick it up.
+pub fn uninstall(_: UninstallArgs) -> InstallResult {
     let _guard = lock_tailscale_ops();
     let _ = remove_exit_routes_inner(ExitRoutesArgs::default());
     // SLOW: see the bootout in `install`.
     let _ = Command::new("/bin/launchctl")
-        .args(["bootout", &format!("system/{}", LAUNCH_LABEL)])
+        .args(["bootout", &format!("system/{LAUNCH_LABEL}")])
         .budget(crate::proc::SLOW)
         .status();
     if Path::new(LAUNCH_DAEMON_PLIST).exists() {
@@ -303,10 +305,10 @@ pub fn uninstall(_: UninstallArgs) -> Result<InstallResult> {
             let _ = fs::remove_file(binary);
         }
     }
-    Ok(InstallResult {
+    InstallResult {
         success: true,
         message: "tailscaled uninstalled. State directory preserved.".to_string(),
-    })
+    }
 }
 
 /// Parse the top-level `pid = <N>` line from `launchctl print system/<label>`.
@@ -520,13 +522,11 @@ fn is_routeable_public_ipv4(ip: &str) -> bool {
         _ => return false,
     };
     match n[0] {
-        0 | 127 => false,                           // unspecified, loopback
-        10 => false,                                // RFC1918
+        0 | 10 | 127 | 224..=239 => false, // unspecified, RFC1918, loopback, multicast
         100 if (64..=127).contains(&n[1]) => false, // CGNAT / tailnet
-        169 if n[1] == 254 => false,                // link-local
-        172 if (16..=31).contains(&n[1]) => false,  // RFC1918
-        192 if n[1] == 168 => false,                // RFC1918
-        224..=239 => false,                         // multicast
+        169 if n[1] == 254 => false,       // link-local
+        172 if (16..=31).contains(&n[1]) => false, // RFC1918
+        192 if n[1] == 168 => false,       // RFC1918
         _ => true,
     }
 }
@@ -562,7 +562,7 @@ fn read_exemption_state() -> Vec<String> {
 ///
 /// Why this exists: open-source `tailscaled` on macOS does NOT
 /// install a default-route override when an exit node is selected.
-/// The official Tailscale.app does this via NetworkExtension —
+/// The official `Tailscale.app` does this via `NetworkExtension` —
 /// not available to us. So `tailscale set --exit-node=<peer>`
 /// silently completes (prefs updated, DNS reconfigured) but
 /// internet traffic still leaves via the local default gateway.
@@ -574,7 +574,7 @@ fn read_exemption_state() -> Vec<String> {
 /// virtue of being more specific. Standard exit-node implementation
 /// pattern.
 ///
-/// **Safety**: the caller (AppState.setExitNodeWithSafety) MUST
+/// **Safety**: the caller (`AppState.setExitNodeWithSafety`) MUST
 /// follow installation with an internet probe. If the probe fails,
 /// call `remove_exit_routes` plus `tailscale set --exit-node=`
 /// before the user is stranded.
@@ -815,7 +815,8 @@ fn rollback_exemptions(ips: &[String]) {
 /// We discover the service UUID dynamically from the State
 /// store, so this works regardless of the user's specific
 /// service ID.
-pub fn force_dns_state(args: SetDnsArgs) -> Result<InstallResult> {
+pub fn force_dns_state(args: &SetDnsArgs) -> Result<InstallResult> {
+    use std::fmt::Write as _;
     let _guard = lock_tailscale_ops();
     let servers = dns_servers(&args.servers)?;
     // Find the active service UUID. We look in
@@ -833,9 +834,9 @@ pub fn force_dns_state(args: SetDnsArgs) -> Result<InstallResult> {
         script.push(' ');
         script.push_str(&server.to_string());
     }
-    script.push_str("\n");
-    script.push_str(&format!("set State:/Network/Service/{uuid}/DNS\n"));
-    script.push_str(&format!("set State:/Network/Global/DNS\n"));
+    script.push('\n');
+    let _ = writeln!(script, "set State:/Network/Service/{uuid}/DNS");
+    script.push_str("set State:/Network/Global/DNS\n");
     script.push_str("quit\n");
 
     let mut child = std::process::Command::new("/usr/sbin/scutil")
@@ -886,7 +887,7 @@ fn scutil_find_service_uuid() -> Option<String> {
 /// from DHCP. Pass `["empty"]` to clear and let DHCP own DNS
 /// again. Pass `["1.1.1.1", "1.0.0.1"]` (or similar) for a
 /// known-good fallback when DHCP-provided DNS is broken.
-pub fn set_dns_servers(args: SetDnsArgs) -> Result<InstallResult> {
+pub fn set_dns_servers(args: &SetDnsArgs) -> Result<InstallResult> {
     let _guard = lock_tailscale_ops();
     let clear = args.servers.is_empty()
         || (args.servers.len() == 1 && args.servers[0].trim().eq_ignore_ascii_case("empty"));
@@ -924,8 +925,7 @@ pub fn set_dns_servers(args: SetDnsArgs) -> Result<InstallResult> {
     Ok(InstallResult {
         success: true,
         message: format!(
-            "Set DNS on '{}' to {}",
-            service,
+            "Set DNS on '{service}' to {}",
             if clear {
                 "empty (DHCP)".to_string()
             } else {
@@ -988,8 +988,8 @@ fn service_uses_dhcp(service: &str) -> bool {
 }
 
 /// Pre-flight test: does the configured exit node actually forward
-/// our internet traffic? Detects the case Tailscale.app handles
-/// gracefully via NetworkExtension but open-source tailscaled on
+/// our internet traffic? Detects the case `Tailscale.app` handles
+/// gracefully via `NetworkExtension` but open-source `tailscaled` on
 /// macOS doesn't — picking a peer that's advertising as exit-node
 /// but not actually NAT-forwarding silently bricks the user's
 /// connection.
@@ -1101,7 +1101,7 @@ fn test_exit_reachability_inner(_: TestExitArgs) -> Result<TestExitResult> {
     })
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone, Copy)]
 pub struct TestExitArgs {}
 
 #[derive(Serialize, Debug)]
@@ -1150,12 +1150,12 @@ fn delete_split_default_if_tailscale(family: &str, net: &str, ts_utun: Option<&s
     let _ = Command::new("/sbin/route").args(&args).output();
 }
 
-pub fn remove_exit_routes(args: ExitRoutesArgs) -> Result<InstallResult> {
+pub fn remove_exit_routes(args: ExitRoutesArgs) -> InstallResult {
     let _guard = lock_tailscale_ops();
     remove_exit_routes_inner(args)
 }
 
-fn remove_exit_routes_inner(_: ExitRoutesArgs) -> Result<InstallResult> {
+fn remove_exit_routes_inner(_: ExitRoutesArgs) -> InstallResult {
     // 1. Drop ONLY the /1 split routes owned by Tailscale's utun (`P3-3`).
     //
     // WireGuard, OpenVPN, AND strongSwan IKEv2 full tunnels install the exact
@@ -1183,16 +1183,16 @@ fn remove_exit_routes_inner(_: ExitRoutesArgs) -> Result<InstallResult> {
     // 3. And the scoped defaults that let tailscaled's own sockets past them.
     let scoped = remove_scoped_defaults();
 
-    Ok(InstallResult {
+    InstallResult {
         success: true,
         message: format!(
             "Removed split-default + {} underlay exemptions + {scoped} scoped defaults (best-effort)",
             exempt.len()
         ),
-    })
+    }
 }
 
-#[derive(Deserialize, Debug, Default)]
+#[derive(Deserialize, Debug, Default, Clone, Copy)]
 pub struct ExitRoutesArgs {
     /// True when the caller selected `auto:any` rather than naming a peer.
     ///
@@ -1230,11 +1230,11 @@ pub(crate) fn detect_tailscale_utun() -> Option<String> {
 }
 
 /// Install (or remove) the per-tailnet `/etc/resolver/<domain>`
-/// file that macOS uses to route MagicDNS queries to
+/// file that macOS uses to route `MagicDNS` queries to
 /// `100.100.100.100`.
 ///
 /// Why this exists: open-source `tailscaled` on macOS doesn't have
-/// the NetworkExtension privilege the official `Tailscale.app`
+/// the `NetworkExtension` privilege the official `Tailscale.app`
 /// uses to install split DNS. It logs that it WANTS to set
 /// `Nameservers:[100.100.100.100 ...] SearchDomains:[<tailnet>]`
 /// but only writes the search file (`/etc/resolver/search.tailscale`)
@@ -1243,16 +1243,19 @@ pub(crate) fn detect_tailscale_utun() -> Option<String> {
 /// resolver even though `dig @100.100.100.100` works fine.
 ///
 /// We backstop the missing nameserver file from the helper. The
-/// content is the canonical macOS resolver(5) format:
+/// content is the canonical macOS `resolver(5)` format:
 ///
-///     nameserver 100.100.100.100
-///     nameserver fd7a:115c:a1e0::53
-///     port 53
-///     timeout 5
+/// ```text
+/// nameserver 100.100.100.100
+/// nameserver fd7a:115c:a1e0::53
+/// port 53
+/// timeout 5
+/// ```
 ///
-/// When the daemon goes back to BackendState=Stopped (user
+/// When the daemon goes back to `BackendState=Stopped` (user
 /// disconnected), call with `install: false` so we leave a clean
-/// system. The file is owned by root:wheel, mode 0644.
+/// system. The file is owned by `root:wheel`, mode `0644`.
+///
 /// Validate `tailnet_suffix` as a strict multi-label RFC-1123 DNS domain name
 /// (e.g. `tailb0b06a.ts.net`), normalized to lowercase without trailing dots.
 fn validate_magicdns_suffix(raw: &str) -> Result<String> {
@@ -1352,7 +1355,7 @@ fn write_or_remove_magicdns_resolver(
     Ok((true, path, domain))
 }
 
-pub fn install_magicdns_resolver(args: MagicdnsResolverArgs) -> Result<InstallResult> {
+pub fn install_magicdns_resolver(args: &MagicdnsResolverArgs) -> Result<InstallResult> {
     let _guard = lock_tailscale_ops();
     let (changed, path, domain) = write_or_remove_magicdns_resolver(
         Path::new("/etc/resolver"),
@@ -1409,7 +1412,7 @@ pub struct MagicdnsResolverArgs {
 /// removed (because the user cleared the exit node, or the peer
 /// went unreachable), macOS doesn't always restore the original
 /// DHCP-issued default route automatically. Result: no internet
-/// until the user toggles WiFi off/on. This RPC handles both ends
+/// until the user toggles Wi-Fi off/on. This RPC handles both ends
 /// of that recovery from inside the app.
 ///
 /// We intentionally don't restart `tailscaled` here — that would
@@ -1539,7 +1542,7 @@ pub fn panic_reset(args: PanicResetArgs) -> Result<InstallResult> {
     })
 }
 
-#[derive(Deserialize, Debug, Default)]
+#[derive(Deserialize, Debug, Default, Clone, Copy)]
 pub struct PanicResetArgs {
     /// `true` (the user-initiated "Panic reset" menu) → hard reset: also clear
     /// the tailscaled exit-node pref and the persisted desired-state.
@@ -1550,11 +1553,11 @@ pub struct PanicResetArgs {
     pub clear_pref: bool,
 }
 
-fn select_tailscale_cli<'a>(
-    candidate: &'a str,
+fn select_tailscale_cli(
+    candidate: &str,
     is_file: impl Fn(&Path) -> bool,
     check_owner: impl Fn(&Path, &str) -> Result<()>,
-) -> Option<&'a str> {
+) -> Option<&str> {
     let path = Path::new(candidate);
     (is_file(path) && check_owner(path, "tailscale CLI").is_ok()).then_some(candidate)
 }
@@ -1670,12 +1673,12 @@ fn resolve_exit_node_ip(id: &str) -> Option<String> {
 /// from a 1.1.1.1 probe but need OPPOSITE handling when a tailscale exit node is
 /// active:
 ///
-/// - **uplink DOWN** → OUR link blipped (sleep/roam/WiFi drop). Do NOTHING:
+/// - **uplink DOWN** → OUR link blipped (sleep/roam/Wi-Fi drop). Do NOTHING:
 ///   tearing the exit node down here is the flap the user reported ("bugs on any
 ///   idle"). tailscale recovers when the link returns; routes stay valid (or the
 ///   reconciler reinstalls if the utun renumbered across sleep).
 /// - **uplink UP but egress still dead after a sustained window** → the exit
-///   PEER is genuinely dead while our own link is fine → fail open (panic_reset
+///   PEER is genuinely dead while our own link is fine → fail open (`panic_reset`
 ///   removes the routes, egress drops to the local uplink, reconciler
 ///   re-establishes when the peer returns).
 ///
@@ -1696,7 +1699,7 @@ pub(crate) fn local_uplink_up() -> bool {
         return false;
     }
     let s = String::from_utf8_lossy(&out.stdout);
-    let admin_up = s.lines().next().map(|l| l.contains("UP")).unwrap_or(false);
+    let admin_up = s.lines().next().is_some_and(|l| l.contains("UP"));
     // macOS prints `status: active` when a link/association is present,
     // `status: inactive` when not. Treat an explicit "inactive" as down; if the
     // field is absent (rare for hardware) fall back to admin-up + IPv4.
@@ -1734,7 +1737,7 @@ fn physical_uplink_iface() -> Option<String> {
 
 /// Self-heal the tailscale exit node — the core of the no-brick design.
 ///
-/// Called every `auto_reconnect` tick (always-on, GUI-closed-safe LaunchDaemon).
+/// Called every `auto_reconnect` tick (always-on, GUI-closed-safe `LaunchDaemon`).
 /// If the user wants an exit node (persisted intent in `tailscale_state`) but
 /// its `0/1` split-default is NOT on the CURRENT tailscale utun — because sleep
 /// renumbered the utun or a connectivity blip tore the route down — it
@@ -1838,7 +1841,7 @@ pub fn reconcile_exit_node() {
             crate::connectivity_watchdog::pause_for(20);
             match install_exit_routes_inner(ExitRoutesArgs::default()) {
                 Ok(_) => {
-                    tracing::info!(utun = %ts_utun, "reconcile: exit-node routes re-established")
+                    tracing::info!(utun = %ts_utun, "reconcile: exit-node routes re-established");
                 }
                 Err(e) => tracing::warn!("reconcile: install_exit_routes failed: {e}"),
             }
@@ -1848,7 +1851,7 @@ pub fn reconcile_exit_node() {
             "reconcile: exit node not reachable yet — staying on local uplink"
         ),
         Err(e) => {
-            tracing::debug!("reconcile: reachability test failed: {e} — staying on local uplink")
+            tracing::debug!("reconcile: reachability test failed: {e} — staying on local uplink");
         }
     }
 }
@@ -1974,7 +1977,7 @@ fn interface_has_address(dev: &str) -> bool {
         .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
 }
 
-/// Render the LaunchDaemon plist. Inlined as a string template
+/// Render the `LaunchDaemon` plist. Inlined as a string template
 /// because the plist is small and pulling in a plist crate just for
 /// 30 lines of XML is overkill.
 ///
@@ -2032,12 +2035,12 @@ fn render_launchd_plist() -> String {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>{label}</string>
+    <string>{LAUNCH_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{daemon}</string>
-        <string>--state={state}/tailscaled.state</string>
-        <string>--statedir={state}</string>
+        <string>{DAEMON_INSTALL_PATH}</string>
+        <string>--state={STATE_DIR}/tailscaled.state</string>
+        <string>--statedir={STATE_DIR}</string>
         <string>--socket=/var/run/tailscaled.socket</string>
         <string>--port=41641</string>
     </array>
@@ -2053,14 +2056,11 @@ fn render_launchd_plist() -> String {
     <key>StandardErrorPath</key><string>/var/log/supermanager-tailscaled.log</string>
 </dict>
 </plist>
-"#,
-        label = LAUNCH_LABEL,
-        daemon = DAEMON_INSTALL_PATH,
-        state = STATE_DIR,
+"#
     )
 }
 
-/// Bring an already-installed LaunchDaemon plist up to date with the
+/// Bring an already-installed `LaunchDaemon` plist up to date with the
 /// template above, restarting the daemon if it changed.
 ///
 /// `install` rewrites the plist, but nothing re-runs `install` on a
@@ -2196,7 +2196,9 @@ fn reload_daemon() {
                 bootstrapped = true;
                 break;
             }
-            Ok(o) => last_err = String::from_utf8_lossy(&o.stderr).trim().to_owned(),
+            Ok(o) => String::from_utf8_lossy(&o.stderr)
+                .trim()
+                .clone_into(&mut last_err),
             Err(e) => last_err = e.to_string(),
         }
         // The teardown race clears in well under a second; back off a
@@ -2318,7 +2320,7 @@ mod tests {
 
     #[test]
     fn force_dns_state_refuses_before_running_anything() {
-        let err = force_dns_state(SetDnsArgs {
+        let err = force_dns_state(&SetDnsArgs {
             servers: vec!["not-an-address".into()],
         })
         .unwrap_err();
@@ -2333,7 +2335,7 @@ mod tests {
             "1.1.1.1\n9.9.9.9",
             "1.1.1.1 8.8.8.8",
         ] {
-            let err = set_dns_servers(SetDnsArgs {
+            let err = set_dns_servers(&SetDnsArgs {
                 servers: vec![bad.into()],
             })
             .unwrap_err();
@@ -2463,7 +2465,7 @@ system/com.sybr.tailscaled = {
     }
 
     /// A changed plist reloads regardless of the daemon's current state —
-    /// the new EnvironmentVariables only take effect after a re-bootstrap.
+    /// the new `EnvironmentVariables` only take effect after a re-bootstrap.
     #[test]
     fn changed_plist_always_writes_and_reloads() {
         assert_eq!(plist_action(false, true), PlistAction::WriteThenReload);
@@ -2471,8 +2473,8 @@ system/com.sybr.tailscaled = {
     }
 
     /// The watchdog pause both wake paths arm before scheduling reconciles
-    /// (`connectivity_watchdog::pause_for(45)`, main.rs wake detector and the
-    /// system_wake RPC arm). Mirrored here because the coupling is what makes
+    /// (`connectivity_watchdog::pause_for(45)`, `main.rs` wake detector and the
+    /// `system_wake` RPC arm). Mirrored here because the coupling is what makes
     /// the post-wake re-install safe.
     const WAKE_WATCHDOG_PAUSE_SECS: u64 = 45;
 
@@ -2563,8 +2565,11 @@ An asterisk (*) denotes that a network service is disabled.
 
     #[test]
     fn handles_output_with_no_devices() {
-        assert!(parse_service_order_devices("").is_empty());
-        assert!(parse_service_order_devices("no devices here").is_empty());
+        assert_eq!(parse_service_order_devices(""), Vec::<String>::new());
+        assert_eq!(
+            parse_service_order_devices("no devices here"),
+            Vec::<String>::new()
+        );
     }
 
     /// Whatever the machine looks like, the interface we pick must be

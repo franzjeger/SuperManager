@@ -144,12 +144,15 @@ mod tests {
         let endpoints = [Some("[2001:db8::1]:51820".parse().unwrap()), None];
         let hex = |key: &str| {
             use base64::Engine as _;
+            use std::fmt::Write as _;
             base64::engine::general_purpose::STANDARD
                 .decode(key)
                 .unwrap()
                 .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
+                .fold(String::new(), |mut acc, b| {
+                    let _ = write!(acc, "{b:02x}");
+                    acc
+                })
         };
         assert_eq!(
             set_request(&config, &endpoints),

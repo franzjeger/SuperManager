@@ -109,7 +109,7 @@ pub struct Result_ {
 /// Clearing intent on a currently connected profile immediately removes ONLY
 /// that profile's lease from `pf` while preserving any other connected
 /// profile's kill-switch rules.
-pub fn set_intent(args: SetIntentArgs) -> Result<StatusResponse> {
+pub fn set_intent(args: &SetIntentArgs) -> Result<StatusResponse> {
     let profile_id = validate_profile_id(&args.profile_id)?;
     let _guard = PF_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     let mut state = load_state(Path::new(STATE_PATH));
@@ -132,7 +132,7 @@ pub(crate) fn sync_intent_opt(profile_id: &str, kill_switch: Option<bool>) -> Re
     let Some(enabled) = kill_switch else {
         return Ok(());
     };
-    let _ = set_intent(SetIntentArgs {
+    let _ = set_intent(&SetIntentArgs {
         profile_id: profile_id.to_owned(),
         enabled,
     })?;
@@ -293,7 +293,7 @@ pub fn reconcile_on_startup() {
 }
 
 /// Backward-compatible direct enable RPC.
-pub fn enable(args: EnableArgs) -> Result<Result_> {
+pub fn enable(args: &EnableArgs) -> Result<Result_> {
     let pid = match args.profile_id.as_deref() {
         Some(raw) if !raw.trim().is_empty() => validate_profile_id(raw)?,
         _ => LEGACY_PROFILE_ID.to_owned(),
@@ -309,7 +309,7 @@ pub fn enable(args: EnableArgs) -> Result<Result_> {
 
 /// Backward-compatible disable RPC (per-profile when `profile_id` is supplied,
 /// or all active leases when omitted).
-pub fn disable(args: DisableArgs) -> Result<Result_> {
+pub fn disable(args: &DisableArgs) -> Result<Result_> {
     if let Some(raw) = args.profile_id.as_deref().filter(|s| !s.trim().is_empty()) {
         deactivate_for_profile(raw)?;
         return Ok(Result_ {
@@ -656,9 +656,8 @@ fn install_referrer_if_missing() -> Result<()> {
 }
 
 fn remove_referrer_if_present() -> Result<()> {
-    let body = match fs::read_to_string(PF_CONF_PATH) {
-        Ok(b) => b,
-        Err(_) => return Ok(()),
+    let Ok(body) = fs::read_to_string(PF_CONF_PATH) else {
+        return Ok(());
     };
     let needle_anchor = format!("\nanchor \"{ANCHOR_NAME}\"\n");
     let needle_load = format!("load anchor \"{ANCHOR_NAME}\" from \"{ANCHOR_FILE}\"\n");

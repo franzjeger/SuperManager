@@ -13,7 +13,7 @@
 //! Either way the user lands on a routing table with no default
 //! and is offline until WiFi-cycles or panic-resets.
 //!
-//! Tailscale.app sidesteps this with NetworkExtension. We can't
+//! Tailscale.app sidesteps this with `NetworkExtension`. We can't
 //! (no Developer Program enrollment yet). Cheapest practical fix:
 //! a watchdog thread.
 //!
@@ -23,7 +23,7 @@
 //!    + interface (e.g. `192.0.2.1` via `en0`).
 //! 2. Every 500 ms, re-read the route table.
 //!    - Default present → update snapshot (network may have changed
-//!      legitimately, e.g. WiFi roam; we want the freshest known-good).
+//!      legitimately, e.g. `WiFi` roam; we want the freshest known-good).
 //!    - Default missing → wait one more poll (debounce against
 //!      transient reconfigs), then restore via
 //!      `route -q add default <gw>`.
@@ -213,13 +213,17 @@ fn open_pf_route_socket() -> std::io::Result<OwnedFd> {
     // Ensure child subprocesses never inherit the routing socket and reads never block.
     // SAFETY: `fcntl` on a valid descriptor we own.
     unsafe {
-        let fd_flags = libc::fcntl(fd.as_raw_fd(), libc::F_GETFD);
-        if fd_flags >= 0 {
-            let _ = libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, fd_flags | libc::FD_CLOEXEC);
+        let desc_flags = libc::fcntl(fd.as_raw_fd(), libc::F_GETFD);
+        if desc_flags >= 0 {
+            let _ = libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, desc_flags | libc::FD_CLOEXEC);
         }
-        let fl_flags = libc::fcntl(fd.as_raw_fd(), libc::F_GETFL);
-        if fl_flags >= 0 {
-            let _ = libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, fl_flags | libc::O_NONBLOCK);
+        let status_flags = libc::fcntl(fd.as_raw_fd(), libc::F_GETFL);
+        if status_flags >= 0 {
+            let _ = libc::fcntl(
+                fd.as_raw_fd(),
+                libc::F_SETFL,
+                status_flags | libc::O_NONBLOCK,
+            );
         }
     }
     Ok(fd)
@@ -333,7 +337,7 @@ fn guardian_loop() {
     let mut last_ipv6_check: Option<Instant> = None;
     let mut sock = open_pf_route_socket()
         .map_err(|e| {
-            tracing::warn!("route-guardian: PF_ROUTE socket failed ({e}); using 5s fallback")
+            tracing::warn!("route-guardian: PF_ROUTE socket failed ({e}); using 5s fallback");
         })
         .ok();
 
@@ -356,11 +360,10 @@ fn guardian_loop() {
         if let Some(ref fd) = sock {
             wait_for_route_change(fd, timeout_ms);
         } else {
-            let fallback = if timeout_ms > 0 {
-                Duration::from_millis(timeout_ms as u64)
-            } else {
-                Duration::from_secs(5)
-            };
+            let fallback = u64::try_from(timeout_ms)
+                .ok()
+                .filter(|&ms| ms > 0)
+                .map_or(Duration::from_secs(5), Duration::from_millis);
             thread::sleep(fallback);
             sock = open_pf_route_socket().ok();
         }
@@ -400,81 +403,78 @@ fn tick_one(af: Af, missing: &mut u32) {
     };
     let Some(cell) = cell else { return };
 
-    match observed {
-        Some(snap) => {
-            *missing = 0;
-            let mut guard = cell.lock().unwrap_or_else(PoisonError::into_inner);
-            if guard.as_ref() != Some(&snap) {
-                tracing::info!(
-                    af = %af.label(),
-                    gw = %snap.gateway,
-                    iface = %snap.interface,
-                    "default-route snapshot updated"
-                );
-            }
-            *guard = Some(snap);
+    if let Some(snap) = observed {
+        *missing = 0;
+        let mut guard = cell.lock().unwrap_or_else(PoisonError::into_inner);
+        if guard.as_ref() != Some(&snap) {
+            tracing::info!(
+                af = %af.label(),
+                gw = %snap.gateway,
+                iface = %snap.interface,
+                "default-route snapshot updated"
+            );
         }
-        None => {
-            // `snapshot_of` filters out utun-bound defaults.
-            // Before treating the route as "missing", check whether a
-            // VPN tunnel has legitimately replaced the default via a
-            // utun interface (strongSwan full tunnel, WireGuard, etc.).
-            // If so, the route is not missing — the VPN owns it.
-            // Restoring the physical-interface default would fight the
-            // tunnel: charon reinstalls 0.0.0.0/0 via utun, the guardian
-            // removes it again, repeat every 500 ms. Symptom: 90-second
-            // connectivity outage in the helper log with ~100 "restored
-            // from snapshot" messages, followed by the VPN silently dying.
-            if raw.is_some_and(|s| s.interface.starts_with("utun")) {
-                // VPN tunnel owns the default route. Reset the miss
-                // counter so we don't act on accumulated misses when
-                // the tunnel eventually tears down.
-                *missing = 0;
-                return;
-            }
+        *guard = Some(snap);
+    } else {
+        // `snapshot_of` filters out utun-bound defaults.
+        // Before treating the route as "missing", check whether a
+        // VPN tunnel has legitimately replaced the default via a
+        // utun interface (strongSwan full tunnel, WireGuard, etc.).
+        // If so, the route is not missing — the VPN owns it.
+        // Restoring the physical-interface default would fight the
+        // tunnel: charon reinstalls 0.0.0.0/0 via utun, the guardian
+        // removes it again, repeat every 500 ms. Symptom: 90-second
+        // connectivity outage in the helper log with ~100 "restored
+        // from snapshot" messages, followed by the VPN silently dying.
+        if raw.is_some_and(|s| s.interface.starts_with("utun")) {
+            // VPN tunnel owns the default route. Reset the miss
+            // counter so we don't act on accumulated misses when
+            // the tunnel eventually tears down.
+            *missing = 0;
+            return;
+        }
 
-            *missing += 1;
-            // Debounce: act on second consecutive miss (1 s gap).
-            if *missing < 2 {
-                return;
+        *missing += 1;
+        // Debounce: act on second consecutive miss (1 s gap).
+        if *missing < 2 {
+            return;
+        }
+        let snap = cell.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let Some(snap) = snap else { return };
+        if !interface_is_up(&snap.interface) {
+            tracing::warn!(
+                af = %af.label(),
+                iface = %snap.interface,
+                "snapshot interface is down; not restoring"
+            );
+            return;
+        }
+        let Some(gateway) = restore_gateway(&snap, af) else {
+            // No router on this link. The kernel installs the default
+            // itself when one advertises.
+            tracing::info!(
+                af = %af.label(),
+                iface = %snap.interface,
+                "default route is gone, and no router here to put it back through"
+            );
+            if let Ok(mut guard) = cell.lock() {
+                *guard = None;
             }
-            let snap = cell.lock().unwrap_or_else(PoisonError::into_inner).clone();
-            let Some(snap) = snap else { return };
-            if !interface_is_up(&snap.interface) {
+            *missing = 0;
+            return;
+        };
+        match restore_default(&gateway, af) {
+            Ok(()) => {
                 tracing::warn!(
                     af = %af.label(),
+                    gw = %gateway,
                     iface = %snap.interface,
-                    "snapshot interface is down; not restoring"
+                    "default route was missing — restored"
                 );
-                return;
-            }
-            let Some(gateway) = restore_gateway(&snap, af) else {
-                // No router on this link. The kernel installs the default
-                // itself when one advertises.
-                tracing::info!(
-                    af = %af.label(),
-                    iface = %snap.interface,
-                    "default route is gone, and no router here to put it back through"
-                );
-                if let Ok(mut guard) = cell.lock() {
-                    *guard = None;
-                }
                 *missing = 0;
-                return;
-            };
-            match restore_default(&gateway, af) {
-                Ok(()) => {
-                    tracing::warn!(
-                        af = %af.label(),
-                        gw = %gateway,
-                        iface = %snap.interface,
-                        "default route was missing — restored"
-                    );
-                    *missing = 0;
-                }
-                Err(e) => {
-                    tracing::warn!(af = %af.label(), "restore failed: {e}");
-                }
+            }
+            Err(e) => {
+                tracing::warn!(af = %af.label(), "restore failed: {e}");
             }
         }
     }
@@ -647,8 +647,7 @@ fn interface_is_up(iface: &str) -> bool {
     // First line carries flags=NNNN<UP,...>
     s.lines()
         .next()
-        .map(|l| l.contains("<UP,") || l.contains(",UP,") || l.contains(",UP>"))
-        .unwrap_or(false)
+        .is_some_and(|l| l.contains("<UP,") || l.contains(",UP,") || l.contains(",UP>"))
 }
 
 #[cfg(test)]
@@ -656,12 +655,12 @@ mod tests {
     use super::*;
     use crate::route_table::DefaultRoute;
 
-    fn route(gateway: &str, interface: &str) -> Option<DefaultRoute> {
-        Some(DefaultRoute {
+    fn route(gateway: &str, interface: &str) -> DefaultRoute {
+        DefaultRoute {
             gateway: gateway.into(),
             interface: interface.into(),
             flags: "UGScg".into(),
-        })
+        }
     }
 
     /// On 2026-11-05 the default on a Mac at home still went through a
@@ -710,21 +709,21 @@ mod tests {
     #[test]
     fn only_the_users_own_way_out_is_kept() {
         assert_eq!(
-            snapshot_of(route("192.168.2.55", "en0")),
+            snapshot_of(Some(route("192.168.2.55", "en0"))),
             Some(RouteSnapshot {
                 gateway: "192.168.2.55".into(),
                 interface: "en0".into(),
             })
         );
         assert_eq!(
-            snapshot_of(route("fe80::1%en0", "en0")).map(|s| s.gateway),
+            snapshot_of(Some(route("fe80::1%en0", "en0"))).map(|s| s.gateway),
             Some("fe80::1%en0".into())
         );
         // A tunnel's, one through loopback, and one with no gateway to put
         // it back by.
-        assert_eq!(snapshot_of(route("link#23", "utun7")), None);
-        assert_eq!(snapshot_of(route("::1", "lo0")), None);
-        assert_eq!(snapshot_of(route("link#6", "en0")), None);
+        assert_eq!(snapshot_of(Some(route("link#23", "utun7"))), None);
+        assert_eq!(snapshot_of(Some(route("::1", "lo0"))), None);
+        assert_eq!(snapshot_of(Some(route("link#6", "en0"))), None);
         assert_eq!(snapshot_of(None), None);
     }
 
@@ -732,9 +731,13 @@ mod tests {
     fn pf_route_socket_opens_and_filters_mutation_types() {
         let sock = open_pf_route_socket().expect("PF_ROUTE socket should open on macOS");
         assert!(sock.as_raw_fd() >= 0);
-        assert!(is_relevant_rtm_type(libc::RTM_ADD as u8));
-        assert!(is_relevant_rtm_type(libc::RTM_DELETE as u8));
-        assert!(is_relevant_rtm_type(libc::RTM_IFINFO as u8));
-        assert!(!is_relevant_rtm_type(libc::RTM_GET as u8));
+        assert!(is_relevant_rtm_type(u8::try_from(libc::RTM_ADD).unwrap()));
+        assert!(is_relevant_rtm_type(
+            u8::try_from(libc::RTM_DELETE).unwrap()
+        ));
+        assert!(is_relevant_rtm_type(
+            u8::try_from(libc::RTM_IFINFO).unwrap()
+        ));
+        assert!(!is_relevant_rtm_type(u8::try_from(libc::RTM_GET).unwrap()));
     }
 }

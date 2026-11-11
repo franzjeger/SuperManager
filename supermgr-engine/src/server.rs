@@ -17,7 +17,6 @@ use tracing::{debug, error, info, warn};
 use supermgr_core::host::{AuthMethod, Host};
 use supermgr_core::keyring::SecretStore;
 
-use crate::operations::OperationRegistry;
 use crate::protocol::{self, Request, Response};
 use crate::ssh::connection::SshSession;
 use crate::state::DaemonState;
@@ -26,11 +25,6 @@ use crate::state::DaemonState;
 pub struct EngineServer {
     pub state: Arc<Mutex<DaemonState>>,
     pub secrets: Arc<dyn SecretStore>,
-    /// Process-wide registry of cancellable long-running operations.
-    /// Handlers register here at the start of an active scan,
-    /// compliance run, etc.; the UI lists + cancels via the
-    /// `operation_list` / `operation_cancel` RPC methods.
-    pub operations: Arc<OperationRegistry>,
     /// Provisioning previews waiting to be deployed, each as the exact
     /// configuration it showed (`provisioning::plans`).
     pub plans: Arc<crate::provisioning::PlanRegistry>,
@@ -42,7 +36,6 @@ impl EngineServer {
         Self {
             state: Arc::new(Mutex::new(state)),
             secrets,
-            operations: Arc::new(OperationRegistry::new()),
             plans: Arc::default(),
         }
     }
@@ -306,34 +299,14 @@ impl EngineServer {
                 self.handle_device_type_override_set(id, req.params).await
             }
 
-            // -- Engagement / Security methods --
-            "engagement_list" => self.handle_engagement_list(id).await,
-            "engagement_save" => self.handle_engagement_save(id, req.params).await,
-            "engagement_delete" => self.handle_engagement_delete(id, req.params).await,
+            // -- Discovery / Findings / Notification methods --
             "discovery_passive_scan" => self.handle_discovery_passive_scan(id, req.params).await,
-            "discovery_inventory" => self.handle_discovery_inventory(id, req.params).await,
-            "discovery_active_scan" => self.handle_discovery_active_scan(id, req.params).await,
-            "discovery_findings" => self.handle_discovery_findings(id, req.params).await,
-            "discovery_dns_axfr" => self.handle_discovery_dns_axfr(id, req.params).await,
-            "discovery_analyse_pcap" => self.handle_discovery_analyse_pcap(id, req.params).await,
-            "security_test_default_creds" => {
-                self.handle_security_test_default_creds(id, req.params)
-                    .await
-            }
-
-            // -- Track A: findings management --
             "findings_list" => self.handle_findings_list(id, req.params).await,
             "findings_summary" => self.handle_findings_summary(id, req.params).await,
-            "findings_risk_hosts" => self.handle_findings_risk_hosts(id, req.params).await,
-            "findings_set_disposition" => {
-                self.handle_findings_set_disposition(id, req.params).await
-            }
-            "engagement_report" => self.handle_engagement_report(id, req.params).await,
             "notify_get_config" => self.handle_notify_get_config(id).await,
             "notify_set_webhook" => self.handle_notify_set_webhook(id, req.params).await,
             "notify_set_pagerduty" => self.handle_notify_set_pagerduty(id, req.params).await,
             "notify_set_opsgenie" => self.handle_notify_set_opsgenie(id, req.params).await,
-            "engagement_set_schedule" => self.handle_engagement_set_schedule(id, req.params).await,
             "api_version" => Response::ok(
                 id,
                 serde_json::json!({
@@ -347,13 +320,6 @@ impl EngineServer {
             "cve_feed_refresh" => self.handle_cve_feed_refresh(id).await,
             "cve_feed_status" => self.handle_cve_feed_status(id).await,
             "subdomain_enum" => self.handle_subdomain_enum(id, req.params).await,
-            "asset_enrich" => self.handle_asset_enrich(id, req.params).await,
-            "engagement_report_pdf" => self.handle_engagement_report_pdf(id, req.params).await,
-            "engagement_report_html" => self.handle_engagement_report_html(id, req.params).await,
-            "operation_list" => self.handle_operation_list(id).await,
-            "operation_cancel" => self.handle_operation_cancel(id, req.params).await,
-            "activity_timeline" => self.handle_activity_timeline(id, req.params).await,
-            "remediation_script" => self.handle_remediation_script(id, req.params).await,
 
             _ => Response::err(
                 id,

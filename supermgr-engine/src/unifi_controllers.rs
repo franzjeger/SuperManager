@@ -27,11 +27,10 @@
 //!   - `UnifiController` struct (the persisted record)
 //!   - `UnifiManagedDevice` struct (one row of `/stat/device`)
 //!   - `list_devices` / `devmgr_command` async helpers
-//!   - `cross_reference` — given a list of MACs + the controller
-//!     registry, return a map MAC → `ManagedDevice` for every
-//!     match. Used by `active_scan` to annotate scan rows.
+//!   - `list_devices` — query `/proxy/network/api/s/<site>/stat/device`
+//!     and normalize every AP / switch / gateway into a common
+//!     `ManagedDevice` model.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use supermgr_core::keyring::SecretStore;
 use supermgr_core::ssh::known_hosts::KnownHostsStore;
 use supermgr_core::vpn::profile::SecretRef;
-use tracing::{info, warn};
+use tracing::info;
 use uuid::Uuid;
 
 /// HTTP timeout for any single controller request. Controllers
@@ -180,21 +179,6 @@ pub struct UnifiManagedDevice {
     pub controller_id: Option<Uuid>,
     #[serde(default)]
     pub controller_label: Option<String>,
-}
-
-/// Cross-reference annotation attached to an `ActiveHost` when a
-/// scan match is found. The GUI uses this to show the controller
-/// badge + replace SSH actions with controller-API ones.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ControllerStateRef {
-    pub controller_id: Uuid,
-    pub controller_label: String,
-    /// Echo of `UnifiManagedDevice.state` so the row can show
-    /// "adopted" vs "pending" without re-querying.
-    pub state: String,
-    pub adopted: bool,
-    pub model: Option<String>,
-    pub name: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -811,74 +795,6 @@ pub struct UnifiSysInfo {
 // ---------------------------------------------------------------------------
 // Cross-reference (the scan-annotation entry point)
 // ---------------------------------------------------------------------------
-
-/// For each MAC in `macs`, return the first matching managed
-/// device across all reachable controllers. Falls back to `None`
-/// when no controller knows the MAC. Used by `active_scan` to
-/// decorate scan rows with `ControllerStateRef` annotations.
-///
-/// Concurrent across controllers (one tokio task per controller)
-/// with an overall timeout — so a slow/dead controller doesn't
-/// block every scan from completing.
-pub async fn cross_reference(
-    secrets: &Arc<dyn SecretStore>,
-    known_hosts: &Arc<KnownHostsStore>,
-    controllers: &[UnifiController],
-    macs: &[String],
-) -> HashMap<String, ControllerStateRef> {
-    let macs_set: std::collections::HashSet<String> =
-        macs.iter().map(|m| m.to_ascii_lowercase()).collect();
-    let mut handles = Vec::new();
-    for ctrl in controllers {
-        let ctrl = ctrl.clone();
-        let secrets = Arc::clone(secrets);
-        let known_hosts = Arc::clone(known_hosts);
-        handles.push(tokio::spawn(async move {
-            (
-                ctrl.id,
-                ctrl.label.clone(),
-                list_devices(&secrets, &known_hosts, &ctrl).await,
-            )
-        }));
-    }
-    let mut out: HashMap<String, ControllerStateRef> = HashMap::new();
-    for h in handles {
-        let (cid, clabel, result) = match h.await {
-            Ok(t) => t,
-            Err(e) => {
-                warn!("unifi cross-reference join error: {e}");
-                continue;
-            }
-        };
-        let devices = match result {
-            Ok(d) => d,
-            Err(e) => {
-                warn!("unifi controller {clabel} unreachable: {e:#}");
-                continue;
-            }
-        };
-        for d in devices {
-            if !macs_set.contains(&d.mac) {
-                continue;
-            }
-            // First controller to claim a MAC wins. Multiple
-            // controllers claiming the same MAC is normally a
-            // misconfiguration the operator wants to know
-            // about, but we don't go out of our way to flag
-            // it — the most recently-touched controller's
-            // adoption state is what shows up.
-            out.entry(d.mac.clone()).or_insert(ControllerStateRef {
-                controller_id: cid,
-                controller_label: clabel.clone(),
-                state: d.state.clone(),
-                adopted: d.adopted.unwrap_or(false),
-                model: d.model.clone(),
-                name: d.name.clone(),
-            });
-        }
-    }
-    out
-}
 
 #[cfg(test)]
 mod tests {

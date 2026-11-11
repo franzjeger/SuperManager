@@ -172,7 +172,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(2, 1001), (3, 1002)]
         );
-        assert!(j.since(Some("boot-a"), 3).events.is_empty());
+        assert_eq!(j.since(Some("boot-a"), 3).events.len(), 0);
     }
 
     #[test]

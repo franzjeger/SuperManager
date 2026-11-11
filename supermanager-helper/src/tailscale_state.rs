@@ -81,16 +81,16 @@ pub fn set_desired(id: &str, ip: &str) {
 
 /// Record that the user wants `auto:any` — tailscaled picks the exit node.
 ///
-/// `observed_id`/`observed_ip` are whichever peer tailscaled had settled on
+/// `peer_id`/`peer_address` are whichever peer tailscaled had settled on
 /// when the routes went up. They are recorded for debuggability only; the
 /// reconciler re-asserts `auto:any` rather than either of them. See
 /// [`DesiredExitNode::auto`].
-pub fn set_desired_auto(observed_id: &str, observed_ip: &str) {
+pub fn set_desired_auto(peer_id: &str, peer_address: &str) {
     write(&DesiredExitNode {
         desired: true,
         auto: true,
-        exit_node_id: observed_id.to_string(),
-        exit_node_ip: observed_ip.to_string(),
+        exit_node_id: peer_id.to_string(),
+        exit_node_ip: peer_address.to_string(),
         updated_unix: now_unix(),
     });
     crate::connectivity_watchdog::notify_state_changed();
@@ -123,8 +123,7 @@ fn write(state: &DesiredExitNode) {
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 #[cfg(test)]
@@ -135,7 +134,7 @@ mod tests {
     fn default_is_not_desired() {
         let d = DesiredExitNode::default();
         assert!(!d.desired);
-        assert!(d.exit_node_id.is_empty());
+        assert_eq!(d.exit_node_id, "");
     }
 
     #[test]
@@ -209,6 +208,6 @@ mod tests {
         // An older/minimal file with only `desired` must still decode.
         let back: DesiredExitNode = serde_json::from_str(r#"{"desired":true}"#).unwrap();
         assert!(back.desired);
-        assert!(back.exit_node_ip.is_empty());
+        assert_eq!(back.exit_node_ip, "");
     }
 }

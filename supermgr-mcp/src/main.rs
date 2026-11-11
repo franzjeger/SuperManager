@@ -17,9 +17,9 @@ use serde_json::{json, Value};
 use tracing::{debug, error, info};
 
 use supermgr_core::client::{self, DaemonClient};
-use supermgr_mcp::{available_tools_for_policy, dispatch_with_policy, McpPolicy};
 #[cfg(test)]
 use supermgr_mcp::tool_definitions;
+use supermgr_mcp::{available_tools_for_policy, dispatch_with_policy, McpPolicy};
 
 // ---------------------------------------------------------------------------
 // JSON-RPC types
