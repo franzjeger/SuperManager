@@ -17,4 +17,19 @@ final class WireGuardConnectArgsTests: XCTestCase {
         XCTAssertEqual(args["dns_servers"] as? [String], ["10.0.0.1"])
         XCTAssertEqual(args["native"] as? Bool, true)
     }
+
+    func testKillSwitchFlagSerializesAsSnakeCaseWhenProvided() {
+        let enabled = HelperClient.wgConnectArgs(
+            profileId: "p1",
+            confContent: "[Interface]\n",
+            dnsServers: [],
+            native: false,
+            killSwitch: true
+        )
+        XCTAssertEqual(
+            Set(enabled.keys),
+            ["profile_id", "conf_content", "dns_servers", "native", "kill_switch"]
+        )
+        XCTAssertEqual(enabled["kill_switch"] as? Bool, true)
+    }
 }

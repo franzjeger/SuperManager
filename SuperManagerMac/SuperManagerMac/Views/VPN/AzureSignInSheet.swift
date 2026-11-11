@@ -209,7 +209,8 @@ struct AzureSignInSheet: View {
         // valid bearer token — the real authentication happens
         // via token validation. Production SuperManager Linux
         // uses this exact policy.
-        DebugLog.write("[AzureSignIn] calling helper.ovpnConnect with username=\(token.username), token=\(token.accessToken.count) chars")
+        let wantKillSwitch = appState.vpnProfiles.first(where: { $0.id == profileId })?.killSwitch ?? false
+        DebugLog.write("[AzureSignIn] calling helper.ovpnConnect with username=\(token.username), token=\(token.accessToken.count) chars, killSwitch=\(wantKillSwitch)")
         let connectResult: [String: Any]
         do {
             connectResult = try await HelperClient.shared.ovpnConnect(
@@ -217,7 +218,8 @@ struct AzureSignInSheet: View {
                 config: render.ovpnBody,
                 username: token.username,
                 password: token.accessToken,
-                requireOpenVPN3: true
+                requireOpenVPN3: true,
+                killSwitch: wantKillSwitch
             )
             DebugLog.write("[AzureSignIn] helper.ovpnConnect returned: success=\(connectResult["success"] ?? "?"), message=\(connectResult["message"] ?? "?")")
         } catch {
@@ -246,6 +248,14 @@ struct AzureSignInSheet: View {
             )
             phase = .error(msg)
             return
+        }
+        if wantKillSwitch {
+            let iface = (connectResult["interface"] as? String) ?? "tunnel"
+            ActivityLog.shared.record(
+                profileId: profileId,
+                kind: .killSwitchEngaged,
+                message: "Kill-switch installed on \(iface)"
+            )
         }
 
         // openvpn 2.x daemonises immediately after fork — the

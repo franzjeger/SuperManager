@@ -146,6 +146,9 @@ pub struct ConnectArgs {
     /// before this field existed deserialising cleanly.
     #[serde(default)]
     pub local_id: String,
+    /// Optional per-profile kill-switch intent synced atomically on connect.
+    #[serde(default)]
+    pub kill_switch: Option<bool>,
 }
 
 fn default_full_tunnel() -> bool {
@@ -165,6 +168,7 @@ impl fmt::Debug for ConnectArgs {
             .field("routes", &self.routes)
             .field("dns_servers", &self.dns_servers)
             .field("local_id", &self.local_id)
+            .field("kill_switch", &self.kill_switch)
             .finish()
     }
 }
@@ -542,6 +546,13 @@ impl Strongswan {
 
     pub async fn connect(&mut self, args: &ConnectArgs) -> anyhow::Result<ConnectResult> {
         validate_connect_args(args)?;
+        crate::kill_switch::sync_intent_opt(&args.profile_id, args.kill_switch)?;
+        let want_kill_switch = crate::kill_switch::has_intent(&args.profile_id);
+        let endpoints = if want_kill_switch {
+            crate::kill_switch::resolve_endpoint_host(&args.host, 500)
+        } else {
+            Vec::new()
+        };
         self.resolve()?;
         // The display name only ever travelled the wire to be ignored. Log
         // it: /var/log/supermanager-helper.log is where a failed connect
@@ -717,6 +728,31 @@ impl Strongswan {
             crate::dns::set_vpn_dns(&servers);
         }
 
+        if ok && want_kill_switch {
+            let iface = self.resolve_profile_utun(&args.profile_id).await;
+            if let Err(e) = crate::kill_switch::activate_for_profile(
+                &args.profile_id,
+                &iface,
+                endpoints,
+                crate::kill_switch::KillSwitchBackend::Ikev2,
+            ) {
+                tracing::error!(
+                    profile = %args.profile_id,
+                    "strongswan connect: kill-switch activation failed; tearing down SA: {e:#}"
+                );
+                let _ = self
+                    .disconnect(&DisconnectArgs {
+                        profile_id: args.profile_id.clone(),
+                    })
+                    .await;
+                return Ok(ConnectResult {
+                    ok: false,
+                    message: format!("Kill-switch activation failed (tunnel rolled back): {e:#}"),
+                    narrowed_to: Vec::new(),
+                });
+            }
+        }
+
         let mut message = out.lines().last().unwrap_or("").to_owned();
         if narrowed {
             message = format!(
@@ -749,8 +785,34 @@ impl Strongswan {
         }
     }
 
+    async fn resolve_profile_utun(&self, profile_id: &str) -> String {
+        let Some(swanctl) = self.swanctl.as_ref() else {
+            return String::new();
+        };
+        for _ in 0..12 {
+            if let Ok(Ok(out)) = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                run(swanctl, &["--list-sas"]),
+            )
+            .await
+            {
+                let block = extract_sa_block(&out, profile_id);
+                if let Some(vip) = parse_virtual_ip(&block) {
+                    if let Some((iface, _)) = utun_for_address(&vip) {
+                        if !iface.is_empty() {
+                            return iface;
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        String::new()
+    }
+
     pub async fn disconnect(&mut self, args: &DisconnectArgs) -> anyhow::Result<DisconnectResult> {
         validate_profile_id(&args.profile_id)?;
+        let _ = crate::kill_switch::deactivate_for_profile(&args.profile_id);
         self.resolve()?;
         let swanctl = self
             .swanctl
@@ -2196,6 +2258,7 @@ async fn extract_remote_addr(path: impl AsRef<std::path::Path>) -> anyhow::Resul
 ///   2. Sweep `supermanager-*-secrets.conf` files (belt-and-braces).
 ///   3. Run `swanctl --load-all` so charon sees the empty namespace.
 pub async fn terminate_and_sweep(policy: Policy) {
+    crate::kill_switch::deactivate_backend(crate::kill_switch::KillSwitchBackend::Ikev2);
     // Find the first working swanctl binary permitted by policy. Return early
     // if strongSwan isn't installed — nothing to clean up.
     let Some(swanctl) = locate_swanctl(policy) else {
@@ -2595,6 +2658,7 @@ mod tests {
             routes: Vec::new(),
             dns_servers: Vec::new(),
             local_id: String::new(),
+            kill_switch: None,
         }
     }
 

@@ -189,6 +189,8 @@ fn helper_version_info() -> serde_json::Value {
         "auto_reconnect_list",
         "kill_switch_enable",
         "kill_switch_disable",
+        "kill_switch_set_intent",
+        "kill_switch_status",
         "system_sleep",
         "system_wake",
     ];
@@ -384,6 +386,7 @@ async fn main() -> anyhow::Result<()> {
     // WireGuard tunnels this helper's predecessor set up itself outlive it;
     // supervise them before anything asks about them.
     controllers.wireguard.lock().await.adopt_native().await;
+    kill_switch::reconcile_on_startup();
 
     // Always-on auto-reconnect watchdog. Reads its persisted
     // watch list from /var/lib/supermanager/auto_reconnect.json
@@ -566,6 +569,7 @@ fn is_read_only(method: &str) -> bool {
             | "tailscaled_status"
             | "tailscale_get_dns_fallbacks"
             | "auto_reconnect_list"
+            | "kill_switch_status"
     )
 }
 
@@ -1184,6 +1188,18 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
             }
         }
 
+        "kill_switch_set_intent" => {
+            match serde_json::from_value::<kill_switch::SetIntentArgs>(req.params) {
+                Ok(args) => match blocking(move || kill_switch::set_intent(args)).await {
+                    Ok(s) => ok_json(id, s),
+                    Err(e) => Response::err(id, -32000, format!("kill_switch_set_intent: {e:#}")),
+                },
+                Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
+            }
+        }
+
+        "kill_switch_status" => ok_json(id, blocking(kill_switch::status).await),
+
         // ── System sleep / wake ──────────────────────────────────────────
         //
         // The Swift app fires these when it receives NSWorkspace
@@ -1294,6 +1310,7 @@ mod connection_tests {
             "ovpn_status",
             "ping",
             "tailscaled_status",
+            "kill_switch_status",
         ] {
             assert!(is_read_only(method), "{method}");
         }
@@ -1302,6 +1319,7 @@ mod connection_tests {
             "vpn_disconnect",
             "tailscaled_install",
             "system_sleep",
+            "kill_switch_set_intent",
         ] {
             assert!(!is_read_only(method), "{method}");
         }

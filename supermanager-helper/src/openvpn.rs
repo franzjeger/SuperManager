@@ -79,6 +79,9 @@ pub struct OvpnConnectArgs {
     pub username: Option<String>,
     #[serde(default)]
     pub password: Option<String>,
+    /// Optional per-profile kill-switch intent synced atomically on connect.
+    #[serde(default)]
+    pub kill_switch: Option<bool>,
 }
 
 impl fmt::Debug for OvpnConnectArgs {
@@ -89,6 +92,7 @@ impl fmt::Debug for OvpnConnectArgs {
             .field("require_openvpn3", &self.require_openvpn3)
             .field("username", &self.username)
             .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("kill_switch", &self.kill_switch)
             .finish()
     }
 }
@@ -107,6 +111,8 @@ pub struct OvpnStatusArgs {
 pub struct OvpnConnectResult {
     pub success: bool,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
 }
 
 impl OvpnConnectArgs {
@@ -237,6 +243,8 @@ impl OpenVpn {
     pub async fn connect(&mut self, args: &OvpnConnectArgs) -> anyhow::Result<OvpnConnectResult> {
         validate_connect_args(args)?;
         let safe = validate_profile_id(&args.profile_id)?;
+        crate::kill_switch::sync_intent_opt(&safe, args.kill_switch)?;
+        let want_kill_switch = crate::kill_switch::has_intent(&safe);
         let openvpn = locate_openvpn(self.policy, args.require_openvpn3)?;
         tracing::info!(
             "ovpn_connect: profile={} openvpn={}",
@@ -244,6 +252,11 @@ impl OpenVpn {
             openvpn.display()
         );
         let config_body = args.configuration()?;
+        let endpoints = if want_kill_switch {
+            crate::kill_switch::resolve_openvpn_endpoints(&config_body)
+        } else {
+            Vec::new()
+        };
 
         // Suppress the connectivity watchdog during the connect/handshake window.
         // A full-tunnel OpenVPN/Azure profile installs 0/1+128/1 and briefly has
@@ -526,6 +539,7 @@ impl OpenVpn {
             return Ok(OvpnConnectResult {
                 success: false,
                 message: format!("openvpn refused to start:\n{combined}"),
+                interface: None,
             });
         }
         tracing::info!(
@@ -612,11 +626,76 @@ impl OpenVpn {
                 return Ok(OvpnConnectResult {
                     success: false,
                     message: format!("{reason}\n\nLast 25 log lines:\n{log_tail}"),
+                    interface: None,
                 });
             }
         }
 
         files_guard.keep_config = true;
+        files_guard.keep_auth = is_v3;
+
+        let mut bound_iface: Option<String> = std::fs::read_to_string(&log_path)
+            .ok()
+            .and_then(|body| parse_tunnel_metadata(&body).0);
+
+        if want_kill_switch {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(25);
+            while tokio::time::Instant::now() < deadline {
+                let status = self
+                    .status(&OvpnStatusArgs {
+                        profile_id: safe.clone(),
+                    })
+                    .await?;
+                match status.state {
+                    OvpnState::Connected => {
+                        bound_iface = status.interface;
+                        break;
+                    }
+                    OvpnState::Disconnected => {
+                        let reason = status
+                            .error_reason
+                            .unwrap_or_else(|| "OpenVPN exited before establishing tunnel".into());
+                        let _ = self
+                            .disconnect(&OvpnDisconnectArgs {
+                                profile_id: safe.clone(),
+                            })
+                            .await;
+                        return Ok(OvpnConnectResult {
+                            success: false,
+                            message: reason,
+                            interface: None,
+                        });
+                    }
+                    OvpnState::Connecting | OvpnState::Reconnecting => {
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    }
+                }
+            }
+
+            let iface = bound_iface.as_deref().unwrap_or("");
+            if let Err(e) = crate::kill_switch::activate_for_profile(
+                &safe,
+                iface,
+                endpoints,
+                crate::kill_switch::KillSwitchBackend::Openvpn,
+            ) {
+                tracing::error!(
+                    profile = %safe,
+                    "ovpn_connect: kill-switch activation failed; tearing down tunnel: {e:#}"
+                );
+                let _ = self
+                    .disconnect(&OvpnDisconnectArgs {
+                        profile_id: safe.clone(),
+                    })
+                    .await;
+                return Ok(OvpnConnectResult {
+                    success: false,
+                    message: format!("Kill-switch activation failed (tunnel rolled back): {e:#}"),
+                    interface: None,
+                });
+            }
+        }
+
         Ok(OvpnConnectResult {
             success: true,
             message: if is_v3 {
@@ -624,6 +703,7 @@ impl OpenVpn {
             } else {
                 format!("OpenVPN tunnel '{safe}' up")
             },
+            interface: bound_iface,
         })
     }
 
@@ -637,6 +717,7 @@ impl OpenVpn {
         args: &OvpnDisconnectArgs,
     ) -> anyhow::Result<OvpnDisconnectResult> {
         let safe = validate_profile_id(&args.profile_id)?;
+        let _ = crate::kill_switch::deactivate_for_profile(&safe);
         let pid_path = pid_path_for(&safe);
         let mut killed: Vec<u32> = Vec::new();
 
@@ -1344,6 +1425,7 @@ pub async fn terminate_all() -> usize {
         let _ = std::fs::remove_file(config_path_for(&safe));
         let _ = std::fs::remove_file(auth_path_for(&safe));
     }
+    crate::kill_switch::deactivate_backend(crate::kill_switch::KillSwitchBackend::Openvpn);
     killed
 }
 

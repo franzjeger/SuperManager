@@ -98,6 +98,10 @@ pub struct WgConnectArgs {
     /// before the setting existed.
     #[serde(default = "native_by_default")]
     pub native: bool,
+
+    /// Optional per-profile kill-switch intent synced atomically on connect.
+    #[serde(default)]
+    pub kill_switch: Option<bool>,
 }
 
 fn native_by_default() -> bool {
@@ -224,6 +228,13 @@ impl WireGuard {
     ///      which `utunN` `wireguard-go` actually picked.
     pub async fn connect(&mut self, args: &WgConnectArgs) -> anyhow::Result<WgConnectResult> {
         refuse_hooks(&args.conf_content)?;
+        crate::kill_switch::sync_intent_opt(&args.profile_id, args.kill_switch)?;
+        let want_kill_switch = crate::kill_switch::has_intent(&args.profile_id);
+        let endpoints = if want_kill_switch {
+            crate::kill_switch::resolve_wireguard_endpoints(&args.conf_content)
+        } else {
+            Vec::new()
+        };
         let name = interface_name(&args.profile_id);
         let conf_path = conf_path_for(&name);
 
@@ -257,7 +268,29 @@ impl WireGuard {
         }
 
         if args.native {
-            return Ok(self.native_connect(&name, args).await);
+            let res = self.native_connect(&name, args).await;
+            if res.success && want_kill_switch {
+                let iface = res.interface.as_deref().unwrap_or("");
+                if let Err(e) = crate::kill_switch::activate_for_profile(
+                    &args.profile_id,
+                    iface,
+                    endpoints,
+                    crate::kill_switch::KillSwitchBackend::Wireguard,
+                ) {
+                    tracing::error!(tunnel = %name, "kill-switch activation failed; tearing down tunnel: {e:#}");
+                    let _ = self
+                        .disconnect(&WgDisconnectArgs {
+                            profile_id: args.profile_id.clone(),
+                        })
+                        .await;
+                    return Ok(WgConnectResult {
+                        success: false,
+                        message: format!("Kill-switch activation failed (tunnel rolled back): {e:#}"),
+                        interface: None,
+                    });
+                }
+            }
+            return Ok(res);
         }
         let wg_quick = crate::vpn_runtime::wg_quick(self.policy)?;
 
@@ -326,6 +359,28 @@ impl WireGuard {
             crate::dns::follow_system_resolvers();
         }
 
+        if want_kill_switch {
+            let iface = interface.as_deref().unwrap_or("");
+            if let Err(e) = crate::kill_switch::activate_for_profile(
+                &args.profile_id,
+                iface,
+                endpoints,
+                crate::kill_switch::KillSwitchBackend::Wireguard,
+            ) {
+                tracing::error!(tunnel = %name, "kill-switch activation failed; tearing down tunnel: {e:#}");
+                let _ = self
+                    .disconnect(&WgDisconnectArgs {
+                        profile_id: args.profile_id.clone(),
+                    })
+                    .await;
+                return Ok(WgConnectResult {
+                    success: false,
+                    message: format!("Kill-switch activation failed (tunnel rolled back): {e:#}"),
+                    interface: None,
+                });
+            }
+        }
+
         Ok(WgConnectResult {
             success: true,
             message: format!("WireGuard tunnel '{name}' up"),
@@ -346,6 +401,7 @@ impl WireGuard {
         &mut self,
         args: &WgDisconnectArgs,
     ) -> anyhow::Result<WgDisconnectResult> {
+        let _ = crate::kill_switch::deactivate_for_profile(&args.profile_id);
         let name = interface_name(&args.profile_id);
         if let Some(result) = self.native_down(&name).await {
             let _ = std::fs::remove_file(conf_path_for(&name));

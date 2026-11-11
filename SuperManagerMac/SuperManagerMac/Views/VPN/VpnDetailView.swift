@@ -799,22 +799,17 @@ struct VpnDetailView: View {
             DetailSection(title: "Routing & protection") {
                 VStack(alignment: .leading, spacing: 10) {
                     ToggleGroup {
-                        // Kill switch: connect installs pf rules blocking all
-                        // egress except via the tunnel iface + LAN. Reconnect
-                        // required to take effect on an already-up tunnel;
-                        // toggling OFF tears the rules down immediately.
+                        // Kill switch: connect installs per-profile pf rules blocking
+                        // non-VPN egress (including RFC1918 and other gateways).
+                        // Toggling OFF releases only this profile's lease immediately.
                         ToggleRow(
                             title: "Kill switch",
-                            help: "Block all traffic if the tunnel drops.",
+                            help: appState.killSwitchActiveProfiles.contains(profileId)
+                                ? "Active — non-VPN traffic is blocked while this tunnel is up."
+                                : "Block all non-VPN traffic while this tunnel is connected.",
                             isOn: killSwitchBinding
                         )
                         Divider()
-                        // Helper-side watchdog reconnects this profile every 30s
-                        // if it drops, surviving the GUI being closed (the helper
-                        // is a LaunchDaemon). It replays args from the most recent
-                        // successful connect — so for IKEv2 you must connect once
-                        // manually after enabling it (WireGuard reads the daemon's
-                        // secret store, so it works on first toggle).
                         // Only shown where it can do anything: a
                         // WireGuard profile that actually carries DNS
                         // servers. Offering it elsewhere would be a
@@ -829,25 +824,27 @@ struct VpnDetailView: View {
                             )
                             Divider()
                         }
-                        ToggleRow(
-                            title: "Always on",
-                            help: alwaysOnHelp,
-                            isOn: alwaysOnBinding
-                        )
-                        // Enrolled-but-unarmed is the state the toggle can't
-                        // express on its own: ON, yet the helper has no args
-                        // to replay until the first manual connect succeeds.
-                        // Showing nothing here would present a dead switch as
-                        // protection.
-                        if appState.autoReconnectUnarmed.contains(profileId) {
-                            Label(
-                                "Arms after the next successful connect — "
-                                + "the helper replays the credentials from it.",
-                                systemImage: "exclamationmark.triangle.fill"
+                        if case .azure = profile.config {
+                            Text("Always-on is unavailable for Azure VPN because Entra ID tokens expire and require sign-in refresh.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } else {
+                            ToggleRow(
+                                title: "Always on",
+                                help: alwaysOnHelp,
+                                isOn: alwaysOnBinding
                             )
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                            .fixedSize(horizontal: false, vertical: true)
+                            if appState.autoReconnectUnarmed.contains(profileId) {
+                                Label(
+                                    "Arms after the next successful connect — "
+                                    + "the helper replays the credentials from it.",
+                                    systemImage: "exclamationmark.triangle.fill"
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                     }
 
@@ -1521,9 +1518,17 @@ struct VpnDetailView: View {
                 fullTunnel: profile.fullTunnel,
                 routes: cfg.routes,
                 dnsServers: cfg.dnsServers,
-                localId: cfg.localId
+                localId: cfg.localId,
+                killSwitch: profile.killSwitch
             )
             let ok = (result["ok"] as? Bool) == true
+            if ok && profile.killSwitch {
+                ActivityLog.shared.record(
+                    profileId: profile.id,
+                    kind: .killSwitchEngaged,
+                    message: "Kill-switch installed for IKEv2 tunnel"
+                )
+            }
             if !ok {
                 actionError = (result["message"] as? String) ?? "Connect failed"
                 actionState = "disconnected"
