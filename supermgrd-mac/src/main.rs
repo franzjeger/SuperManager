@@ -12,12 +12,6 @@ use supermgr_engine::secrets::file::FileSecretStore;
 use supermgr_engine::server::EngineServer;
 use supermgr_engine::state::DaemonState;
 
-/// Default socket path for the macOS daemon.
-fn socket_path() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-    format!("{home}/Library/Application Support/SuperManager/supermgrd.sock")
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Initialize tracing (logs to stderr).
@@ -29,8 +23,8 @@ async fn main() -> anyhow::Result<()> {
 
     info!("supermgrd-mac starting");
 
-    // Set up data directory.
-    let data_dir = supermgr_engine::secrets::default_data_dir();
+    // Set up data directory (fails cleanly if HOME is unset or relative).
+    let data_dir = supermgr_core::paths::try_default_data_dir().map_err(anyhow::Error::msg)?;
     std::fs::create_dir_all(&data_dir)?;
     info!("data directory: {}", data_dir.display());
 
@@ -76,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
     // secret as an RPC argument from the GUI (mirroring VPN), this
     // store becomes write-only and eventually unused.
     let secrets: Arc<dyn supermgr_core::keyring::SecretStore> =
-        Arc::new(FileSecretStore::default_path());
+        Arc::new(FileSecretStore::new(data_dir.join("secrets.json")));
 
     // Background recon scheduler is intentionally disabled while the Recon /
     // Engagement UI is inactive so the daemon never triggers unsolicited
@@ -85,7 +79,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Start the JSON-RPC server.
     let server = Arc::new(EngineServer::new(state, secrets));
-    let sock = socket_path();
+    let sock = data_dir
+        .join("supermgrd.sock")
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("data directory path is not valid UTF-8"))?
+        .to_owned();
     info!("starting JSON-RPC server on {sock}");
     server.serve(&sock).await?;
 

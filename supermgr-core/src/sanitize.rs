@@ -4,7 +4,7 @@
 //! URLs, and UTF-8 byte truncation) so all platform daemons and clients enforce
 //! identical rules without drifting.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 
 /// Truncate `s` to at most `max_bytes` UTF-8 bytes without ever splitting a
 /// multi-byte codepoint.
@@ -121,6 +121,79 @@ pub fn validate_inform_url(raw: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Construct a verified HTTPS appliance API URL from `(hostname, port, api_path)`
+/// using `url::Url` path/query setters rather than string concatenation.
+///
+/// Enforces:
+/// - `hostname` passes [`validate_host_or_ip`] (bare IPv6 literals are bracketed).
+/// - `port` is non-zero.
+/// - `api_path` starts with a single `/` (never `//`), contains no backslashes,
+///   fragments (`#`), whitespace, control characters, or dot-traversal segments.
+/// - Re-parsing the constructed URL preserves the `https` scheme, empty userinfo,
+///   and the exact `host` and `port`.
+pub fn build_https_api_url(hostname: &str, port: u16, api_path: &str) -> Result<String, String> {
+    let host_trimmed = hostname.trim();
+    validate_host_or_ip(host_trimmed)?;
+    if port == 0 {
+        return Err("API port must be non-zero".into());
+    }
+    if !api_path.starts_with('/') || api_path.starts_with("//") {
+        return Err("API path must start with a single '/'".into());
+    }
+    if api_path.len() > 2048 {
+        return Err("API path exceeds 2048 characters".into());
+    }
+    if api_path
+        .bytes()
+        .any(|b| b <= b' ' || b == 0x7f || b == b'\\' || b == b'#')
+    {
+        return Err("API path contains disallowed characters".into());
+    }
+
+    let (path_part, query_part) = match api_path.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (api_path, None),
+    };
+    let lower_path = path_part.to_ascii_lowercase();
+    if path_part.split('/').any(|seg| seg == "." || seg == "..")
+        || lower_path.contains("%2e")
+        || lower_path.contains("%2f")
+        || lower_path.contains("%5c")
+    {
+        return Err("API path must not contain relative or encoded path-traversal segments".into());
+    }
+
+    let formatted_host = if host_trimmed.parse::<Ipv6Addr>().is_ok() {
+        format!("[{host_trimmed}]")
+    } else {
+        host_trimmed.to_owned()
+    };
+
+    let mut url = url::Url::parse(&format!("https://{formatted_host}:{port}/"))
+        .map_err(|e| format!("invalid appliance base URL: {e}"))?;
+    let expected_host = url
+        .host()
+        .map(|h| h.to_owned())
+        .ok_or_else(|| "appliance base URL missing host".to_owned())?;
+
+    url.set_path(path_part);
+    url.set_query(query_part);
+
+    let reparsed = url::Url::parse(url.as_str())
+        .map_err(|e| format!("constructed appliance URL is invalid: {e}"))?;
+    if reparsed.scheme() != "https"
+        || !reparsed.username().is_empty()
+        || reparsed.password().is_some()
+        || reparsed.fragment().is_some()
+        || reparsed.host().map(|h| h.to_owned()) != Some(expected_host)
+        || reparsed.port_or_known_default() != Some(port)
+    {
+        return Err("API path altered the target URL authority or port".into());
+    }
+
+    Ok(reparsed.into())
+}
+
 /// POSIX single-quote shell escaping (`'foo'\''bar'`).
 #[must_use]
 pub fn posix_shell_quote(s: &str) -> String {
@@ -185,5 +258,48 @@ mod tests {
     fn posix_shell_quote_escapes_single_quotes() {
         assert_eq!(posix_shell_quote("abc"), "'abc'");
         assert_eq!(posix_shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[test]
+    fn build_https_api_url_preserves_host_and_port_and_rejects_authority_smuggling() {
+        assert_eq!(
+            build_https_api_url("fw.example.com", 8443, "/api/v2/cmdb/system/global?vdom=root")
+                .unwrap(),
+            "https://fw.example.com:8443/api/v2/cmdb/system/global?vdom=root"
+        );
+        assert_eq!(
+            build_https_api_url("192.0.2.10", 443, "/api/core/firmware/status").unwrap(),
+            "https://192.0.2.10/api/core/firmware/status"
+        );
+        assert_eq!(
+            build_https_api_url("2001:db8::1", 4444, "/webconsole/APIController").unwrap(),
+            "https://[2001:db8::1]:4444/webconsole/APIController"
+        );
+        assert_eq!(
+            build_https_api_url("[2001:db8::1]", 4444, "/@literal-segment").unwrap(),
+            "https://[2001:db8::1]:4444/@literal-segment"
+        );
+
+        for bad_path in [
+            "",
+            "api/v2/monitor",
+            "@evil.example/steal",
+            ":80@evil.example/steal",
+            "//evil.example/steal",
+            "/\\evil.example/steal",
+            "/api/v2/../../etc/passwd",
+            "/api/%2e%2e/admin",
+            "/api/%2f/admin",
+            "/api/v2/system#fragment",
+            "/api/v2/system with space",
+            "/api/v2/system\r\nX-Injected: 1",
+        ] {
+            assert!(
+                build_https_api_url("fw.example.com", 443, bad_path).is_err(),
+                "expected {bad_path:?} to be rejected"
+            );
+        }
+        assert!(build_https_api_url("fw.example.com", 0, "/api/v2").is_err());
+        assert!(build_https_api_url("user@evil.example", 443, "/api/v2").is_err());
     }
 }

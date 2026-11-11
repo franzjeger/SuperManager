@@ -276,8 +276,8 @@ config system interface
         set ip {{ site.wan_static_ip }}
         {%- elif site.wan_type == "pppoe" %}
         set mode pppoe
-        set username "{{ extras.pppoe_user | default(value='CHANGE-ME') }}"
-        set password "{{ extras.pppoe_password | default(value='CHANGE-ME') }}"
+        set username "{{ extras.pppoe_user }}"
+        set password "{{ extras.pppoe_password }}"
         {%- else %}
         set mode dhcp
         {%- endif %}
@@ -440,14 +440,11 @@ end
 
 {# ----- 13. Remote-access IKEv2 VPN (MGMT_VPN) ----- #}
 {# Native macOS / iOS / Windows IKEv2 clients connect with PSK +#}
-{# username/password (EAP-MSCHAPv2). Default PSK and user creds  #}
-{# can be overridden via extras.vpn_psk / extras.vpn_admin_user /#}
-{# extras.vpn_admin_password. The hardcoded defaults match the   #}
-{# customer's site-wide bootstrap convention.                    #}
+{# username/password (EAP-MSCHAPv2). Secrets MUST be supplied   #}
+{# explicitly via extras.vpn_psk and extras.vpn_admin_password.  #}
 {#                                                                #}
 {# Best-practice notes:                                           #}
-{#   - PSK ("admin") MUST be rotated periodically and        #}
-{#     replaced with a 32+ character random string for prod.      #}
+{#   - Supply a unique 32+ character random PSK per site.         #}
 {#   - User passwords should ideally come from RADIUS (HQ uses    #}
 {#     FortiAuthenticator); local users here are fine for branch #}
 {#     where MSP-only remote access is the primary use case.      #}
@@ -474,7 +471,7 @@ end
 config user local
     edit "{{ extras.vpn_admin_user | default(value='msp-admin') }}"
         set type password
-        set passwd "{{ extras.vpn_admin_password | default(value='CHANGE-ME-LONG-PASSPHRASE') }}"
+        set passwd "{{ extras.vpn_admin_password }}"
     next
 end
 
@@ -504,7 +501,7 @@ config vpn ipsec phase1-interface
         set save-password enable
         set client-auto-negotiate enable
         set client-keep-alive enable
-        set psksecret "{{ extras.vpn_psk | default(value='admin') }}"
+        set psksecret "{{ extras.vpn_psk }}"
         set dpd on-idle
         set dpd-retrycount 3
         set dpd-retryinterval 30

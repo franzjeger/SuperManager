@@ -87,15 +87,34 @@ impl EngineServer {
         id: u64,
         params: serde_json::Value,
     ) -> Response {
-        let Some(name) = params.get("name").and_then(|v| v.as_str()) else {
+        let Some(raw_name) = params.get("name").and_then(|v| v.as_str()) else {
             return Response::err(id, protocol::INVALID_PARAMS, "missing name".to_owned());
         };
-        let Some(host) = params.get("host").and_then(|v| v.as_str()) else {
+        let name = raw_name.trim();
+        if name.is_empty() || name.chars().any(char::is_control) {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                "invalid profile name".to_owned(),
+            );
+        }
+        let Some(raw_host) = params.get("host").and_then(|v| v.as_str()) else {
             return Response::err(id, protocol::INVALID_PARAMS, "missing host".to_owned());
         };
-        let Some(username) = params.get("username").and_then(|v| v.as_str()) else {
+        let host = raw_host.trim();
+        if let Err(e) = supermgr_core::sanitize::validate_host_or_ip(host) {
+            return Response::err(id, protocol::INVALID_PARAMS, e);
+        }
+        let Some(raw_username) = params.get("username").and_then(|v| v.as_str()) else {
             return Response::err(id, protocol::INVALID_PARAMS, "missing username".to_owned());
         };
+        let username = raw_username.trim();
+        if username.is_empty()
+            || username.starts_with('-')
+            || username.chars().any(char::is_control)
+        {
+            return Response::err(id, protocol::INVALID_PARAMS, "invalid username".to_owned());
+        }
         let full_tunnel = params
             .get("full_tunnel")
             .and_then(serde_json::Value::as_bool)
@@ -114,6 +133,9 @@ impl EngineServer {
             .unwrap_or("")
             .trim()
             .to_owned();
+        if local_id.chars().any(char::is_control) {
+            return Response::err(id, protocol::INVALID_PARAMS, "invalid local_id".to_owned());
+        }
 
         let new_id = uuid::Uuid::new_v4();
         let cfg = FortiGateConfig {
@@ -178,13 +200,30 @@ impl EngineServer {
         let name = params
             .get("name")
             .and_then(|v| v.as_str())
-            .unwrap_or(&existing.name)
-            .to_owned();
+            .map_or_else(|| existing.name.clone(), |s| s.trim().to_owned());
+        if name.is_empty() || name.chars().any(char::is_control) {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                "invalid profile name".to_owned(),
+            );
+        }
         if let Some(h) = params.get("host").and_then(|v| v.as_str()) {
-            cfg.host = h.to_owned();
+            let trimmed = h.trim();
+            if let Err(e) = supermgr_core::sanitize::validate_host_or_ip(trimmed) {
+                return Response::err(id, protocol::INVALID_PARAMS, e);
+            }
+            cfg.host = trimmed.to_owned();
         }
         if let Some(u) = params.get("username").and_then(|v| v.as_str()) {
-            cfg.username = u.to_owned();
+            let trimmed = u.trim();
+            if trimmed.is_empty()
+                || trimmed.starts_with('-')
+                || trimmed.chars().any(char::is_control)
+            {
+                return Response::err(id, protocol::INVALID_PARAMS, "invalid username".to_owned());
+            }
+            cfg.username = trimmed.to_owned();
         }
         if params.get("dns_servers").is_some() {
             cfg.dns_servers = parse_ip_list(params.get("dns_servers"));
@@ -195,7 +234,11 @@ impl EngineServer {
         // Local ID (IKE identity). Present-but-empty is a real edit meaning
         // "clear it", so key on presence, not truthiness. Trim only.
         if let Some(lid) = params.get("local_id").and_then(|v| v.as_str()) {
-            cfg.local_id = lid.trim().to_owned();
+            let trimmed = lid.trim();
+            if trimmed.chars().any(char::is_control) {
+                return Response::err(id, protocol::INVALID_PARAMS, "invalid local_id".to_owned());
+            }
+            cfg.local_id = trimmed.to_owned();
         }
         let full_tunnel = params
             .get("full_tunnel")

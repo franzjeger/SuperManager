@@ -10,28 +10,47 @@
 
 use std::path::PathBuf;
 
-/// Return the default data directory for the current platform.
+/// Validate a Unix `HOME` value: must be present, non-empty, and start with `/`.
 ///
-/// On Linux the answer depends on *who is asking*: the daemon runs as root and
-/// owns `/etc/supermgrd`, while an unprivileged GUI must not try to write
-/// there and gets an XDG path instead. That branch is why this cannot be a
-/// constant.
-#[must_use]
-pub fn default_data_dir() -> PathBuf {
+/// Pure and platform-independent so tests on every CI host exercise the exact
+/// Unix rejection rules without mutating process-wide environment variables.
+pub fn validate_unix_home(home: Option<&str>) -> Result<PathBuf, &'static str> {
+    let h = home
+        .filter(|s| !s.is_empty())
+        .ok_or("HOME environment variable is not set")?;
+    if !h.starts_with('/') {
+        return Err("HOME environment variable must be an absolute path");
+    }
+    Ok(PathBuf::from(h))
+}
+
+/// Resolve the current user's `HOME` directory on Unix, refusing missing or
+/// relative values instead of falling back to a world-writable directory.
+pub fn unix_home_dir() -> Result<PathBuf, &'static str> {
+    let home = std::env::var("HOME").ok();
+    validate_unix_home(home.as_deref())
+}
+
+/// Fallible counterpart to [`default_data_dir`].
+///
+/// Refuses to fall back to `/tmp` when `HOME` (and, on non-root Linux,
+/// `XDG_DATA_HOME`) is unset or relative. Callers at process startup or RPC
+/// boundaries should prefer this so an invalid environment produces an explicit
+/// error rather than placing sockets, state, or secrets in a shared directory.
+pub fn try_default_data_dir() -> Result<PathBuf, &'static str> {
     #[cfg(target_os = "macos")]
     {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-        PathBuf::from(home).join("Library/Application Support/SuperManager")
+        Ok(unix_home_dir()?.join("Library/Application Support/SuperManager"))
     }
 
     #[cfg(target_os = "linux")]
     {
         if nix::unistd::getuid().is_root() {
-            PathBuf::from("/etc/supermgrd")
+            Ok(PathBuf::from("/etc/supermgrd"))
         } else {
             let xdg = std::env::var("XDG_DATA_HOME").ok();
             let home = std::env::var("HOME").ok();
-            xdg_data_base(xdg.as_deref(), home.as_deref()).join("supermgrd")
+            Ok(try_xdg_data_base(xdg.as_deref(), home.as_deref())?.join("supermgrd"))
         }
     }
 
@@ -47,114 +66,126 @@ pub fn default_data_dir() -> PathBuf {
     // than each having a private answer.
     #[cfg(target_os = "windows")]
     {
-        std::env::var_os("PROGRAMDATA")
+        Ok(std::env::var_os("PROGRAMDATA")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
-            .join("SuperManager")
+            .join("SuperManager"))
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-        PathBuf::from(home).join(".supermanager")
+        Ok(unix_home_dir()?.join(".supermanager"))
     }
 }
 
-/// Resolve the XDG data base directory from the raw `XDG_DATA_HOME` and
-/// `HOME` values, per the XDG Base Directory spec.
+/// Return the default data directory for the current platform.
 ///
-/// `$XDG_DATA_HOME` is honoured only when it is a non-empty, ABSOLUTE
-/// path; otherwise the fallback is `$HOME/.local/share` (and `/tmp` when
-/// even `HOME` is unset, matching the rest of this module).
+/// On Linux the answer depends on *who is asking*: the daemon runs as root and
+/// owns `/etc/supermgrd`, while an unprivileged GUI must not try to write
+/// there and gets an XDG path instead. That branch is why this cannot be a
+/// constant.
 ///
-/// The subtle part is the empty string. `std::env::var` returns `Ok("")`
-/// for a set-but-empty variable, which several login/session setups
-/// export. The old code did `var("XDG_DATA_HOME").map(PathBuf::from)`, so
-/// an empty value skipped the fallback and produced a RELATIVE data dir —
-/// and then the GUI and the daemon disagreed on where the data lived the
-/// moment either was started from a different working directory, the
-/// exact divergence this module exists to prevent. The spec says to
-/// ignore a non-absolute value, so that is what restores an absolute path.
+/// # Panics
 ///
-/// Pure and platform-independent so the rule is tested on every CI host,
-/// not only a Linux one — the bug lived in a `cfg(target_os = "linux")`
-/// block that a macOS test runner never compiled. Compiled where it is
-/// used: the Linux data-dir branch, and the tests on any host.
-#[cfg(any(target_os = "linux", test))]
-fn xdg_data_base(xdg_data_home: Option<&str>, home: Option<&str>) -> PathBuf {
-    if let Some(x) = xdg_data_home {
+/// Panics on Unix when `HOME` (and, on non-root Linux, `XDG_DATA_HOME`) is
+/// unset or not an absolute path. Never falls back to `/tmp`.
+#[must_use]
+pub fn default_data_dir() -> PathBuf {
+    try_default_data_dir()
+        .expect("cannot resolve SuperManager data directory: HOME must be set to an absolute path")
+}
+
+/// Resolve an XDG base directory (`XDG_DATA_HOME` or `XDG_STATE_HOME`) per the
+/// XDG Base Directory spec, falling back to `$HOME/<fallback_rel>` when the XDG
+/// variable is unset, empty, or relative, and failing if `HOME` is also unset
+/// or relative.
+pub fn try_xdg_base(
+    xdg_var: Option<&str>,
+    home: Option<&str>,
+    fallback_rel: &str,
+) -> Result<PathBuf, &'static str> {
+    if let Some(x) = xdg_var {
         // Unix-absolute, checked as `starts_with('/')` rather than
         // `Path::is_absolute()`. XDG is a Unix concept and an absolute XDG
         // path always starts with `/`; `Path::is_absolute()` would apply
         // the host's rules, so on a Windows test runner "/data" is not
-        // absolute and this branch would wrongly fall through. The value
-        // is only ever consumed on Linux, so Unix semantics are the
-        // correct ones to apply on every platform that compiles this.
+        // absolute and this branch would wrongly fall through.
         if x.starts_with('/') {
-            return PathBuf::from(x);
+            return Ok(PathBuf::from(x));
         }
     }
-    let home = home.filter(|h| !h.is_empty()).unwrap_or("/tmp");
-    PathBuf::from(home).join(".local/share")
+    Ok(validate_unix_home(home)?.join(fallback_rel))
+}
+
+/// Resolve the XDG data base directory (`$XDG_DATA_HOME` or `$HOME/.local/share`).
+pub fn try_xdg_data_base(
+    xdg_data_home: Option<&str>,
+    home: Option<&str>,
+) -> Result<PathBuf, &'static str> {
+    try_xdg_base(xdg_data_home, home, ".local/share")
+}
+
+/// Resolve the XDG state base directory (`$XDG_STATE_HOME` or `$HOME/.local/state`).
+pub fn try_xdg_state_base(
+    xdg_state_home: Option<&str>,
+    home: Option<&str>,
+) -> Result<PathBuf, &'static str> {
+    try_xdg_base(xdg_state_home, home, ".local/state")
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
     fn xdg_absolute_is_used() {
         assert_eq!(
-            xdg_data_base(Some("/data"), Some("/home/x")),
-            PathBuf::from("/data")
+            try_xdg_data_base(Some("/data"), Some("/home/x")),
+            Ok(PathBuf::from("/data"))
+        );
+        // Valid absolute XDG_DATA_HOME succeeds even when HOME is unset.
+        assert_eq!(
+            try_xdg_data_base(Some("/data"), None),
+            Ok(PathBuf::from("/data"))
         );
     }
 
-    /// The bug: a set-but-empty `XDG_DATA_HOME` must fall back, not yield "".
+    /// A set-but-empty `XDG_DATA_HOME` must fall back to `$HOME/.local/share`.
     #[test]
     fn xdg_empty_falls_back_to_home() {
         assert_eq!(
-            xdg_data_base(Some(""), Some("/home/x")),
-            PathBuf::from("/home/x/.local/share")
+            try_xdg_data_base(Some(""), Some("/home/x")),
+            Ok(PathBuf::from("/home/x/.local/share"))
         );
     }
 
     #[test]
     fn xdg_unset_falls_back_to_home() {
         assert_eq!(
-            xdg_data_base(None, Some("/home/x")),
-            PathBuf::from("/home/x/.local/share")
+            try_xdg_data_base(None, Some("/home/x")),
+            Ok(PathBuf::from("/home/x/.local/share"))
         );
     }
 
-    /// XDG spec: a relative `XDG_DATA_HOME` is ignored — honouring it would
-    /// reintroduce the relative-path divergence by another door.
+    /// XDG spec: a relative `XDG_DATA_HOME` is ignored.
     #[test]
     fn xdg_relative_is_ignored() {
         assert_eq!(
-            xdg_data_base(Some("relative/share"), Some("/home/x")),
-            PathBuf::from("/home/x/.local/share")
+            try_xdg_data_base(Some("relative/share"), Some("/home/x")),
+            Ok(PathBuf::from("/home/x/.local/share"))
         );
     }
 
     #[test]
-    fn xdg_and_home_both_empty_is_still_absolute() {
-        let p = xdg_data_base(Some(""), None);
-        // Unix-absolute checked directly: `Path::is_absolute()` applies the
-        // host's rules, and a Windows test runner does not consider a
-        // drive-less `/tmp/...` absolute — but this value is only ever used
-        // on Linux, where it is.
-        assert!(p.to_string_lossy().starts_with('/'), "{p:?}");
-        assert_eq!(p, PathBuf::from("/tmp/.local/share"));
+    fn xdg_and_home_both_empty_or_relative_is_refused() {
+        assert!(try_xdg_data_base(Some(""), None).is_err());
+        assert!(try_xdg_data_base(None, Some("")).is_err());
+        assert!(try_xdg_data_base(None, Some("relative/home")).is_err());
+        assert!(try_xdg_state_base(Some("relative/state"), None).is_err());
+        assert!(validate_unix_home(None).is_err());
+        assert!(validate_unix_home(Some("")).is_err());
+        assert!(validate_unix_home(Some("tmp/user")).is_err());
     }
-
-    #[test]
-    fn xdg_home_empty_string_treated_as_unset() {
-        assert_eq!(
-            xdg_data_base(None, Some("")),
-            PathBuf::from("/tmp/.local/share")
-        );
-    }
-    use super::*;
 
     #[test]
     fn the_path_is_absolute_and_named() {

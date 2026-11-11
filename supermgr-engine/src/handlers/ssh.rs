@@ -311,14 +311,21 @@ impl EngineServer {
             .get("directory")
             .and_then(|v| v.as_str())
             .unwrap_or("~/.ssh");
-        let expanded = if directory.starts_with("~/") {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-            format!("{}/{}", home, &directory[2..])
+        let expanded = if let Some(rest) = directory.strip_prefix("~/") {
+            let home = match supermgr_core::paths::unix_home_dir() {
+                Ok(h) => h,
+                Err(e) => return Response::err(id, protocol::INTERNAL_ERROR, e.to_owned()),
+            };
+            home.join(rest)
+        } else if directory == "~" {
+            match supermgr_core::paths::unix_home_dir() {
+                Ok(h) => h,
+                Err(e) => return Response::err(id, protocol::INTERNAL_ERROR, e.to_owned()),
+            }
         } else {
-            directory.to_owned()
+            std::path::PathBuf::from(directory)
         };
-        let candidates =
-            supermgr_core::ssh::import::scan_ssh_directory(std::path::Path::new(&expanded));
+        let candidates = supermgr_core::ssh::import::scan_ssh_directory(&expanded);
         match serde_json::to_value(&candidates) {
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),

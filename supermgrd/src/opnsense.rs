@@ -115,8 +115,7 @@ pub async fn request(
     path: &str,
     body: &str,
 ) -> Result<Response, String> {
-    supermgr_core::sanitize::validate_host_or_ip(hostname)?;
-    let url = format!("https://{hostname}:{port}{path}");
+    let url = supermgr_core::sanitize::build_https_api_url(hostname, port, path)?;
     debug!("opnsense::request {method} {url}");
 
     let client = http_client(verify_tls).map_err(|e| format!("HTTP client build failed: {e}"))?;

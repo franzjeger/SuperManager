@@ -9,13 +9,13 @@ use std::path::PathBuf;
 use chrono::Local;
 
 /// Determine the path to the audit log file.
-fn audit_path() -> PathBuf {
+fn audit_path() -> Option<PathBuf> {
     if nix::unistd::getuid().is_root() {
-        PathBuf::from("/var/log/supermgrd/audit.log")
+        Some(PathBuf::from("/var/log/supermgrd/audit.log"))
     } else {
-        // dev mode
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        PathBuf::from(home).join(".local/share/supermgrd/audit.log")
+        supermgr_core::paths::try_default_data_dir()
+            .ok()
+            .map(|dir| dir.join("audit.log"))
     }
 }
 
@@ -24,7 +24,9 @@ fn audit_path() -> PathBuf {
 /// Creates the parent directory if it does not exist. Errors are silently
 /// ignored — audit logging should never cause an operation to fail.
 pub fn log_event(action: &str, detail: &str) {
-    let path = audit_path();
+    let Some(path) = audit_path() else {
+        return;
+    };
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }

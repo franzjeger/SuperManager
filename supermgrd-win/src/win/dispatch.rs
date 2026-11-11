@@ -579,12 +579,28 @@ async fn handle_import_forticlient_sslvpn(
     use supermgr_core::vpn::profile::{ForticlientSslvpnConfig, Profile, ProfileConfig, SecretRef};
 
     let name = arg_str(args, "name")?.trim();
-    if name.is_empty() {
-        return Err(RpcError::Other("profile name must not be empty".into()));
+    if name.is_empty() || name.chars().any(char::is_control) {
+        return Err(RpcError::Other(
+            "profile name must be non-empty and contain no control characters".into(),
+        ));
     }
-    let host = arg_str(args, "host")?;
+    let host = arg_str(args, "host")?.trim();
+    supermgr_core::sanitize::validate_host_or_ip(host).map_err(RpcError::Other)?;
     let port = args.get("port").and_then(Value::as_u64).unwrap_or(443) as u16;
-    let username = arg_str(args, "username")?;
+    if port == 0 {
+        return Err(RpcError::Other("port must be non-zero".into()));
+    }
+    let username = arg_str(args, "username")?.trim();
+    if username.is_empty()
+        || username.starts_with('-')
+        || username.starts_with('/')
+        || username.chars().any(char::is_control)
+    {
+        return Err(RpcError::Other(
+            "username must be non-empty, not start with '-' or '/', and contain no control characters"
+                .into(),
+        ));
+    }
     let password = arg_str(args, "password")?;
     let trusted_cert = args
         .get("trusted_cert")
@@ -660,11 +676,24 @@ async fn handle_import_fortigate(
     use supermgr_core::vpn::profile::{FortiGateConfig, Profile, ProfileConfig, SecretRef};
 
     let name = arg_str(args, "name")?.trim();
-    if name.is_empty() {
-        return Err(RpcError::Other("profile name must not be empty".into()));
+    if name.is_empty() || name.chars().any(char::is_control) {
+        return Err(RpcError::Other(
+            "profile name must be non-empty and contain no control characters".into(),
+        ));
     }
-    let host = arg_str(args, "host")?;
-    let username = arg_str(args, "username")?;
+    let host = arg_str(args, "host")?.trim();
+    supermgr_core::sanitize::validate_host_or_ip(host).map_err(RpcError::Other)?;
+    let username = arg_str(args, "username")?.trim();
+    if username.is_empty()
+        || username.starts_with('-')
+        || username.starts_with('/')
+        || username.chars().any(char::is_control)
+    {
+        return Err(RpcError::Other(
+            "username must be non-empty, not start with '-' or '/', and contain no control characters"
+                .into(),
+        ));
+    }
     let password = arg_str(args, "password")?;
     let psk = args.get("psk").and_then(Value::as_str).unwrap_or("");
 

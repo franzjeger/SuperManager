@@ -77,13 +77,11 @@ async fn main() -> anyhow::Result<()> {
     let log_dir = if nix::unistd::getuid().is_root() {
         PathBuf::from("/var/log/supermgrd")
     } else {
-        let base = std::env::var("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-                PathBuf::from(home).join(".local/state")
-            });
-        base.join("supermgrd")
+        let xdg_state = std::env::var("XDG_STATE_HOME").ok();
+        let home = std::env::var("HOME").ok();
+        supermgr_core::paths::try_xdg_state_base(xdg_state.as_deref(), home.as_deref())
+            .map_err(anyhow::Error::msg)?
+            .join("supermgrd")
     };
 
     let log_path = log_dir.join("supermgrd.log");
@@ -129,23 +127,13 @@ async fn main() -> anyhow::Result<()> {
     // `SUPERMGRD_PROFILE_DIR` always wins; otherwise the directory is chosen
     // based on effective UID so the daemon works for both production (root,
     // system path) and development (non-root, XDG user path).
-    let profile_dir = std::env::var("SUPERMGRD_PROFILE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            if nix::unistd::getuid().is_root() {
-                PathBuf::from(SYSTEM_PROFILE_DIR)
-            } else {
-                // Non-root development mode: use XDG data home so no
-                // privileged filesystem access is required.
-                let base = std::env::var("XDG_DATA_HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|_| {
-                        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-                        PathBuf::from(home).join(".local/share")
-                    });
-                base.join("supermgrd/profiles")
-            }
-        });
+    let profile_dir = match std::env::var("SUPERMGRD_PROFILE_DIR") {
+        Ok(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ if nix::unistd::getuid().is_root() => PathBuf::from(SYSTEM_PROFILE_DIR),
+        _ => supermgr_core::paths::try_default_data_dir()
+            .map_err(anyhow::Error::msg)?
+            .join("profiles"),
+    };
 
     info!("profile directory: {}", profile_dir.display());
 

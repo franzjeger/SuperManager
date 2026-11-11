@@ -4462,6 +4462,9 @@ impl DaemonService {
             )
         };
 
+        let url = supermgr_core::sanitize::build_https_api_url(&hostname, api_port, &path)
+            .map_err(fdo::Error::InvalidArgs)?;
+
         let token_bytes = secrets::retrieve_secret(&token_label)
             .await
             .map_err(|e| fdo::Error::Failed(format!("retrieve API token: {e}")))?;
@@ -4469,7 +4472,6 @@ impl DaemonService {
             .map_err(|e| fdo::Error::Failed(format!("invalid API token encoding: {e}")))?;
         let token = token.trim().to_owned();
 
-        let url = format!("https://{hostname}:{api_port}{path}");
         info!("fortigate_api: {method} {url}");
         crate::audit::log_event("FG_API", &format!("{method} {url}"));
 
@@ -6451,8 +6453,13 @@ impl DaemonService {
     async fn compliance_get_run(&self, host_id: &str, run_id: &str) -> fdo::Result<String> {
         let id =
             Uuid::parse_str(host_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
-        let run = supermgr_core::compliance::load_run(&id.simple().to_string(), run_id)
-            .map_err(|e| fdo::Error::Failed(format!("read run: {e:#}")))?;
+        let run_uuid = Uuid::parse_str(run_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid run_id UUID".into()))?;
+        let run = supermgr_core::compliance::load_run(
+            &id.simple().to_string(),
+            &run_uuid.simple().to_string(),
+        )
+        .map_err(|e| fdo::Error::Failed(format!("read run: {e:#}")))?;
         serde_json::to_string(&run).map_err(|e| fdo::Error::Failed(format!("serialise run: {e}")))
     }
 
@@ -6544,9 +6551,13 @@ impl DaemonService {
     async fn compliance_drift(&self, host_id: &str, run_id: &str) -> fdo::Result<String> {
         let id =
             Uuid::parse_str(host_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
-        let report =
-            supermgr_core::compliance::drift_against_previous(&id.simple().to_string(), run_id)
-                .map_err(|e| fdo::Error::Failed(format!("compute drift: {e:#}")))?;
+        let run_uuid = Uuid::parse_str(run_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid run_id UUID".into()))?;
+        let report = supermgr_core::compliance::drift_against_previous(
+            &id.simple().to_string(),
+            &run_uuid.simple().to_string(),
+        )
+        .map_err(|e| fdo::Error::Failed(format!("compute drift: {e:#}")))?;
         serde_json::to_string(&report)
             .map_err(|e| fdo::Error::Failed(format!("serialise drift: {e}")))
     }

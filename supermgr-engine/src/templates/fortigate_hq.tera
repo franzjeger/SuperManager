@@ -55,7 +55,7 @@ end
 config user radius
     edit "fac-primary"
         set server "{{ extras.radius_server_ip | default(value='10.0.1.10') }}"
-        set secret "{{ extras.radius_secret | default(value='CHANGE-ME') }}"
+        set secret "{{ extras.radius_secret }}"
         set auth-type ms_chap_v2
         set timeout 10
     next
@@ -415,7 +415,7 @@ config vpn ipsec phase1-interface
         set proposal aes256gcm-prfsha384
         set dhgrp 20
         set remote-gw {{ extras.s2s_peer_ip }}
-        set psksecret "{{ extras.s2s_psk | default(value='CHANGE-ME') }}"
+        set psksecret "{{ extras.s2s_psk }}"
         set dpd on-idle
     next
 end
@@ -588,7 +588,7 @@ config vpn ipsec phase1-interface
         set save-password enable
         set client-auto-negotiate enable
         set client-keep-alive enable
-        set psksecret "{{ extras.vpn_psk | default(value='admin') }}"
+        set psksecret "{{ extras.vpn_psk }}"
         set dpd on-idle
         set dpd-retrycount 3
         set dpd-retryinterval 30
@@ -703,7 +703,11 @@ end
 {# ----- 16. SSH/Web admin restricted to internal admin VLAN ----- #}
 config system admin
     edit "admin"
-        set trusthost1 {{ vlans | first | default(value='') }}
+        {%- if vlans %}
+        set trusthost1 {{ vlans | first | get(key='subnet') }}
+        {%- elif site.lan_base %}
+        set trusthost1 {{ site.lan_base }}
+        {%- endif %}
     next
 end
 

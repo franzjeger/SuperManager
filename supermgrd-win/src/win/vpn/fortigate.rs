@@ -309,10 +309,43 @@ fn eap_config_xml() -> &'static str {
     )
 }
 
-/// Register the VPN connection. Idempotent — replaces any existing
-/// connection with the same name first.
-///
-/// Register an IKEv2 + EAP-MSCHAPv2 connection.
+fn invalid_input(msg: impl Into<String>) -> VpnError {
+    VpnError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        msg.into(),
+    ))
+}
+
+fn validate_connection_name(conn_name: &str) -> Result<(), VpnError> {
+    supermgr_core::sanitize::validate_safe_ident(conn_name, "VPN connection name")
+        .map_err(invalid_input)
+}
+
+fn validate_connection_inputs(conn_name: &str, host: &str) -> Result<(), VpnError> {
+    validate_connection_name(conn_name)?;
+    supermgr_core::sanitize::validate_host_or_ip(host).map_err(invalid_input)
+}
+
+fn validate_rasdial_username(username: &str) -> Result<(), VpnError> {
+    if username.is_empty() {
+        return Err(invalid_input("VPN username must not be empty"));
+    }
+    if username.len() > 256 {
+        return Err(invalid_input("VPN username exceeds 256 characters"));
+    }
+    if username.starts_with('-') || username.starts_with('/') {
+        return Err(invalid_input("VPN username must not start with '-' or '/'"));
+    }
+    if username.chars().any(char::is_control) {
+        return Err(invalid_input(
+            "VPN username must not contain control characters",
+        ));
+    }
+    Ok(())
+}
+
+/// Register an IKEv2 + EAP-MSCHAPv2 connection. Idempotent — replaces any
+/// existing connection with the same name first.
 ///
 /// Windows IKEv2 only accepts `Eap` or `MachineCertificate` — `MSChapv2` is
 /// rejected with WIN32 87.  But bare `-AuthenticationMethod Eap` without an
@@ -322,44 +355,48 @@ fn eap_config_xml() -> &'static str {
 ///
 /// Fix: supply `-EapConfigXmlStream` with EAP type 26 (MS-CHAPv2).  That pins
 /// the inner auth method so `rasdial` can feed credentials non-interactively.
+///
+/// Arguments are passed through process environment variables rather than
+/// interpolated into the PowerShell script text so untrusted strings never
+/// reach the PowerShell parser.
 async fn register_connection(conn_name: &str, cfg: &FortiGateConfig) -> Result<(), VpnError> {
+    validate_connection_inputs(conn_name, &cfg.host)?;
     let _ = remove_connection(conn_name).await;
 
-    // All attribute values use double quotes, which are safe inside the
-    // PowerShell single-quoted string wrapper.
-    let eap_xml = eap_config_xml();
-
-    let cmd = format!(
-        "$xml = [xml]'{eap_xml}'; \
-         Add-VpnConnection \
-           -Name '{name}' \
-           -ServerAddress '{host}' \
-           -TunnelType Ikev2 \
-           -EncryptionLevel Required \
-           -AuthenticationMethod Eap \
-           -EapConfigXmlStream $xml \
-           -RememberCredential \
-           -AllUserConnection \
-           -Force",
-        eap_xml = eap_xml,
-        name = ps_escape(conn_name),
-        host = ps_escape(&cfg.host),
-    );
-    run_powershell(&cmd).await
+    const SCRIPT: &str = "$xml = [xml]$env:SM_VPN_EAP_XML; \
+        Add-VpnConnection \
+          -Name $env:SM_VPN_NAME \
+          -ServerAddress $env:SM_VPN_HOST \
+          -TunnelType Ikev2 \
+          -EncryptionLevel Required \
+          -AuthenticationMethod Eap \
+          -EapConfigXmlStream $xml \
+          -RememberCredential \
+          -AllUserConnection \
+          -Force";
+    run_powershell(
+        SCRIPT,
+        &[
+            ("SM_VPN_EAP_XML", eap_config_xml()),
+            ("SM_VPN_NAME", conn_name),
+            ("SM_VPN_HOST", cfg.host.trim()),
+        ],
+    )
+    .await
 }
 
 /// Tear the registered connection down. Best effort — if it doesn't
 /// exist the cmdlet errors, which we ignore.
 async fn remove_connection(conn_name: &str) -> Result<(), VpnError> {
-    let cmd = format!(
-        "Remove-VpnConnection -Name '{name}' -AllUserConnection -Force",
-        name = ps_escape(conn_name),
-    );
-    let _ = run_powershell(&cmd).await;
+    validate_connection_name(conn_name)?;
+    const SCRIPT: &str = "Remove-VpnConnection -Name $env:SM_VPN_NAME -AllUserConnection -Force";
+    let _ = run_powershell(SCRIPT, &[("SM_VPN_NAME", conn_name)]).await;
     Ok(())
 }
 
 async fn rasdial_connect(conn_name: &str, username: &str, password: &str) -> Result<(), VpnError> {
+    validate_connection_name(conn_name)?;
+    validate_rasdial_username(username)?;
     let output = Command::new("rasdial.exe")
         .arg(conn_name)
         .arg(username)
@@ -452,13 +489,13 @@ async fn rasdial_disconnect(conn_name: &str) -> Result<(), VpnError> {
 /// PowerShell emits `(Get-VpnConnection ...).ConnectionStatus` as a
 /// bare string (e.g. `Connected`, `Disconnected`, `Connecting`).
 async fn get_connection_status(conn_name: &str) -> Result<String, VpnError> {
-    let cmd = format!(
-        "(Get-VpnConnection -AllUserConnection -Name '{name}' -ErrorAction Stop).ConnectionStatus",
-        name = ps_escape(conn_name),
-    );
+    validate_connection_name(conn_name)?;
+    const SCRIPT: &str =
+        "(Get-VpnConnection -AllUserConnection -Name $env:SM_VPN_NAME -ErrorAction Stop).ConnectionStatus";
     let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command"])
-        .arg(&cmd)
+        .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+        .env("SM_VPN_NAME", conn_name)
+        .kill_on_drop(true)
         .output()
         .await
         .map_err(VpnError::Io)?;
@@ -472,13 +509,14 @@ async fn get_connection_status(conn_name: &str) -> Result<String, VpnError> {
     }
 }
 
-async fn run_powershell(cmd: &str) -> Result<(), VpnError> {
-    let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command"])
-        .arg(cmd)
-        .output()
-        .await
-        .map_err(VpnError::Io)?;
+async fn run_powershell(script: &str, envs: &[(&str, &str)]) -> Result<(), VpnError> {
+    let mut cmd = Command::new("powershell.exe");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .kill_on_drop(true);
+    for &(k, v) in envs {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().await.map_err(VpnError::Io)?;
     if output.status.success() {
         Ok(())
     } else {
@@ -487,13 +525,6 @@ async fn run_powershell(cmd: &str) -> Result<(), VpnError> {
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
     }
-}
-
-/// Escape single quotes for PowerShell single-quoted string literals.
-/// Inside single quotes the only special character is `'`, which is
-/// escaped by doubling it.
-fn ps_escape(s: &str) -> String {
-    s.replace('\'', "''")
 }
 
 async fn tear_down(active: FgActive) {
@@ -556,5 +587,39 @@ mod tests {
     #[test]
     fn silence_still_yields_the_error_number() {
         assert!(message(ras_error(4242, "")).contains("4242"));
+    }
+
+    #[test]
+    fn connection_inputs_reject_powershell_and_cli_injection_payloads() {
+        let valid_conn = super::connection_name(&uuid::Uuid::new_v4());
+        assert!(super::validate_connection_inputs(&valid_conn, "vpn.example.com").is_ok());
+        assert!(super::validate_connection_inputs(&valid_conn, "203.0.113.10").is_ok());
+        assert!(super::validate_connection_inputs(&valid_conn, "2001:db8::1").is_ok());
+
+        for bad_host in [
+            "",
+            "-ServerAddress",
+            "vpn.example.com'; Start-Process calc; '",
+            "vpn.example.com$(whoami)",
+            "vpn.example.com\nInvoke-Expression",
+            "https://vpn.example.com",
+        ] {
+            assert!(
+                super::validate_connection_inputs(&valid_conn, bad_host).is_err(),
+                "accepted bad host {bad_host:?}"
+            );
+        }
+
+        for bad_conn in ["", "-Force", "conn'name", "conn name", "../conn"] {
+            assert!(
+                super::validate_connection_inputs(bad_conn, "vpn.example.com").is_err(),
+                "accepted bad connection name {bad_conn:?}"
+            );
+        }
+
+        assert!(super::validate_rasdial_username("corp\\alice").is_ok());
+        assert!(super::validate_rasdial_username("/disconnect").is_err());
+        assert!(super::validate_rasdial_username("-flag").is_err());
+        assert!(super::validate_rasdial_username("alice\nbob").is_err());
     }
 }

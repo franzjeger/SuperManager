@@ -130,8 +130,8 @@ pub async fn xml_request(
     creds: &Credentials,
     inner_xml: &str,
 ) -> Result<Response, String> {
-    supermgr_core::sanitize::validate_host_or_ip(hostname)?;
-    let url = format!("https://{hostname}:{port}/webconsole/APIController");
+    let url =
+        supermgr_core::sanitize::build_https_api_url(hostname, port, "/webconsole/APIController")?;
     let envelope = wrap_request(creds, inner_xml);
     debug!("sophos::xml_request -> {url}");
 

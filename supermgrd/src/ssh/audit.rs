@@ -9,18 +9,10 @@ use std::path::PathBuf;
 use supermgr_core::ssh::audit::AuditEntry;
 
 /// Determine the path to the SSH audit log file.
-fn audit_log_path() -> PathBuf {
-    if nix::unistd::getuid().is_root() {
-        PathBuf::from("/etc/supermgrd/ssh-audit.log")
-    } else {
-        let base = std::env::var("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-                PathBuf::from(home).join(".local/share")
-            });
-        base.join("supermgrd/ssh-audit.log")
-    }
+fn audit_log_path() -> Option<PathBuf> {
+    supermgr_core::paths::try_default_data_dir()
+        .ok()
+        .map(|dir| dir.join("ssh-audit.log"))
 }
 
 /// Append an audit entry to the log file.
@@ -30,7 +22,9 @@ fn audit_log_path() -> PathBuf {
 pub fn append_audit(entry: &AuditEntry) {
     use std::io::Write;
 
-    let path = audit_log_path();
+    let Some(path) = audit_log_path() else {
+        return;
+    };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
