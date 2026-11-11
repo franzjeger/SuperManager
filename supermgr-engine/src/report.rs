@@ -357,7 +357,10 @@ fn title_block(out: &mut String, input: &ReportInput<'_>) {
             out.push_str(&format!("| Customer | `{}` |\n", escape_md_code(slug)));
         }
     }
-    out.push_str(&format!("| Engagement ID | `{}` |\n", escape_md_code(&e.id)));
+    out.push_str(&format!(
+        "| Engagement ID | `{}` |\n",
+        escape_md_code(&e.id)
+    ));
     out.push_str(&format!(
         "| Started | {} |\n",
         e.started_at.format("%Y-%m-%d")
@@ -733,8 +736,14 @@ mod tests {
         };
 
         let md = render_markdown(&input).expect("render markdown");
-        assert!(!md.contains("<script>"), "raw <script> leaked into markdown:\n{md}");
-        assert!(!md.contains("</script>"), "raw </script> leaked into markdown:\n{md}");
+        assert!(
+            !md.contains("<script>"),
+            "raw <script> leaked into markdown:\n{md}"
+        );
+        assert!(
+            !md.contains("</script>"),
+            "raw </script> leaked into markdown:\n{md}"
+        );
         assert!(!md.contains("<img"), "raw <img leaked into markdown:\n{md}");
         assert!(
             !md.contains("![](file://"),

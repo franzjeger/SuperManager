@@ -471,8 +471,7 @@ mod tests {
         // handshake header but stop short of the 2-byte legacy_version at
         // payload[9..11]. Must return empty without panicking.
         let payload_9 = [22u8, 0x03, 0x01, 0, 5, 1, 0, 0, 1];
-        let frame_9 =
-            build_eth_ipv4_tcp([192, 0, 2, 5], 43021, [203, 0, 113, 10], 443, &payload_9);
+        let frame_9 = build_eth_ipv4_tcp([192, 0, 2, 5], 43021, [203, 0, 113, 10], 443, &payload_9);
         assert!(parse_pcap_for_clienthellos(&pcap_with_one_packet(&frame_9)).is_empty());
 
         let payload_10 = [22u8, 0x03, 0x01, 0, 5, 1, 0, 0, 1, 0x03];

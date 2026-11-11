@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use supermgr_core::host::Host;
@@ -70,6 +70,10 @@ pub struct DaemonState {
     /// fingerprint mismatch, accept on match. Wrapped in `Arc` so the
     /// (sync) handler can hold a reference cheaply across the russh task.
     pub known_hosts: Arc<KnownHostsStore>,
+
+    /// Loud persistence errors recorded when corrupt TOML records are
+    /// quarantined during startup (`P2-24`).
+    pub load_errors: Vec<String>,
 }
 
 impl DaemonState {
@@ -102,6 +106,7 @@ impl DaemonState {
             webhook_on_host_down: true,
             webhook_on_vpn_disconnect: false,
             known_hosts,
+            load_errors: Vec::new(),
         })
     }
 
@@ -112,6 +117,7 @@ impl DaemonState {
     /// Load all `.toml` profile files from `profile_dir`.
     pub fn load_profiles(&mut self) -> anyhow::Result<()> {
         let mut relocated = Vec::new();
+        let mut quarantined_errors = Vec::new();
         load_toml_dir(&self.profile_dir, |text, path| {
             match toml::from_str::<Profile>(&text) {
                 Ok(mut profile) => {
@@ -122,10 +128,11 @@ impl DaemonState {
                     self.profiles.insert(profile.id, profile);
                 }
                 Err(e) => {
-                    warn!("skipping malformed profile {:?}: {}", path, e);
+                    quarantined_errors.push(quarantine_corrupt_toml("profile", &path, &e));
                 }
             }
         })?;
+        self.load_errors.extend(quarantined_errors);
         for id in relocated {
             if let Err(e) = self.save_profile(&self.profiles[&id]) {
                 warn!("could not save relocated profile {id}: {e}");
@@ -150,6 +157,7 @@ impl DaemonState {
 
     /// Load all `.toml` SSH key files.
     pub fn load_ssh_keys(&mut self) -> anyhow::Result<()> {
+        let mut quarantined_errors = Vec::new();
         load_toml_dir(&self.ssh_key_dir, |text, path| {
             match toml::from_str::<SshKey>(&text) {
                 Ok(key) => {
@@ -157,10 +165,12 @@ impl DaemonState {
                     self.ssh_keys.insert(key.id, key);
                 }
                 Err(e) => {
-                    warn!("skipping malformed SSH key {:?}: {}", path, e);
+                    quarantined_errors.push(quarantine_corrupt_toml("SSH key", &path, &e));
                 }
             }
-        })
+        })?;
+        self.load_errors.extend(quarantined_errors);
+        Ok(())
     }
 
     /// Persist a single SSH key to disk.
@@ -179,6 +189,7 @@ impl DaemonState {
 
     /// Load all `.toml` SSH host files.
     pub fn load_ssh_hosts(&mut self) -> anyhow::Result<()> {
+        let mut quarantined_errors = Vec::new();
         load_toml_dir(&self.ssh_host_dir, |text, path| {
             match toml::from_str::<Host>(&text) {
                 Ok(host) => {
@@ -186,10 +197,12 @@ impl DaemonState {
                     self.ssh_hosts.insert(host.id, host);
                 }
                 Err(e) => {
-                    warn!("skipping malformed SSH host {:?}: {}", path, e);
+                    quarantined_errors.push(quarantine_corrupt_toml("SSH host", &path, &e));
                 }
             }
-        })
+        })?;
+        self.load_errors.extend(quarantined_errors);
+        Ok(())
     }
 
     /// Persist a single SSH host to disk.
@@ -207,6 +220,7 @@ impl DaemonState {
     // -----------------------------------------------------------------------
 
     pub fn load_unifi_controllers(&mut self) -> anyhow::Result<()> {
+        let mut quarantined_errors = Vec::new();
         load_toml_dir(
             &self.unifi_controller_dir,
             |text, path| match toml::from_str::<crate::unifi_controllers::UnifiController>(&text) {
@@ -215,10 +229,12 @@ impl DaemonState {
                     self.unifi_controllers.insert(ctrl.id, ctrl);
                 }
                 Err(e) => {
-                    warn!("skipping malformed UniFi controller {:?}: {}", path, e);
+                    quarantined_errors.push(quarantine_corrupt_toml("UniFi controller", &path, &e));
                 }
             },
-        )
+        )?;
+        self.load_errors.extend(quarantined_errors);
+        Ok(())
     }
 
     pub fn save_unifi_controller(
@@ -264,6 +280,42 @@ fn relocate_openvpn_config(profile: &mut Profile, ovpn_dir: &std::path::Path) ->
     true
 }
 
+/// Quarantine a corrupt `.toml` file by renaming it to
+/// `<filename>.corrupt-<unix_ts>` with `0600` permissions, logging loudly, and
+/// returning an explicit diagnostic string recorded in `DaemonState::load_errors`.
+fn quarantine_corrupt_toml(
+    kind: &str,
+    path: &std::path::Path,
+    parse_err: &toml::de::Error,
+) -> String {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("record.toml");
+    let quarantine_path = path.with_file_name(format!("{file_name}.corrupt-{ts}"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    let msg = match std::fs::rename(path, &quarantine_path) {
+        Ok(()) => format!(
+            "quarantined corrupt {kind} {} -> {}: {parse_err}",
+            path.display(),
+            quarantine_path.display()
+        ),
+        Err(rename_err) => format!(
+            "corrupt {kind} {} ({parse_err}); quarantine rename failed: {rename_err}",
+            path.display()
+        ),
+    };
+    error!("{msg}");
+    msg
+}
+
 fn load_toml_dir(dir: &PathBuf, mut on_entry: impl FnMut(String, PathBuf)) -> anyhow::Result<()> {
     if !dir.exists() {
         std::fs::create_dir_all(dir)?;
@@ -287,7 +339,7 @@ fn load_toml_dir(dir: &PathBuf, mut on_entry: impl FnMut(String, PathBuf)) -> an
 /// `O_CREAT | O_EXCL` and mode `0600` from the first byte (never inheriting a
 /// permissive umask and never following a predictable `.tmp` symlink), synced
 /// to disk, and renamed into place.
-pub fn write_private_atomic(path: & std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+pub fn write_private_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let dir = path
         .parent()
@@ -341,6 +393,30 @@ mod trust_startup_tests {
         std::fs::write(&path, "invalid JSON").unwrap();
         assert!(DaemonState::new(dir.path().to_owned()).is_err());
         assert_eq!(std::fs::read_to_string(path).unwrap(), "invalid JSON");
+    }
+
+    #[test]
+    fn corrupt_profile_toml_is_quarantined_and_recorded_loudly() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = DaemonState::new(dir.path().to_owned()).unwrap();
+        std::fs::create_dir_all(&state.profile_dir).unwrap();
+        let bad_toml = state.profile_dir.join("broken.toml");
+        std::fs::write(&bad_toml, "not = [valid toml").unwrap();
+
+        state.load_profiles().unwrap();
+        assert!(
+            !bad_toml.exists(),
+            "corrupt .toml must be moved out of active dir"
+        );
+        assert_eq!(state.load_errors.len(), 1);
+        assert!(state.load_errors[0].contains("quarantined corrupt profile"));
+        let entries: Vec<_> = std::fs::read_dir(&state.profile_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(entries.len(), 1);
+        let name = entries[0].file_name().to_string_lossy().into_owned();
+        assert!(name.starts_with("broken.toml.corrupt-"));
     }
 }
 

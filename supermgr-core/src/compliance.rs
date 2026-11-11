@@ -1358,6 +1358,39 @@ pub fn load_run(host_id: &str, run_id: &str) -> Result<ComplianceRun> {
     Ok(run)
 }
 
+/// Effective `FortiGate` checks to execute during a compliance run:
+/// built-in `fortigate_default_checks()` merged with any non-Linux
+/// user-defined checks from `<data_dir>/checks/*.toml` (overriding
+/// built-ins by `id` and appending custom checks, sorted deterministically).
+#[must_use]
+pub fn fortigate_effective_checks() -> Vec<CheckDefinition> {
+    let mut checks = fortigate_default_checks();
+    if let Ok(user_checks) = load_user_checks() {
+        let mut by_id: std::collections::HashMap<String, CheckDefinition> =
+            checks.into_iter().map(|c| (c.id.clone(), c)).collect();
+        for c in user_checks {
+            if !c.id.starts_with("linux.") {
+                by_id.insert(c.id.clone(), c);
+            }
+        }
+        checks = by_id.into_values().collect();
+    }
+    checks.sort_by(|a, b| {
+        let sev_rank = |s: &Severity| match s {
+            Severity::Critical => 0,
+            Severity::High => 1,
+            Severity::Medium => 2,
+            Severity::Low => 3,
+            Severity::Info => 4,
+        };
+        a.category
+            .cmp(&b.category)
+            .then(sev_rank(&a.severity).cmp(&sev_rank(&b.severity)))
+            .then(a.id.cmp(&b.id))
+    });
+    checks
+}
+
 /// List the full set of available checks across every baseline
 /// kind (`FortiGate` + Linux as of 1.12c) plus any user TOML
 /// overlays. The GUI uses this for the "Checks reference"

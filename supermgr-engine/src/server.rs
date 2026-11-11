@@ -106,18 +106,21 @@ impl EngineServer {
     /// Handle a single client connection.
     async fn handle_connection(&self, mut stream: tokio::net::UnixStream) -> anyhow::Result<()> {
         debug!("new client connected");
+        let mut read_stash: Vec<u8> = Vec::new();
 
         loop {
-            // Read 4-byte length prefix (big-endian).
-            let mut len_buf = [0u8; 4];
-            match stream.read_exact(&mut len_buf).await {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            // Read 4-byte length prefix (big-endian), draining any bytes buffered
+            // while monitoring an earlier request for client disconnect.
+            let len_buf = match read_exact_with_stash(&mut stream, &mut read_stash, 4).await {
+                Ok(b) => [b[0], b[1], b[2], b[3]],
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof && read_stash.is_empty() =>
+                {
                     debug!("client disconnected");
                     return Ok(());
                 }
                 Err(e) => return Err(e.into()),
-            }
+            };
             let msg_len = u32::from_be_bytes(len_buf) as usize;
 
             if msg_len > 10 * 1024 * 1024 {
@@ -126,16 +129,32 @@ impl EngineServer {
             }
 
             // Read the JSON payload.
-            let mut buf = vec![0u8; msg_len];
-            stream.read_exact(&mut buf).await?;
+            let buf = read_exact_with_stash(&mut stream, &mut read_stash, msg_len).await?;
 
-            // Parse the request.
+            // Parse the request. If the client closes its socket while a remote
+            // execution is running (e.g. `MacClient` timeout or cancellation),
+            // abort the in-flight execution immediately instead of leaving the
+            // remote command running orphaned in the daemon (`P2-22`).
             let response = match serde_json::from_slice::<Request>(&buf) {
                 Ok(req) => {
-                    // Parameter validators build reusable error responses with
-                    // a placeholder ID. Correlate every parsed request here.
                     let request_id = req.id;
-                    let mut response = self.dispatch(req).await;
+                    let abort_on_disconnect = req.method == "ssh_execute_command";
+                    let mut response = if abort_on_disconnect {
+                        tokio::select! {
+                            resp = self.dispatch(req) => resp,
+                            disconnected = wait_for_client_disconnect(&mut stream, &mut read_stash) => {
+                                if disconnected {
+                                    info!("client disconnected during ssh_execute_command (id={request_id}); cancelled");
+                                    return Ok(());
+                                }
+                                // Client sent pipelined bytes without disconnecting; this branch is unreachable
+                                // because wait_for_client_disconnect parks once stash reaches cap.
+                                return Ok(());
+                            }
+                        }
+                    } else {
+                        self.dispatch(req).await
+                    };
                     response.id = request_id;
                     response
                 }
@@ -173,7 +192,8 @@ impl EngineServer {
             "vpn_render_azure_ovpn" => self.handle_vpn_render_azure_ovpn(id, req.params).await,
             "vpn_check_azure_runtime" => self.handle_vpn_check_azure_runtime(id).await,
             "vpn_azure_device_code_start" => {
-                self.handle_vpn_azure_device_code_start(id, req.params).await
+                self.handle_vpn_azure_device_code_start(id, req.params)
+                    .await
             }
             "vpn_azure_device_code_poll" => {
                 self.handle_vpn_azure_device_code_poll(id, req.params).await
@@ -444,9 +464,8 @@ pub async fn connect_to_host_owned_typed(
                 .retrieve(&password_ref.0)
                 .await
                 .map_err(|e| EngineError::Other(anyhow::anyhow!("retrieve password: {e}")))?;
-            let password = zeroize::Zeroizing::new(
-                String::from_utf8_lossy(&password_bytes).into_owned(),
-            );
+            let password =
+                zeroize::Zeroizing::new(String::from_utf8_lossy(&password_bytes).into_owned());
             SshSession::connect_password(
                 &host.hostname,
                 host.port,
@@ -476,9 +495,7 @@ pub async fn connect_to_host_owned_typed(
                 let privkey_bytes = secrets.retrieve(&priv_ref).await.map_err(|e| {
                     EngineError::Other(anyhow::anyhow!("retrieve private key: {e}"))
                 })?;
-                zeroize::Zeroizing::new(
-                    String::from_utf8_lossy(&privkey_bytes).into_owned(),
-                )
+                zeroize::Zeroizing::new(String::from_utf8_lossy(&privkey_bytes).into_owned())
             };
             match cert_pem_for_host(&host, secrets).await {
                 Some(cert_pem) => SshSession::connect_certificate(
@@ -598,55 +615,145 @@ pub(crate) fn parse_ipnet_list(v: Option<&serde_json::Value>) -> Vec<ipnet::IpNe
 /// approach silently destroyed those fields on every edit, which meant
 /// editing a host's port wiped its stored password. We now whitelist the
 /// editable fields explicitly.
-pub fn merge_host_update(host: &mut Host, incoming: &serde_json::Value) {
-    if let Some(s) = incoming.get("label").and_then(|v| v.as_str()) {
+/// Read `n` bytes from `stash` followed by `stream`.
+async fn read_exact_with_stash(
+    stream: &mut tokio::net::UnixStream,
+    stash: &mut Vec<u8>,
+    n: usize,
+) -> std::io::Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(n);
+    let from_stash = stash.len().min(n);
+    if from_stash > 0 {
+        out.extend_from_slice(&stash[..from_stash]);
+        stash.drain(..from_stash);
+    }
+    if out.len() < n {
+        let start = out.len();
+        out.resize(n, 0);
+        if let Err(e) = stream.read_exact(&mut out[start..]).await {
+            // Preserve any partial prefix we took from `stash` so EOF check sees non-empty if mid-frame.
+            if !out[..start].is_empty() {
+                let mut restored = out[..start].to_vec();
+                restored.append(stash);
+                *stash = restored;
+            }
+            return Err(e);
+        }
+    }
+    Ok(out)
+}
+
+/// Resolves with `true` as soon as `stream` observes peer EOF or read error.
+/// Any pipelined bytes arriving while the in-flight RPC runs are stashed (up to
+/// 64 KiB, after which monitoring parks until the current RPC finishes).
+async fn wait_for_client_disconnect(
+    stream: &mut tokio::net::UnixStream,
+    stash: &mut Vec<u8>,
+) -> bool {
+    const MAX_PIPELINED_STASH: usize = 64 * 1024;
+    let mut scratch = [0u8; 1024];
+    loop {
+        if stash.len() >= MAX_PIPELINED_STASH {
+            std::future::pending::<()>().await;
+        }
+        let max_read = scratch.len().min(MAX_PIPELINED_STASH - stash.len());
+        match stream.read(&mut scratch[..max_read]).await {
+            Ok(0) | Err(_) => return true,
+            Ok(n) => stash.extend_from_slice(&scratch[..n]),
+        }
+    }
+}
+
+/// Apply a partial host update from the GUI to an existing record, rejecting
+/// invalid field types or out-of-range values with a descriptive error (`P2-25`).
+pub fn try_merge_host_update(host: &mut Host, incoming: &serde_json::Value) -> Result<(), String> {
+    let Some(obj) = incoming.as_object() else {
+        return Err("host update must be a JSON object".to_owned());
+    };
+    if let Some(v) = obj.get("label") {
+        let s = v
+            .as_str()
+            .ok_or_else(|| "field 'label' must be a string".to_owned())?;
         host.label = s.to_owned();
     }
-    if let Some(s) = incoming.get("hostname").and_then(|v| v.as_str()) {
+    if let Some(v) = obj.get("hostname") {
+        let s = v
+            .as_str()
+            .ok_or_else(|| "field 'hostname' must be a string".to_owned())?;
         host.hostname = s.to_owned();
     }
-    if let Some(n) = incoming.get("port").and_then(serde_json::Value::as_u64) {
-        host.port = n as u16;
+    if let Some(v) = obj.get("port") {
+        let n = v
+            .as_u64()
+            .and_then(|p| u16::try_from(p).ok())
+            .filter(|&p| p > 0)
+            .ok_or_else(|| "field 'port' must be an integer in 1..=65535".to_owned())?;
+        host.port = n;
     }
-    if let Some(s) = incoming.get("username").and_then(|v| v.as_str()) {
+    if let Some(v) = obj.get("username") {
+        let s = v
+            .as_str()
+            .ok_or_else(|| "field 'username' must be a string".to_owned())?;
         host.username = s.to_owned();
     }
-    if let Some(s) = incoming.get("group").and_then(|v| v.as_str()) {
+    if let Some(v) = obj.get("group") {
+        let s = v
+            .as_str()
+            .ok_or_else(|| "field 'group' must be a string".to_owned())?;
         host.group = s.to_owned();
     }
-    if let Some(v) = incoming.get("device_type") {
-        if let Ok(dt) = serde_json::from_value(v.clone()) {
-            host.device_type = dt;
-        }
+    if let Some(v) = obj.get("device_type") {
+        host.device_type =
+            serde_json::from_value(v.clone()).map_err(|e| format!("invalid 'device_type': {e}"))?;
     }
-    if let Some(v) = incoming.get("auth_method") {
-        if let Ok(am) = serde_json::from_value(v.clone()) {
-            host.auth_method = am;
-        }
+    if let Some(v) = obj.get("auth_method") {
+        host.auth_method =
+            serde_json::from_value(v.clone()).map_err(|e| format!("invalid 'auth_method': {e}"))?;
     }
-    if let Some(v) = incoming.get("auth_key_id") {
-        host.auth_key_id = serde_json::from_value(v.clone()).ok();
+    if let Some(v) = obj.get("auth_key_id") {
+        host.auth_key_id = if v.is_null() {
+            None
+        } else {
+            Some(
+                serde_json::from_value(v.clone())
+                    .map_err(|e| format!("invalid 'auth_key_id': {e}"))?,
+            )
+        };
     }
-    if let Some(v) = incoming.get("vpn_profile_id") {
-        host.vpn_profile_id = serde_json::from_value(v.clone()).ok();
+    if let Some(v) = obj.get("vpn_profile_id") {
+        host.vpn_profile_id = if v.is_null() {
+            None
+        } else {
+            Some(
+                serde_json::from_value(v.clone())
+                    .map_err(|e| format!("invalid 'vpn_profile_id': {e}"))?,
+            )
+        };
     }
-    if let Some(b) = incoming
-        .get("api_verify_tls")
-        .and_then(serde_json::Value::as_bool)
-    {
-        host.api_verify_tls = b;
+    if let Some(v) = obj.get("api_verify_tls") {
+        host.api_verify_tls = v
+            .as_bool()
+            .ok_or_else(|| "field 'api_verify_tls' must be a boolean".to_owned())?;
     }
-    if let Some(v) = incoming.get("api_port") {
+    if let Some(v) = obj.get("api_port") {
         if v.is_null() {
             host.api_port = None;
-        } else if let Some(n) = v
-            .as_u64()
-            .and_then(|n| u16::try_from(n).ok())
-            .filter(|&p| p > 0)
-        {
-            host.api_port = Some(n);
+        } else {
+            let p = v
+                .as_u64()
+                .and_then(|n| u16::try_from(n).ok())
+                .filter(|&p| p > 0)
+                .ok_or_else(|| {
+                    "field 'api_port' must be null or an integer in 1..=65535".to_owned()
+                })?;
+            host.api_port = Some(p);
         }
     }
+    Ok(())
+}
+
+pub fn merge_host_update(host: &mut Host, incoming: &serde_json::Value) {
+    let _ = try_merge_host_update(host, incoming);
 }
 
 #[cfg(test)]
@@ -909,5 +1016,29 @@ mod tests {
         let incoming = serde_json::json!({ "auth_key_id": null });
         merge_host_update(&mut host, &incoming);
         assert!(host.auth_key_id.is_none());
+    }
+
+    #[test]
+    fn try_merge_rejects_invalid_values_without_clobbering_optional_ids() {
+        let mut host = full_host();
+        let valid_key = uuid::Uuid::new_v4();
+        host.auth_key_id = Some(valid_key);
+
+        assert!(try_merge_host_update(&mut host, &serde_json::json!({ "port": 0 })).is_err());
+        assert!(try_merge_host_update(&mut host, &serde_json::json!({ "port": 70000 })).is_err());
+        assert!(
+            try_merge_host_update(&mut host, &serde_json::json!({ "device_type": "bogus" }))
+                .is_err()
+        );
+        assert!(try_merge_host_update(
+            &mut host,
+            &serde_json::json!({ "auth_key_id": "not-a-uuid" })
+        )
+        .is_err());
+        assert_eq!(
+            host.auth_key_id,
+            Some(valid_key),
+            "invalid auth_key_id must return an error, never wipe the existing key"
+        );
     }
 }

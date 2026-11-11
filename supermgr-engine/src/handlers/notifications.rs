@@ -5,7 +5,10 @@ use crate::server::EngineServer;
 
 impl EngineServer {
     pub(crate) async fn handle_notify_get_config(&self, id: u64) -> Response {
-        let cfg = crate::notify::load_config();
+        let cfg = match crate::notify::try_load_config() {
+            Ok(cfg) => cfg,
+            Err(e) => return Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
+        };
         match serde_json::to_value(&cfg) {
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
@@ -26,7 +29,10 @@ impl EngineServer {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_owned();
-        let mut cfg = crate::notify::load_config();
+        let mut cfg = match crate::notify::try_load_config() {
+            Ok(cfg) => cfg,
+            Err(e) => return Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
+        };
         if webhook.is_empty() {
             cfg.webhooks.remove(&scope);
         } else {
@@ -54,7 +60,10 @@ impl EngineServer {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_owned();
-        let mut cfg = crate::notify::load_config();
+        let mut cfg = match crate::notify::try_load_config() {
+            Ok(cfg) => cfg,
+            Err(e) => return Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
+        };
         if key.is_empty() {
             cfg.pagerduty_keys.remove(&scope);
         } else {
@@ -81,7 +90,10 @@ impl EngineServer {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_owned();
-        let mut cfg = crate::notify::load_config();
+        let mut cfg = match crate::notify::try_load_config() {
+            Ok(cfg) => cfg,
+            Err(e) => return Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
+        };
         if key.is_empty() {
             cfg.opsgenie_keys.remove(&scope);
         } else {

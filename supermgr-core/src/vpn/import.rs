@@ -228,8 +228,8 @@ pub fn parse_azure_xml(azure_xml: &str, vpn_settings_xml: &str) -> Result<AzureV
     crate::sanitize::validate_host_or_ip(&gateway_fqdn)
         .map_err(|e| format!("invalid Azure gateway FQDN: {e}"))?;
 
-    let server_secret_raw = xml_tag(azure_xml, "serversecret")
-        .ok_or("missing <serversecret> in azurevpnconfig.xml")?;
+    let server_secret_raw =
+        xml_tag(azure_xml, "serversecret").ok_or("missing <serversecret> in azurevpnconfig.xml")?;
     let server_secret_hex: String = server_secret_raw
         .chars()
         .filter(|c| !c.is_ascii_whitespace())
@@ -318,7 +318,8 @@ MIIB
 
     #[test]
     fn a_ca_inline_directive_counts_as_a_ca_while_external_file_paths_are_refused() {
-        let ok_text = "client\ndev tun\nremote vpn.example.com 1194\nca [inline]\n<ca>\nMIIB\n</ca>\n";
+        let ok_text =
+            "client\ndev tun\nremote vpn.example.com 1194\nca [inline]\n<ca>\nMIIB\n</ca>\n";
         assert_eq!(validate_ovpn_config(ok_text), Ok(()));
 
         let path_text = "client\ndev tun\nremote vpn.example.com 1194\nca ca.crt\n";

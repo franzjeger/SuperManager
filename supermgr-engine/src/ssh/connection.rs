@@ -13,6 +13,15 @@ use supermgr_core::error::SshError;
 use super::known_hosts::{HostKeyCheck, KnownHostsStore};
 use supermgr_core::ssh::remote::{RemoteFiles, RemoteShell};
 
+/// Detailed result of a bounded remote command execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecOutput {
+    pub exit_code: u32,
+    pub stdout: String,
+    pub stderr: String,
+    pub truncated: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Client handler
 // ---------------------------------------------------------------------------
@@ -387,6 +396,17 @@ impl SshSession {
         command: &str,
         budget: Option<std::time::Duration>,
     ) -> Result<(u32, String, String), SshError> {
+        let out = self.exec_detailed(command, budget).await?;
+        Ok((out.exit_code, out.stdout, out.stderr))
+    }
+
+    /// Execute a command on the remote host and return full output metadata,
+    /// including whether `stdout` or `stderr` was capped at `8 MiB`.
+    pub async fn exec_detailed(
+        &self,
+        command: &str,
+        budget: Option<std::time::Duration>,
+    ) -> Result<ExecOutput, SshError> {
         let Some(budget) = budget else {
             return self.run_command(command).await;
         };
@@ -398,7 +418,7 @@ impl SshSession {
             })?
     }
 
-    async fn run_command(&self, command: &str) -> Result<(u32, String, String), SshError> {
+    async fn run_command(&self, command: &str) -> Result<ExecOutput, SshError> {
         let mut channel =
             self.handle
                 .channel_open_session()
@@ -421,12 +441,16 @@ impl SshSession {
         const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        let mut truncated = false;
         let mut exit_status: Option<u32> = None;
 
         loop {
             match channel.wait().await {
                 Some(russh::ChannelMsg::Data { data }) => {
                     let remaining = MAX_STREAM_BYTES.saturating_sub(stdout.len());
+                    if data.len() > remaining {
+                        truncated = true;
+                    }
                     if remaining > 0 {
                         stdout.extend_from_slice(&data[..data.len().min(remaining)]);
                     }
@@ -434,6 +458,9 @@ impl SshSession {
                 Some(russh::ChannelMsg::ExtendedData { data, ext }) if ext == 1 => {
                     // ext == 1 is stderr
                     let remaining = MAX_STREAM_BYTES.saturating_sub(stderr.len());
+                    if data.len() > remaining {
+                        truncated = true;
+                    }
                     if remaining > 0 {
                         stderr.extend_from_slice(&data[..data.len().min(remaining)]);
                     }
@@ -465,7 +492,12 @@ impl SshSession {
         let stdout_str = String::from_utf8_lossy(&stdout).into_owned();
         let stderr_str = String::from_utf8_lossy(&stderr).into_owned();
 
-        Ok((exit_status, stdout_str, stderr_str))
+        Ok(ExecOutput {
+            exit_code: exit_status,
+            stdout: stdout_str,
+            stderr: stderr_str,
+            truncated,
+        })
     }
 
     /// Type `inputs` into an interactive shell, each only once the device
@@ -533,8 +565,14 @@ impl SshSession {
             })?;
 
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-        let result =
-            interact(&mut channel, inputs, deadline, timeout_secs, abort_on_cli_error).await;
+        let result = interact(
+            &mut channel,
+            inputs,
+            deadline,
+            timeout_secs,
+            abort_on_cli_error,
+        )
+        .await;
         let _ = channel.close().await;
         result
     }
@@ -812,11 +850,13 @@ async fn interact<C: ShellChannel>(
         if abort_on_cli_error && !secret {
             let chunk = String::from_utf8_lossy(&output[start..]);
             let reply = chunk.split_once('\n').map_or("", |(_, rest)| rest);
-            if let Some(err_line) = reply
-                .lines()
-                .map(str::trim)
-                .find(|l| l.contains("Command fail") || l.contains("Command parse error"))
-            {
+            if let Some(err_line) = reply.lines().map(str::trim).find(|l| {
+                l.contains("Command fail")
+                    || l.contains("Command parse error")
+                    || l.contains("value parse error")
+                    || l.contains("operator error")
+                    || l.contains("node_check_object fail")
+            }) {
                 return Err(stop(acknowledged, err_line.to_owned(), &output));
             }
         }
@@ -824,6 +864,13 @@ async fn interact<C: ShellChannel>(
     }
     Ok(String::from_utf8_lossy(&output).into_owned())
 }
+
+/// Maximum interactive shell transcript size (`8 MiB`) so a runaway banner or
+/// command output cannot grow unboundedly in memory (`P3-11`).
+const MAX_TRANSCRIPT_BYTES: usize = 8 * 1024 * 1024;
+/// Trailing byte window inspected for shell/password prompts (`O(1)` per chunk
+/// instead of rescanning the entire transcript on every packet).
+const PROMPT_TAIL_WINDOW_BYTES: usize = 256;
 
 /// Read until the output since `start` ends in a prompt, and say which. The
 /// error says why none came.
@@ -835,12 +882,39 @@ async fn wait_for_prompt<C: ShellChannel>(
     deadline: tokio::time::Instant,
     timeout_secs: u64,
 ) -> Result<Prompt, String> {
+    let mut first_newline_after_start: Option<usize> = None;
     loop {
         match channel.next_output(deadline).await {
             ShellOutput::Data(data) => {
+                let prev_len = output.len();
+                if prev_len.saturating_add(data.len()) > MAX_TRANSCRIPT_BYTES {
+                    let keep = MAX_TRANSCRIPT_BYTES.saturating_sub(prev_len);
+                    output.extend_from_slice(&data[..keep]);
+                    return Err(format!(
+                        "interactive transcript exceeded {MAX_TRANSCRIPT_BYTES} bytes"
+                    ));
+                }
                 output.extend_from_slice(&data);
-                let new = String::from_utf8_lossy(&output[start..]);
-                if let Some(prompt) = trailing_prompt(&new, after_echo) {
+                if after_echo && first_newline_after_start.is_none() {
+                    let scan_from = prev_len.max(start);
+                    if let Some(rel) = output[scan_from..].iter().position(|&b| b == b'\n') {
+                        first_newline_after_start = Some(scan_from + rel + 1);
+                    }
+                }
+                let candidate_start = if after_echo {
+                    let Some(nl_after) = first_newline_after_start else {
+                        continue;
+                    };
+                    nl_after
+                } else {
+                    start
+                };
+                let window_start = output
+                    .len()
+                    .saturating_sub(PROMPT_TAIL_WINDOW_BYTES)
+                    .max(candidate_start);
+                let tail_str = String::from_utf8_lossy(&output[window_start..]);
+                if let Some(prompt) = trailing_prompt(&tail_str, false) {
                     return Ok(prompt);
                 }
             }

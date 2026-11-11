@@ -64,11 +64,10 @@ async fn extract_cli(
     Ok(value)
 }
 
-/// Whether a run reads anything over SSH. Only CLI checks do, and the
-/// `FortiGate` library has none today.
+/// Whether a run reads anything over SSH. Includes custom user TOML checks (`P2-27`).
 #[must_use]
 pub fn needs_ssh() -> bool {
-    fortigate_default_checks()
+    fortigate_effective_checks()
         .iter()
         .any(|def| matches!(def.channel, Channel::Cli))
 }
@@ -86,42 +85,84 @@ pub async fn run(
         host_id, triggered_by
     );
 
-    // Snapshot device identity (used in run header + later in
-    // PDF reports) via `/monitor/system/status`.
+    // Run built-in FortiGate checks merged with any user-defined custom checks (`P2-27`).
+    let defs = fortigate_effective_checks();
+    let any_api_check = defs.iter().any(|d| matches!(d.channel, Channel::Api));
+
+    // Open ONE shared FortiGate API session for the entire run (`P3-10`),
+    // caching each unique `api_path` JSON payload and aborting remaining API
+    // probes immediately on transport/connection failure so an unreachable
+    // firewall fails in a single timeout rather than 47 × 30s.
     let mut firmware: Option<String> = None;
     let mut model: Option<String> = None;
     let mut hostname: Option<String> = None;
-    if let Ok(resp) = fortigate::api_request(
-        state,
-        secrets,
-        host_id,
-        "GET",
-        "/api/v2/monitor/system/status",
-        "",
-    )
-    .await
-    {
-        if resp.status < 400 {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp.body) {
-                let r = v.get("results").unwrap_or(&v);
-                firmware = r.get("version").and_then(|x| x.as_str()).map(str::to_owned);
-                model = r.get("model").and_then(|x| x.as_str()).map(str::to_owned);
-                hostname = r
-                    .get("hostname")
-                    .and_then(|x| x.as_str())
-                    .map(str::to_owned);
+    let mut transport_abort_reason: Option<String> = None;
+    let mut api_session: Option<fortigate::FortigateApiSession> = None;
+
+    if any_api_check {
+        match fortigate::FortigateApiSession::open(state, secrets, host_id).await {
+            Ok(sess) => {
+                match sess
+                    .request("GET", "/api/v2/monitor/system/status", "")
+                    .await
+                {
+                    Ok(resp) if resp.status < 400 => {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp.body) {
+                            let r = v.get("results").unwrap_or(&v);
+                            firmware = r.get("version").and_then(|x| x.as_str()).map(str::to_owned);
+                            model = r.get("model").and_then(|x| x.as_str()).map(str::to_owned);
+                            hostname = r
+                                .get("hostname")
+                                .and_then(|x| x.as_str())
+                                .map(str::to_owned);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(fortigate::FortigateRequestError::Transport(reason)) => {
+                        transport_abort_reason = Some(reason);
+                    }
+                    Err(fortigate::FortigateRequestError::Other(_)) => {}
+                }
+                api_session = Some(sess);
+            }
+            Err(e) => {
+                transport_abort_reason = Some(e.to_string());
             }
         }
     }
 
-    // FortiGate runner uses only the FortiGate library — Linux
-    // checks are not API-evaluable (no api_path), and the Linux
-    // runner has its own execution path via `ssh_compliance::run_baseline`.
-    let defs = fortigate_default_checks();
+    let mut api_cache: std::collections::HashMap<String, Result<serde_json::Value, String>> =
+        std::collections::HashMap::new();
     let mut results: Vec<CheckResult> = Vec::with_capacity(defs.len());
+
     for def in &defs {
-        let result = run_one(state, secrets, host_id, def, ssh_session).await;
-        results.push(result);
+        let raw = match def.channel {
+            Channel::Api => {
+                if let Some(reason) = &transport_abort_reason {
+                    Err(anyhow!("{reason}"))
+                } else if let Some(sess) = api_session.as_ref() {
+                    extract_api_cached(sess, &mut api_cache, &mut transport_abort_reason, def).await
+                } else {
+                    Err(anyhow!("API session unavailable"))
+                }
+            }
+            Channel::Cli => extract_cli(def, ssh_session).await,
+        };
+
+        let (status, detail, raw_value) = match raw {
+            Ok(value) => evaluate(def, &value),
+            Err(e) => (Status::Error, format!("could not extract value: {e}"), None),
+        };
+
+        results.push(CheckResult {
+            check_id: def.id.clone(),
+            title: def.title.clone(),
+            category: def.category.clone(),
+            severity: def.severity.clone(),
+            status,
+            detail,
+            raw_value,
+        });
     }
 
     let finished_at = Utc::now();
@@ -165,38 +206,10 @@ pub async fn run(
     Ok(run)
 }
 
-async fn run_one(
-    state: &Arc<Mutex<DaemonState>>,
-    secrets: &Arc<dyn SecretStore>,
-    host_id: uuid::Uuid,
-    def: &CheckDefinition,
-    ssh_session: Option<&crate::ssh::connection::SshSession>,
-) -> CheckResult {
-    let raw = match def.channel {
-        Channel::Api => extract_api(state, secrets, host_id, def).await,
-        Channel::Cli => extract_cli(def, ssh_session).await,
-    };
-
-    let (status, detail, raw_value) = match raw {
-        Ok(value) => evaluate(def, &value),
-        Err(e) => (Status::Error, format!("could not extract value: {e}"), None),
-    };
-
-    CheckResult {
-        check_id: def.id.clone(),
-        title: def.title.clone(),
-        category: def.category.clone(),
-        severity: def.severity.clone(),
-        status,
-        detail,
-        raw_value,
-    }
-}
-
-async fn extract_api(
-    state: &Arc<Mutex<DaemonState>>,
-    secrets: &Arc<dyn SecretStore>,
-    host_id: uuid::Uuid,
+async fn extract_api_cached(
+    session: &fortigate::FortigateApiSession,
+    cache: &mut std::collections::HashMap<String, Result<serde_json::Value, String>>,
+    transport_abort_reason: &mut Option<String>,
     def: &CheckDefinition,
 ) -> Result<String> {
     let path = def
@@ -207,15 +220,29 @@ async fn extract_api(
         .api_pointer
         .as_deref()
         .ok_or_else(|| anyhow!("api check {} missing api_pointer", def.id))?;
-    let resp = fortigate::api_request(state, secrets, host_id, "GET", path, "").await?;
-    if resp.status >= 400 {
-        return Err(anyhow!(
-            "API returned HTTP {}: {}",
-            resp.status,
-            resp.body.chars().take(200).collect::<String>()
-        ));
+
+    if !cache.contains_key(path) {
+        let fetched = match session.request("GET", path, "").await {
+            Ok(resp) if resp.status >= 400 => Err(format!(
+                "API returned HTTP {}: {}",
+                resp.status,
+                resp.body.chars().take(200).collect::<String>()
+            )),
+            Ok(resp) => serde_json::from_str::<serde_json::Value>(&resp.body)
+                .map_err(|e| format!("response is not JSON: {e}")),
+            Err(fortigate::FortigateRequestError::Transport(reason)) => {
+                *transport_abort_reason = Some(reason.clone());
+                Err(reason)
+            }
+            Err(fortigate::FortigateRequestError::Other(e)) => Err(e.to_string()),
+        };
+        cache.insert(path.to_owned(), fetched);
     }
-    let v: serde_json::Value = serde_json::from_str(&resp.body).context("response is not JSON")?;
+
+    let v = match cache.get(path).expect("inserted above") {
+        Ok(v) => v,
+        Err(msg) => return Err(anyhow!("{msg}")),
+    };
     let pointed = v
         .pointer(pointer)
         .ok_or_else(|| anyhow!("pointer {pointer} not found in response"))?;

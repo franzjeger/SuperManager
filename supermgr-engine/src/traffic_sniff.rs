@@ -947,7 +947,10 @@ fn extract_http_form_password(payload: &str) -> Option<String> {
     // Trim to first 200 bytes (at a valid UTF-8 char boundary) so we
     // don't paste huge form blobs into the finding detail.
     let summary = if redacted.len() > 200 {
-        format!("{}…", supermgr_core::sanitize::truncate_utf8(&redacted, 200))
+        format!(
+            "{}…",
+            supermgr_core::sanitize::truncate_utf8(&redacted, 200)
+        )
     } else {
         redacted
     };

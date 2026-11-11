@@ -57,8 +57,7 @@ fn baseline_path(customer_slug: &str, host_ip: &str) -> PathBuf {
 }
 
 pub fn load(customer_slug: &str, host_ip: &str) -> Result<HostBaseline> {
-    supermgr_core::findings::validate_slug(customer_slug)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    supermgr_core::findings::validate_slug(customer_slug).map_err(|e| anyhow::anyhow!("{e}"))?;
     let path = baseline_path(customer_slug, host_ip);
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
@@ -73,8 +72,7 @@ pub fn load(customer_slug: &str, host_ip: &str) -> Result<HostBaseline> {
 }
 
 pub fn save(customer_slug: &str, host_ip: &str, baseline: &HostBaseline) -> Result<()> {
-    supermgr_core::findings::validate_slug(customer_slug)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    supermgr_core::findings::validate_slug(customer_slug).map_err(|e| anyhow::anyhow!("{e}"))?;
     let dir = baselines_dir(customer_slug);
     std::fs::create_dir_all(&dir).context("create baselines dir")?;
     let path = baseline_path(customer_slug, host_ip);
