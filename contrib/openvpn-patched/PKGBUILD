@@ -1,0 +1,70 @@
+# openvpn-patched: Arch's openvpn 2.7.9-1 build, with the TLS control-channel
+# buffer raised from 2048 to 8192 bytes so an Entra ID access token fits as the
+# auth-user-pass password (Azure VPN). Installs only /usr/bin/openvpn-patched,
+# next to the regular openvpn package. Same patch as the macOS openvpn-patched.
+
+pkgname=openvpn-patched
+_upstream=openvpn
+pkgver=2.7.9
+pkgrel=1
+pkgdesc='OpenVPN with an 8 KiB TLS control-channel buffer, for Azure VPN (Entra ID) tokens'
+arch=('x86_64')
+url='https://openvpn.net/index.php/open-source.html'
+license=('GPL-2.0-only')
+depends=('libcap-ng' 'libcap-ng.so'
+         'libnl' 'libnl-genl-3.so' 'libnl-3.so'
+         'lz4'
+         'lzo' 'liblzo2.so'
+         'openssl' 'libcrypto.so' 'libssl.so'
+         'pkcs11-helper' 'libpkcs11-helper.so'
+         'systemd-libs' 'libsystemd.so')
+# LTO breaks the unit tests' -Wl,--wrap mocks (tls_crypt_testdriver fails
+# under makepkg's -flto=auto and passes without it, patched or not).
+options=('!lto')
+makedepends=('git' 'systemd')  # no python-docutils: man pages are not packaged
+validpgpkeys=('F554A3687412CFFEBDEFE0A312F5F7B42F2B01E7'  # OpenVPN - Security Mailing List <security@openvpn.net>
+              'B62E6A2B4E56570B7BDC6BE01D829EFECA562812') # Gert Doering <gert@v6.de>
+source=("git+https://github.com/OpenVPN/openvpn.git?signed#tag=v${pkgver}")
+sha256sums=('311abbab897b99e115d7797a067cb03ffc88ad3af946baba982c826a010cab5e')
+
+prepare() {
+  cd "${srcdir}"/${_upstream}
+
+  # The one change: key-method-2 (options, username, password, peer-info)
+  # must fit this buffer, and an Entra ID access token alone can exceed it.
+  grep -q '^#define TLS_CHANNEL_BUF_SIZE 2048$' src/openvpn/common.h
+  sed -i 's/^#define TLS_CHANNEL_BUF_SIZE 2048$/#define TLS_CHANNEL_BUF_SIZE 8192/' src/openvpn/common.h
+  grep -q '^#define TLS_CHANNEL_BUF_SIZE 8192$' src/openvpn/common.h
+
+  autoreconf --force --install
+}
+
+build() {
+  mkdir "${srcdir}"/build
+  cd "${srcdir}"/build
+
+  "${srcdir}"/${_upstream}/configure \
+    --prefix=/usr \
+    --sbindir=/usr/bin \
+    --libexec=/usr/lib \
+    --enable-dco \
+    --enable-pkcs11 \
+    --enable-plugins \
+    --enable-systemd \
+    --enable-x509-alt-username
+  make
+}
+
+check() {
+  cd "${srcdir}"/build
+
+  make check
+}
+
+package() {
+  cd "${srcdir}"/build
+
+  install -D -m0755 src/openvpn/openvpn "${pkgdir}"/usr/bin/openvpn-patched
+  install -D -m0644 "${srcdir}"/${_upstream}/COPYING "${pkgdir}"/usr/share/licenses/${pkgname}/COPYING
+  install -D -m0644 "${srcdir}"/${_upstream}/COPYRIGHT.GPL "${pkgdir}"/usr/share/licenses/${pkgname}/COPYRIGHT.GPL
+}

@@ -538,6 +538,30 @@ fn hex_to_openvpn_key(hex: &str) -> String {
     out
 }
 
+/// An openvpn log line that means retrying cannot help. openvpn itself
+/// restarts after both and would retry until the connect timeout.
+fn openvpn_failure(line: &str) -> Option<BackendError> {
+    if line.contains("AUTH_FAILED") || line.contains("auth-failure") {
+        return Some(BackendError::ConnectionFailed(
+            "Azure VPN authentication failed — your Entra ID session \
+             may have expired or been revoked; try reconnecting to \
+             re-authenticate in the browser"
+                .into(),
+        ));
+    }
+    // Stock openvpn sends username, password and peer info in one 2048-byte
+    // TLS buffer (TLS_CHANNEL_BUF_SIZE); a large Entra ID token does not fit.
+    if line.contains("Failed to write auth password to TLS buffer") {
+        return Some(BackendError::ConnectionFailed(
+            "the Entra ID token is too large for this openvpn — stock openvpn \
+             has a 2048-byte TLS buffer. Install openvpn-patched \
+             (contrib/openvpn-patched in the SuperManager repository)"
+                .into(),
+        ));
+    }
+    None
+}
+
 /// Assemble the `.ovpn` configuration text.
 fn build_ovpn_config(
     cfg: &AzureVpnConfig,
@@ -797,17 +821,24 @@ impl VpnBackend for AzureBackend {
         info!("Azure: temp files written to {}", tmp_dir.display());
 
         // ── Step 3: Launch openvpn ────────────────────────────────────────────
-        let openvpn_bin = crate::subprocess::resolve_system_bin(&["openvpn"]).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                BackendError::Interface(
-                    "openvpn not found — install the 'openvpn' package \
-                     (Azure VPN requires the classic openvpn binary, not openvpn3)"
-                        .into(),
-                )
-            } else {
-                BackendError::Io(e)
-            }
-        })?;
+        // `openvpn-patched` first: stock openvpn's 2048-byte TLS control-channel
+        // buffer cannot hold an Entra ID access token as the password (see
+        // `openvpn_failure`). contrib/openvpn-patched builds the same openvpn
+        // with 8192, as the macOS helper's `openvpn-patched` is.
+        let openvpn_bin = crate::subprocess::resolve_system_bin(&["openvpn-patched", "openvpn"])
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    BackendError::Interface(
+                        "openvpn not found — install 'openvpn-patched' (contrib/openvpn-patched) \
+                         or the 'openvpn' package (Azure VPN requires the classic openvpn \
+                         binary, not openvpn3)"
+                            .into(),
+                    )
+                } else {
+                    BackendError::Io(e)
+                }
+            })?;
+        info!("Azure: using {}", openvpn_bin.display());
         let mut child = tokio::process::Command::new(&openvpn_bin)
             .env("PATH", "/usr/sbin:/sbin:/usr/bin:/bin")
             .arg("--config")
@@ -883,12 +914,8 @@ impl VpnBackend for AzureBackend {
                             if line.contains("Initialization Sequence Completed") {
                                 return Ok(());
                             }
-                            if line.contains("AUTH_FAILED") || line.contains("auth-failure") {
-                                return Err(BackendError::ConnectionFailed(
-                                    "Azure VPN authentication failed — your Entra ID session \
-                                     may have expired or been revoked; try reconnecting to \
-                                     re-authenticate in the browser".into(),
-                                ));
+                            if let Some(e) = openvpn_failure(&line) {
+                                return Err(e);
                             }
                         }
                         line = err_lines.next_line() => {
@@ -896,6 +923,9 @@ impl VpnBackend for AzureBackend {
                             info!("openvpn stderr: {}", line.trim());
                             if line.contains("Initialization Sequence Completed") {
                                 return Ok(());
+                            }
+                            if let Some(e) = openvpn_failure(&line) {
+                                return Err(e);
                             }
                         }
                     }
@@ -1191,6 +1221,21 @@ mod tests {
         assert!(!ovpn.contains("redirect-gateway"), "{ovpn}");
         assert!(ovpn.contains("route 10.134.0.0 255.255.0.0\n"), "{ovpn}");
         assert!(ovpn.contains("route-ipv6 2001:db8::/32\n"), "{ovpn}");
+    }
+
+    #[test]
+    fn a_token_too_large_for_stock_openvpn_fails_at_once_and_says_why() {
+        let line = "2026-11-12 08:06:10 WARNING: Failed to write auth password to TLS buffer";
+        let Some(BackendError::ConnectionFailed(msg)) = openvpn_failure(line) else {
+            panic!("not recognised: {line}");
+        };
+        assert!(msg.contains("openvpn-patched"), "{msg}");
+
+        assert!(matches!(
+            openvpn_failure("AUTH: Received control message: AUTH_FAILED"),
+            Some(BackendError::ConnectionFailed(_))
+        ));
+        assert!(openvpn_failure("TLS: Initial packet from [AF_INET]104.214.227.71:443").is_none());
     }
 
     #[test]
