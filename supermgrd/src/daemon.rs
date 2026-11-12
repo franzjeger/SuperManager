@@ -7975,7 +7975,7 @@ async fn current_system_dns_ips() -> Vec<String> {
     .await
     {
         if out.status.success() {
-            let ips = parse_resolvectl_dns(&out.stdout_lossy());
+            let ips = parse_resolvectl_dns(&String::from_utf8_lossy(&out.stdout));
             if !ips.is_empty() {
                 return ips;
             }
@@ -8189,7 +8189,7 @@ async fn install_kill_switch(mode: &KillSwitchMode) -> Result<(), String> {
         return Err(format!(
             "nft rejected the kill-switch rules ({}): {}",
             output.status,
-            output.stderr_lossy().trim()
+            String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
 
@@ -8599,7 +8599,7 @@ async fn connect_profile_if_current(
         state,
         Some(ctx),
         expected_generation,
-        crate::audit::AuditCaller::system(),
+        crate::audit::AuditCaller::daemon(),
         None,
     )
     .await
@@ -8707,9 +8707,31 @@ async fn connect_profile_inner(
         // tunnel or kill-switch setup so we never perform 3 separate DNS lookups
         // or deadlock when a retained kill switch blocks DNS.
         let resolved_wg_endpoints = if let ProfileConfig::WireGuard(ref wg_cfg) = profile.config {
-            let resolved = tokio::select! {
+            let resolved_res = tokio::select! {
                 res = crate::vpn::wireguard::resolve_wg_endpoints(wg_cfg, &cached_endpoints) => res,
                 () = wait_for_cancel(&mut cancel_rx) => return,
+            };
+            let resolved = match resolved_res {
+                Ok(map) => map,
+                Err(e) => {
+                    let json_opt = {
+                        let mut s = state_arc.lock().await;
+                        if !is_connect_still_valid(&s, id, generation, prof_gen) {
+                            return;
+                        }
+                        s.vpn_state = VpnState::Error {
+                            profile_id: Some(id),
+                            code: supermgr_core::vpn::state::ErrorCode::Unreachable,
+                            message: e.to_string(),
+                        };
+                        s.active_backend = None;
+                        state_to_json(&s.vpn_state).ok()
+                    };
+                    if let (Some(ref emitter), Some(json)) = (&ctx_owned, json_opt) {
+                        let _ = DaemonService::state_changed(emitter, json).await;
+                    }
+                    return;
+                }
             };
             if !resolved.is_empty() {
                 let mut s = state_arc.lock().await;
@@ -9871,7 +9893,7 @@ mod tests {
         .await
         .unwrap();
         assert!(rules.status.success());
-        let text = rules.stdout_lossy();
+        let text = String::from_utf8_lossy(&rules.stdout);
         assert!(text.contains("policy drop"));
         assert_eq!(
             text.matches("192.0.2.1").count(),
@@ -11122,7 +11144,7 @@ mod tests {
                 Arc::clone(&state),
                 None,
                 None,
-                crate::audit::AuditCaller::system(),
+                crate::audit::AuditCaller::daemon(),
                 Some(backend_dyn),
             )
             .await
