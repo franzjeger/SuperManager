@@ -480,8 +480,11 @@ done
 #
 # sudo is asked for the password first, on its own. The probe used to be the
 # first sudo, so a mistyped password came out as "root cannot read … FUSE".
+# `sudo true`, not `sudo -v`: -v wants a password unless every matching
+# sudoers rule is NOPASSWD, so `ALL` next to `NOPASSWD: ALL` made it ask (and
+# fail without a terminal) where every command below runs without one.
 # ---------------------------------------------------------------------------
-sudo -v || die "sudo did not accept the password, so nothing was installed."
+sudo true || die "sudo did not accept the password, so nothing was installed."
 readable_probe="contrib/systemd/supermgrd.service"
 if ! sudo test -r "$readable_probe"; then
     die "root cannot read $readable_probe in this checkout.
