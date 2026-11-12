@@ -573,8 +573,19 @@ fn build_ovpn_config(
 
     // Inline the CA cert rather than referencing the file path so the temp
     // file can be cleaned up after openvpn has started without breaking TLS.
-    s.push_str(&cfg.ca_cert_pem);
-    if !cfg.ca_cert_pem.ends_with('\n') {
+    //
+    // Profiles imported before the import fell back to the DigiCert roots
+    // hold no certificate at all (`azurevpnconfig.xml` pins the root by
+    // thumbprint only). An empty `<ca>` is fatal to openvpn ("Cannot load CA
+    // certificate file [[INLINE]] (no entries were read)"), so they get the
+    // same roots a fresh import would.
+    let ca_pem = if cfg.ca_cert_pem.contains("-----BEGIN CERTIFICATE-----") {
+        cfg.ca_cert_pem.as_str()
+    } else {
+        supermgr_core::vpn::import::AZURE_DEFAULT_CA_PEM
+    };
+    s.push_str(ca_pem);
+    if !ca_pem.ends_with('\n') {
         s.push('\n');
     }
     s.push_str("</ca>\n");
@@ -1180,6 +1191,24 @@ mod tests {
         assert!(!ovpn.contains("redirect-gateway"), "{ovpn}");
         assert!(ovpn.contains("route 10.134.0.0 255.255.0.0\n"), "{ovpn}");
         assert!(ovpn.contains("route-ipv6 2001:db8::/32\n"), "{ovpn}");
+    }
+
+    #[test]
+    fn a_profile_without_a_ca_gets_the_azure_roots_not_an_empty_block() {
+        let mut cfg = sample_cfg();
+        cfg.ca_cert_pem = String::new();
+        let ovpn = build_ovpn_config(&cfg, "", "/k", "/a", false).unwrap();
+        let ca = ovpn
+            .split("<ca>\n")
+            .nth(1)
+            .and_then(|rest| rest.split("</ca>").next())
+            .unwrap();
+        assert_eq!(ca, supermgr_core::vpn::import::AZURE_DEFAULT_CA_PEM);
+
+        // A profile that has its own certificate keeps it.
+        let ovpn = build_ovpn_config(&sample_cfg(), "", "/k", "/a", false).unwrap();
+        assert!(ovpn.contains("<ca>\n-----BEGIN CERTIFICATE-----\nMIIB...\n"));
+        assert!(!ovpn.contains("DigiCert") && !ovpn.contains("MIIDrzCCApeg"));
     }
 
     #[test]

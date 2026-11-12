@@ -147,10 +147,11 @@ fn base64_to_pem_cert(b64: &str) -> Result<String, String> {
     Ok(pem)
 }
 
-/// DigiCert Global Root G2 / Global Root CA bundle used by Azure VPN Gateways
-/// when `VpnSettings.xml` supplies only a `<Cert>` SHA-1 thumbprint rather than
-/// an inline base64 root certificate.
-const DIGICERT_GLOBAL_ROOT_CA_PEM: &str = "\
+/// The roots Azure VPN Gateways chain to: DigiCert Global Root CA, the root
+/// the modern `azurevpnconfig.xml` pins by SHA-1 thumbprint
+/// (`a8985d3a65e5e5c4b2d7d66d40c6dd2fb19c5436`) instead of embedding it, and
+/// DigiCert Global Root G2. Used when the profile carries no certificate.
+pub const AZURE_DEFAULT_CA_PEM: &str = "\
 -----BEGIN CERTIFICATE-----
 MIIDrzCCApegAwIBAgIQCDvgVpBCRrGhdWrJWZHHSjANBgkqhkiG9w0BAQUFADBh
 MQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3
@@ -166,7 +167,7 @@ T19sdl6gSzeRntwi5m3OFBqOasv+zbMUZBfHWymeMr/y7vrTC0LUq7dBMtoM1O/4
 gdW7jVg/tRvoSSiicNoxBN33shbyTApOB6jtSj1etX+jkMOvJwIDAQABo2MwYTAO
 BgNVHQ8BAf8EBAMCAYYwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQUA95QNVbR
 TLtm8KPiGxvDl7I90VUwHwYDVR0jBBgwFoAUA95QNVbRTLtm8KPiGxvDl7I90VUw
-DQYJKoZIhvcNAQELBQADggEBAMucN6pIExIK+t1EnE9SsPTfrgT1eXkIoyQY/Esr
+DQYJKoZIhvcNAQEFBQADggEBAMucN6pIExIK+t1EnE9SsPTfrgT1eXkIoyQY/Esr
 hMAtudXH/vTBH1jLuG2cenTnmCmrEbXjcKChzUyImZOMkXDiqw8cvpOp/2PV5Adg
 06O/nVsJ8dWO41P0jmP6P6fbtGbfYmbW0W5BjfIttep3Sp+dWOIrWcBAI+0tKIJF
 PnlUkiaY4IBIqDfv8NZ5YBberOgOzW6sRBc4L0na4UU+Krk2U886UAb3LujEV0ls
@@ -262,7 +263,7 @@ pub fn parse_azure_xml(azure_xml: &str, vpn_settings_xml: &str) -> Result<AzureV
         .find(|s| s.len() > 100)
     {
         Some(raw_b64) => base64_to_pem_cert(raw_b64)?,
-        None => DIGICERT_GLOBAL_ROOT_CA_PEM.to_owned(),
+        None => AZURE_DEFAULT_CA_PEM.to_owned(),
     };
 
     // -- Split-tunnel routes from VpnSettings.xml --
@@ -416,5 +417,38 @@ MIIB
         // same download.
         let err = parse_azure_xml(VPN_SETTINGS, &azure_xml(&"ab".repeat(256))).unwrap_err();
         assert!(err.contains("azurevpnconfig.xml"), "{err}");
+    }
+
+    /// The bundled roots are the real ones, byte for byte. The previous copy
+    /// of DigiCert Global Root CA had the right name, serial and key but a
+    /// mangled signature, so it matched no published fingerprint.
+    #[test]
+    fn default_azure_roots_are_the_published_digicert_roots() {
+        use base64::Engine as _;
+        use sha2::{Digest as _, Sha256};
+
+        let fingerprints: Vec<String> = AZURE_DEFAULT_CA_PEM
+            .split("-----END CERTIFICATE-----")
+            .filter_map(|block| block.split("-----BEGIN CERTIFICATE-----").nth(1))
+            .map(|body| {
+                let b64: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+                let der = base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .expect("bundled root is valid base64");
+                Sha256::digest(der)
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            fingerprints,
+            [
+                // DigiCert Global Root CA
+                "4348a0e9444c78cb265e058d5e8944b4d84f9662bd26db257f8934a443c70161",
+                // DigiCert Global Root G2
+                "cb3ccbb76031e5e0138f8dd39a23f9de47ffc35e43c1144cea27d46a5ab1cb5f",
+            ]
+        );
     }
 }
