@@ -5,15 +5,16 @@
         <description>Update feed for SuperManager.app</description>
         <language>en</language>
         <item>
-            <title>Version 1.8.27</title>
-            <pubDate>Tue, 10 Nov 2026 09:41:47 +0000</pubDate>
-            <sparkle:version>1.8.27</sparkle:version>
-            <sparkle:shortVersionString>1.8.27</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <enclosure
-                url="https://github.com/franzjeger/SuperManager/releases/download/v1.8.27/SuperManager-1.8.27.zip"
-                type="application/octet-stream"
-                sparkle:edSignature="86mk2QKEQL9uKzQ+mCRvZXNqhUpUyysuQHMwkayvuYzttlhn/BAqEP2DXmn98mmedO6TPXF6KuSFwPDJ0T64DQ==" length="45201260" />
+  <title>Version 1.8.28</title>
+  <pubDate>Thu, 12 Nov 2026 06:26:46 +0000</pubDate>
+  <sparkle:version>1.8.28</sparkle:version>
+  <sparkle:shortVersionString>1.8.28</sparkle:shortVersionString>
+  <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:phasedRolloutInterval>86400</sparkle:phasedRolloutInterval>
+  <enclosure
+      url="https://github.com/franzjeger/SuperManager/releases/download/v1.8.28/SuperManager-1.8.28.zip"
+      type="application/octet-stream"
+      sparkle:edSignature="S/QJLguAtq1fm3abB5XKe5K9gKKySP8JM6Fzw1GWaTUVz4D6qVnG4gd4mGvZnqtfC+8CZvMlT/Vl6olMXQYPBg==" length="45680030" />
         </item>
     </channel>
 </rss>

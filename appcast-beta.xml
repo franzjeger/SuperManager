@@ -1,19 +1,19 @@
 <?xml version="1.0" standalone="yes"?>
 <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
     <channel>
-        <title>SuperManager (Beta)</title>
-        <description>Beta update feed for SuperManager.app</description>
+        <title>SuperManager</title>
+        <description>Update feed for SuperManager.app</description>
         <language>en</language>
         <item>
-            <title>Version 1.8.21</title>
-            <pubDate>Fri, 02 Oct 2026 06:42:07 +0000</pubDate>
-            <sparkle:version>1.8.21</sparkle:version>
-            <sparkle:shortVersionString>1.8.21</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <enclosure
-                url="https://github.com/franzjeger/SuperManager/releases/download/v1.8.21/SuperManager-1.8.21.zip"
-                type="application/octet-stream"
-                sparkle:edSignature="j8obOnDtZaEyoFwtz7b6mgbvrnJohowkNx1YX6JvN+HnAVp/jJipOPLboyN9QKeLFcN4tBOVrKs0vSRyPyLgCQ==" length="36302518" />
+  <title>Version 1.8.28</title>
+  <pubDate>Thu, 12 Nov 2026 06:26:46 +0000</pubDate>
+  <sparkle:version>1.8.28</sparkle:version>
+  <sparkle:shortVersionString>1.8.28</sparkle:shortVersionString>
+  <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+  <enclosure
+      url="https://github.com/franzjeger/SuperManager/releases/download/v1.8.28/SuperManager-1.8.28.zip"
+      type="application/octet-stream"
+      sparkle:edSignature="S/QJLguAtq1fm3abB5XKe5K9gKKySP8JM6Fzw1GWaTUVz4D6qVnG4gd4mGvZnqtfC+8CZvMlT/Vl6olMXQYPBg==" length="45680030" />
         </item>
     </channel>
 </rss>
