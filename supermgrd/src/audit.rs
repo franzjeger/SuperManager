@@ -234,11 +234,6 @@ pub fn log_event_with_caller(caller: &AuditCaller, action: &str, target: &str, o
     let _ = record_event(caller, action, target, outcome);
 }
 
-/// Record a daemon-originated audit event (`caller = daemon`, `outcome = ok`).
-pub fn log_event(action: &str, target: &str) {
-    let _ = record_event(&AuditCaller::daemon(), action, target, "ok");
-}
-
 fn read_events_at(path: &Path, max_lines: usize) -> io::Result<Vec<String>> {
     if max_lines == 0 {
         return Ok(Vec::new());
