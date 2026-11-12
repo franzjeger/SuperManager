@@ -17,6 +17,10 @@ pub fn append_audit(caller: &AuditCaller, entry: &AuditEntry) -> io::Result<()> 
     let action = match entry.action {
         AuditAction::Push => "SSH_KEY_PUSH",
         AuditAction::Revoke => "SSH_KEY_REVOKE",
+        AuditAction::Generate => "SSH_KEY_GENERATE",
+        AuditAction::Import => "SSH_KEY_IMPORT",
+        AuditAction::Delete => "SSH_KEY_DELETE",
+        AuditAction::Connect => "SSH_CONNECT",
     };
     let target = format!(
         "key={} ({}) -> {} ({}:{})",
