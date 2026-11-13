@@ -81,7 +81,7 @@ ssh-key     = { version = "0.6",  features = ["ed25519", "rsa", "std", "rand_cor
 rsa         = { version = "0.9",  features = ["std"] }
 # Async SSH client (pure Rust, tokio-native). Its key handling, formerly the
 # separate russh-keys crate, is `russh::keys`.
-russh       = "0.62"
+russh       = "0.65"
 # SFTP over russh
 russh-sftp  = "2.0"
 # Random number generation
