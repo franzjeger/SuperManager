@@ -6,22 +6,20 @@ import ServiceManagement
 ///
 /// Two paths, in order of preference:
 ///
-///  1. **`SMAppService.daemon(plistName:)`** — the modern Apple way. Works
-///     for Developer-ID-signed apps. Shipping a signed build is the right
-///     long-term plan, but during dev (and for users running ad-hoc-signed
-///     builds) macOS rejects it with `SMAppServiceErrorDomain code 1
-///     "Operation not permitted"`.
+///  1. **`SMAppService.daemon(plistName:)`** — no password prompt. It is
+///     rejected for builds without a Developer ID (`Operation not
+///     permitted`), and on a Mac whose helper was installed by path 2 it can
+///     register and still never start: launchd reports `spawn failed`,
+///     exit 78.
 ///  2. **Manual install via `osascript with administrator privileges`** —
-///     copies the plist to `/Library/LaunchDaemons/` and the helper binary
-///     to `/Library/PrivilegedHelperTools/`, both chowned root:wheel, then
-///     `launchctl bootstrap system <plist>`. This is exactly what
-///     SMAppService does under the hood; doing it ourselves trades the
-///     UI-side approval flow for a single admin-auth dialog. Single
-///     password prompt. Works regardless of code signing.
+///     copies the helper to `/Library/PrivilegedHelperTools/` and a plist to
+///     `/Library/LaunchDaemons/`, then `launchctl bootstrap`. One password
+///     prompt. It installs only a binary that carries SuperManager's team
+///     signature, checked in the bundle and again on the root-owned copy.
 ///
-/// We always try (1) first — when the user later distributes a signed
-/// build, the SMAppService path is what will run, and switching back is
-/// zero work.
+/// Path 1 is tried first. Path 2 runs whenever path 1 did not leave a
+/// helper of the bundled build answering, so an update can never leave a
+/// Mac without one.
 @MainActor
 enum HelperInstaller {
 
@@ -37,16 +35,6 @@ enum HelperInstaller {
     nonisolated static let helperDesignatedRequirement =
         "anchor apple generic and certificate leaf[subject.OU] = \"\(teamID)\" and identifier \"\(helperLabel)\""
 
-    /// Matches a bundle signed with a Developer ID Application certificate on
-    /// SuperManager's team (same OIDs `supermanager-helper/src/client_auth.rs`
-    /// checks). Developer-ID builds use `SMAppService` exclusively and never
-    /// fall back to `osascript`.
-    nonisolated private static let developerIDRequirement =
-        "anchor apple generic"
-        + " and certificate 1[field.1.2.840.113635.100.6.2.6] exists"
-        + " and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
-        + " and certificate leaf[subject.OU] = \"\(teamID)\""
-
     /// `/Library/LaunchDaemons/com.sybr.supermanager.helper.plist`
     private static let systemPlistPath =
         "/Library/LaunchDaemons/com.sybr.supermanager.helper.plist"
@@ -55,7 +43,6 @@ enum HelperInstaller {
         "/Library/PrivilegedHelperTools/com.sybr.supermanager.helper"
 
     enum InstallError: Error, LocalizedError {
-        case registrationFailed(String)
         case approvalRequired
         case invalidSignature(String)
         case bundlePathUnavailable
@@ -65,8 +52,6 @@ enum HelperInstaller {
 
         var errorDescription: String? {
             switch self {
-            case .registrationFailed(let m):
-                return "Helper registration failed: \(m)"
             case .approvalRequired:
                 return "SuperManager needs permission to run its background helper. Enable SuperManager in System Settings → General → Login Items & Extensions, then try again."
             case .invalidSignature(let m):
@@ -83,10 +68,9 @@ enum HelperInstaller {
         }
     }
 
-    /// Install the helper as a system LaunchDaemon. Tries `SMAppService` first;
-    /// Developer-ID builds stop there (surfacing Login Items approval when
-    /// needed), while non-Developer-ID local development builds may fall back
-    /// to administrator installation after verifying the team signature.
+    /// Install the helper as a system LaunchDaemon. Tries `SMAppService`
+    /// first, and installs with administrator rights when that leaves no
+    /// helper of the bundled build answering.
     static func install() async throws {
         guard #available(macOS 13.0, *) else { throw InstallError.unsupportedPlatform }
 
@@ -117,7 +101,6 @@ enum HelperInstaller {
             throw InstallError.approvalRequired
         }
 
-        var registrationError: InstallError?
         do {
             try svc.register()
             if svc.status == .requiresApproval {
@@ -142,38 +125,25 @@ enum HelperInstaller {
                 throw InstallError.approvalRequired
             }
             let ns = error as NSError
-            registrationError = .registrationFailed(
-                "\(ns.localizedDescription) (domain=\(ns.domain) code=\(ns.code))"
-            )
+            DebugLog.write("[helper] SMAppService register: \(ns.localizedDescription) (domain=\(ns.domain) code=\(ns.code))")
         }
 
-        // Shipped Developer-ID builds never fall back to osascript.
-        if await isDeveloperIDSignedBundle() {
-            throw registrationError ?? InstallError.registrationFailed(
-                "helper registered with launchd (status: \(svc.status.rawValue)), but socket did not become ready; check /var/log/supermanager-helper.log"
-            )
+        // Registered or not, no helper of this build answers. Hand the label
+        // to the manual install: launchd holds one job per label, and a
+        // registration that cannot start would keep it.
+        do {
+            try await svc.unregister()
+        } catch {
+            DebugLog.write("[helper] SMAppService unregister before manual install: \(error)")
         }
 
-        #if DEBUG
+        // `requirement` is the team requirement in every Release build;
+        // `verifiedRequirement` lets only a Debug build through without one.
         try await manualInstall(
             bundledHelper: bundledHelper,
             expected: bundled,
             requirement: requirement
         )
-        #else
-        // Local Apple-Development builds (`scripts/install_mac_app.sh`) compile
-        // in Release configuration without a Developer ID cert, which macOS's
-        // `SMAppService.daemon` rejects with `Operation not permitted`. Allow
-        // manualInstall ONLY when the helper carries SuperManager's team cert.
-        guard let requirement else {
-            throw registrationError ?? InstallError.invalidSignature("missing team signature")
-        }
-        try await manualInstall(
-            bundledHelper: bundledHelper,
-            expected: bundled,
-            requirement: requirement
-        )
-        #endif
     }
 
     /// Verify `bundledHelper` against `helperDesignatedRequirement` and return
@@ -193,13 +163,6 @@ enum HelperInstaller {
         #endif
         let detail = strict.output.trimmingCharacters(in: .whitespacesAndNewlines)
         throw InstallError.invalidSignature(detail.isEmpty ? "exit \(strict.status)" : detail)
-    }
-
-    nonisolated private static func isDeveloperIDSignedBundle(
-        _ bundleURL: URL = Bundle.main.bundleURL
-    ) async -> Bool {
-        let res = await checkCodesign(path: bundleURL.path, requirement: developerIDRequirement)
-        return res.status == 0
     }
 
     nonisolated private static func checkCodesign(
@@ -235,55 +198,14 @@ enum HelperInstaller {
         return deployed.matches(expected)
     }
 
-    /// Fallback for non-Developer-ID local builds: write the LaunchDaemon plist
-    /// + helper binary to the system locations and bootstrap them under one
-    /// `osascript with administrator privileges` call, verifying the designated
-    /// code requirement before stopping the existing service and again on the
-    /// root-owned staged inode before `mv`.
+    /// Install the bundled helper to the system locations and start it, all
+    /// in one `osascript with administrator privileges` call.
     private static func manualInstall(
         bundledHelper: URL,
         expected: HelperBuildInfo,
         requirement: String?
     ) async throws {
-        // Plist is generated rather than copied so we can rewrite the
-        // `BundleProgram` (relative path used by SMAppService) into a
-        // `Program` (absolute path) for launchd's traditional bootstrap.
-        let plist = systemLaunchDaemonPlist(
-            label: helperLabel,
-            programPath: systemBinaryPath
-        )
-        let plistB64 = Data(plist.utf8).base64EncodedString()
-
-        // Single bash script run as root via osascript. We base64-decode
-        // the plist body in-line to avoid shell-quoting concerns.
-        let q: (String) -> String = { Self.shellQuote($0) }
-        let verifySourceCmd: String
-        if let requirement, !requirement.isEmpty {
-            verifySourceCmd = "/usr/bin/codesign --verify --strict -R=\(q(requirement)) \(q(bundledHelper.path))"
-        } else {
-            verifySourceCmd = "/usr/bin/codesign --verify --strict \(q(bundledHelper.path))"
-        }
-        let script = """
-        set -e
-        mkdir -p /Library/LaunchDaemons /Library/PrivilegedHelperTools
-        printf '%s' \(q(plistB64)) | /usr/bin/base64 -d > \(q(systemPlistPath))
-        chown root:wheel \(q(systemPlistPath))
-        chmod 644 \(q(systemPlistPath))
-        # Verify before stopping the existing service. Never overwrite a
-        # signed executable in place: macOS may retain its old code pages.
-        \(verifySourceCmd)
-        launchctl bootout system/\(helperLabel) >/dev/null 2>&1 || true
-        \(atomicReplacementScript(source: bundledHelper.path, destination: systemBinaryPath, requirement: requirement))
-        chown root:wheel \(q(systemBinaryPath))
-        for attempt in {1..5}; do
-            if launchctl bootstrap system \(q(systemPlistPath)); then break; fi
-            sleep 0.3
-        done
-        # Ask launchd to launch the daemon now rather than waiting on
-        # KeepAlive semantics.
-        launchctl kickstart -k system/\(helperLabel) >/dev/null 2>&1 || true
-        echo OK
-        """
+        let script = manualInstallScript(bundledHelper: bundledHelper.path, requirement: requirement)
 
         // AppleScript wraps the whole shell command. We keep its argument
         // single-quote escaped for safety, and run `/usr/bin/osascript` off
@@ -311,6 +233,45 @@ enum HelperInstaller {
         throw InstallError.manualInstallFailed(
             "helper installed but a matching build did not become ready; check /var/log/supermanager-helper.log"
         )
+    }
+
+    /// The root shell script behind `manualInstall`. The bundled helper is
+    /// verified before anything on the system changes, so a binary that fails
+    /// leaves the running helper and its plist as they were.
+    static func manualInstallScript(bundledHelper: String, requirement: String?) -> String {
+        // The plist is generated, not copied: the bundled one names the
+        // program relative to the app (`BundleProgram`), and a daemon in
+        // /Library/PrivilegedHelperTools needs an absolute `Program`.
+        let plist = systemLaunchDaemonPlist(label: helperLabel, programPath: systemBinaryPath)
+        // Base64, so the plist body needs no shell quoting.
+        let plistB64 = Data(plist.utf8).base64EncodedString()
+        let q: (String) -> String = { Self.shellQuote($0) }
+        let verifySourceCmd: String
+        if let requirement, !requirement.isEmpty {
+            verifySourceCmd = "/usr/bin/codesign --verify --strict -R=\(q(requirement)) \(q(bundledHelper))"
+        } else {
+            verifySourceCmd = "/usr/bin/codesign --verify --strict \(q(bundledHelper))"
+        }
+        return """
+        set -e
+        \(verifySourceCmd)
+        mkdir -p /Library/LaunchDaemons /Library/PrivilegedHelperTools
+        printf '%s' \(q(plistB64)) | /usr/bin/base64 -d > \(q(systemPlistPath))
+        chown root:wheel \(q(systemPlistPath))
+        chmod 644 \(q(systemPlistPath))
+        launchctl bootout system/\(helperLabel) >/dev/null 2>&1 || true
+        # Never overwrite a signed executable in place: macOS may keep its
+        # old code pages.
+        \(atomicReplacementScript(source: bundledHelper, destination: systemBinaryPath, requirement: requirement))
+        chown root:wheel \(q(systemBinaryPath))
+        for attempt in {1..5}; do
+            if launchctl bootstrap system \(q(systemPlistPath)); then break; fi
+            sleep 0.3
+        done
+        # Start it now instead of waiting on KeepAlive.
+        launchctl kickstart -k system/\(helperLabel) >/dev/null 2>&1 || true
+        echo OK
+        """
     }
 
     /// Stage on the destination filesystem, validate, then rename to a new
