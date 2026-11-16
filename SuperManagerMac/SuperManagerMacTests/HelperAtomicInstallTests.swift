@@ -54,6 +54,28 @@ final class HelperAtomicInstallTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path).count, 1)
     }
 
+    /// A bundled helper that fails its signature check must stop the install
+    /// before the running helper, its plist or its launchd job are touched.
+    func testManualInstallVerifiesTheBundledHelperBeforeChangingTheSystem() throws {
+        let script = HelperInstaller.manualInstallScript(
+            bundledHelper: "/Applications/Super Manager's.app/Contents/MacOS/helper",
+            requirement: HelperInstaller.helperDesignatedRequirement
+        )
+        let lines = script.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        XCTAssertEqual(lines.first, "set -e")
+        let verify = try XCTUnwrap(lines.firstIndex { $0.hasPrefix("/usr/bin/codesign --verify --strict -R=") })
+        XCTAssertTrue(lines[verify].contains("LY6LJ395B8"))
+        XCTAssertTrue(lines[verify].hasSuffix(#"'/Applications/Super Manager'\''s.app/Contents/MacOS/helper'"#))
+        let firstChange = try XCTUnwrap(lines.firstIndex {
+            $0.hasPrefix("mkdir") || $0.hasPrefix("printf") || $0.hasPrefix("launchctl") || $0.contains("/bin/mv")
+        })
+        XCTAssertLessThan(verify, firstChange)
+        XCTAssertLessThan(
+            try XCTUnwrap(lines.firstIndex { $0.hasPrefix("launchctl bootout") }),
+            try XCTUnwrap(lines.firstIndex { $0.contains("launchctl bootstrap system") })
+        )
+    }
+
     func testOpenVPN3TerminalCommandUsesBundledScriptsOnly() throws {
         let empty = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
