@@ -445,8 +445,13 @@ impl client::Handler for KnownHostsHandler {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &PublicKey,
+        server_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
+        // A host that presents a certificate is pinned by the key inside it,
+        // like any other host: the key is what the server proved it holds.
+        // No certificate authority is trusted here, so the signature on the
+        // certificate decides nothing.
+        let server_public_key = &server_key.public_key();
         // The key's type, `ssh-rsa` for any RSA key, where russh 0.46 gave
         // the signature hash it negotiated, `rsa-sha2-512`. It is only shown
         // to the operator; known_hosts compares fingerprints.
