@@ -45,4 +45,44 @@ final class TailscaleProfileTests: XCTestCase {
             id: "3", nickname: "Work", tailnet: "sybr.no", account: "frank@sybr.no", selected: false)
         XCTAssertEqual(nicknamed.displayName, "Work — sybr.no")
     }
+
+    // MARK: - CLI failures
+
+    /// `tailscale switch` to a tailnet that has not approved this Mac, as
+    /// the app logged it: the only stderr line is the version warning, and
+    /// showing it made a missing approval read as a broken daemon.
+    func testVersionWarningIsNotTheReasonACommandFailed() {
+        let warning = "Warning: client version \"1.104.5-t73a48057a\" != tailscaled server version \"1.102.4-tbbcd7d1fc\"\n"
+        XCTAssertEqual(
+            TailscaleClient.failureMessage(
+                stderr: warning, stdout: "Switching to account \"a0e9\"\n", exitCode: 1),
+            "Switching to account \"a0e9\"")
+        XCTAssertEqual(
+            TailscaleClient.failureMessage(
+                stderr: warning + "profile not found\n", stdout: "ignored", exitCode: 1),
+            "profile not found")
+        XCTAssertEqual(
+            TailscaleClient.failureMessage(stderr: warning, stdout: "\n", exitCode: 3),
+            "tailscale exited with status 3 and said nothing")
+    }
+
+    /// A switch that landed on the profile is not reported as failed, even
+    /// when the CLI exited non-zero because the profile cannot connect yet.
+    func testOnlyASwitchThatDidNotHappenIsAnError() {
+        let profiles = [
+            TailscaleProfile(id: "a0e9", nickname: "", tailnet: "sybr.no", account: "f@sybr.no", selected: true),
+            TailscaleProfile(id: "741e", nickname: "", tailnet: "hub", account: "hub", selected: false),
+        ]
+        XCTAssertTrue(AppState.isActiveProfile("a0e9", in: profiles))
+        XCTAssertFalse(AppState.isActiveProfile("741e", in: profiles))
+        XCTAssertFalse(AppState.isActiveProfile("gone", in: profiles))
+    }
+
+    @MainActor
+    func testRemovalWarningSaysWhetherTheConnectionGoes() {
+        let active = TailscaleProfile(id: "1", nickname: "", tailnet: "t", account: "a", selected: true)
+        let other = TailscaleProfile(id: "2", nickname: "", tailnet: "t", account: "b", selected: false)
+        XCTAssertTrue(TailscaleHeaderView.removalWarning(for: active).contains("disconnects"))
+        XCTAssertTrue(TailscaleHeaderView.removalWarning(for: other).contains("not affected"))
+    }
 }

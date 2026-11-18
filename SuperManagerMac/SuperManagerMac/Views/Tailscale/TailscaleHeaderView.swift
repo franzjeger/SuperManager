@@ -38,6 +38,8 @@ struct TailscaleHeaderView: View {
     /// exit-node setting goes through.
     @State private var pendingExitNodeIP: String?
     @State private var pendingExitNodeName: String?
+    /// The account the user asked to remove, until they confirm or cancel.
+    @State private var profilePendingRemoval: TailscaleProfile?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -65,7 +67,28 @@ struct TailscaleHeaderView: View {
             Text(peerSummary)
                 .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
+            if appState.tailscaleStatus?.backendState == "NeedsMachineAuth" {
+                Text(Self.approvalNote(tailnet: tailnetLabel))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Link("Open the admin console", destination: Self.adminMachinesURL)
+                    .font(.caption)
+            }
             primaryAction
+            // The update restarts the service, so it waits for the user. It
+            // used to be offered only inside the menu, where nobody saw it.
+            if appState.tailscaledOutdated, (appState.tailscaledInstalled ?? false), !working {
+                Button {
+                    runAction { await appState.installTailscaled() }
+                } label: {
+                    Label("Update Tailscale service", systemImage: "arrow.triangle.2.circlepath")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help(Self.updateServiceHelp)
+            }
             if let err = appState.tailscaleActionError {
                 Text(err)
                     .font(.caption)
@@ -109,8 +132,38 @@ struct TailscaleHeaderView: View {
                 pendingExitNodeName = nil
             }
         } message: {
-            Text("All internet traffic will route through this peer. If it becomes unreachable, your Mac may temporarily lose internet — SuperManager will auto-revert if that happens, but the recovery takes a few seconds.")
+            Text(Self.exitNodeWarning)
         }
+        .alert(
+            "Remove \(profilePendingRemoval?.displayName ?? "")?",
+            isPresented: Binding(
+                get: { profilePendingRemoval != nil },
+                set: { if !$0 { profilePendingRemoval = nil } }
+            ),
+            presenting: profilePendingRemoval
+        ) { profile in
+            Button("Remove", role: .destructive) {
+                runAction { await appState.removeTailscaleProfile(profile.id) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { profile in
+            Text(Self.removalWarning(for: profile))
+        }
+    }
+
+    static let exitNodeWarning = "All internet traffic will route through this peer. If it becomes unreachable, your Mac may temporarily lose internet — SuperManager will auto-revert if that happens, but the recovery takes a few seconds."
+
+    static let adminMachinesURL = URL(string: "https://login.tailscale.com/admin/machines")!
+
+    static func approvalNote(tailnet: String) -> String {
+        "This Mac is signed in, but \(tailnet) only lets approved devices connect. An admin of the tailnet has to approve it."
+    }
+
+    static func removalWarning(for profile: TailscaleProfile) -> String {
+        let consequence = profile.selected
+            ? "It is the tailnet in use, so Tailscale disconnects and is left signed out."
+            : "The tailnet in use is not affected."
+        return "This Mac forgets the account. \(consequence) The account itself is not deleted, and signing in again brings it back."
     }
 
     // MARK: - Sub-views
@@ -506,6 +559,15 @@ struct TailscaleHeaderView: View {
                 } label: {
                     Label("Add another tailnet…", systemImage: "plus")
                 }
+                Menu {
+                    ForEach(appState.tailscaleProfiles) { profile in
+                        Button(profile.displayName, role: .destructive) {
+                            profilePendingRemoval = profile
+                        }
+                    }
+                } label: {
+                    Label("Remove account", systemImage: "minus.circle")
+                }
             } label: {
                 HStack(spacing: 4) {
                     Text(tailnetLabel)
@@ -560,6 +622,7 @@ struct TailscaleHeaderView: View {
         case "Starting":   return (.pending, "Starting…")
         case "Stopped":    return (.offline, "Disconnected")
         case "NeedsLogin": return (.warn, "Sign-in required")
+        case "NeedsMachineAuth": return (.warn, "Awaiting approval")
         case "NoState":    return (.unknown, "Loading…")
         default:           return (.unknown, state)
         }
