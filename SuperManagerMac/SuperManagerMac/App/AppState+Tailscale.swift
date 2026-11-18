@@ -268,12 +268,44 @@ extension AppState {
             _ = try? await HelperClient.shared.tailscaleRemoveExitRoutes()
         }
         _ = try? await TailscaleClient.setExitNode("")
+        var failure: String?
         do {
             try await TailscaleClient.switchProfile(id)
         } catch {
-            tailscaleActionError = error.localizedDescription
+            failure = error.localizedDescription
         }
         // Let the daemon settle on the new profile before we read it back.
+        try? await Task.sleep(for: .milliseconds(500))
+        await refreshTailscale()
+        // `tailscale switch` also exits non-zero when it did switch but the
+        // profile cannot connect: signed out, or waiting for an admin to
+        // approve this Mac. The header says that from the backend state, so
+        // only a switch that did not happen is an error here.
+        if let failure, !Self.isActiveProfile(id, in: tailscaleProfiles) {
+            tailscaleActionError = failure
+        }
+    }
+
+    nonisolated static func isActiveProfile(_ id: String, in profiles: [TailscaleProfile]) -> Bool {
+        profiles.contains { $0.id == id && $0.selected }
+    }
+
+    /// Remove a logged-in tailnet from this Mac. Removing the active one
+    /// leaves Tailscale signed out, so its exit-node routing goes first, as
+    /// in `switchTailscaleProfile`.
+    func removeTailscaleProfile(_ id: String) async {
+        tailscaleActionError = nil
+        if Self.isActiveProfile(id, in: tailscaleProfiles) {
+            if !TailscaleClient.usesNativeApp {
+                _ = try? await HelperClient.shared.tailscaleRemoveExitRoutes()
+            }
+            _ = try? await TailscaleClient.setExitNode("")
+        }
+        do {
+            try await TailscaleClient.removeProfile(id)
+        } catch {
+            tailscaleActionError = error.localizedDescription
+        }
         try? await Task.sleep(for: .milliseconds(500))
         await refreshTailscale()
     }

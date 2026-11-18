@@ -32,6 +32,8 @@ enum TailscaleClient {
     enum ClientError: Error, LocalizedError {
         case notInstalled
         case daemonNotRunning(String)
+        /// The CLI ran and refused: the text is Tailscale's own.
+        case commandFailed(String)
         case decodeFailed(String)
 
         var errorDescription: String? {
@@ -40,6 +42,8 @@ enum TailscaleClient {
                 return "Tailscale is not installed. Install it from tailscale.com or `brew install --cask tailscale`."
             case .daemonNotRunning(let m):
                 return "Tailscale daemon isn't responding: \(m)"
+            case .commandFailed(let m):
+                return m
             case .decodeFailed(let m):
                 return "Couldn't decode Tailscale status: \(m)"
             }
@@ -350,6 +354,14 @@ enum TailscaleClient {
         return try JSONDecoder().decode([TailscaleProfile].self, from: data)
     }
 
+    /// Remove a logged-in profile from this Mac (`tailscale switch remove`).
+    /// The account and its tailnet are untouched; getting the profile back
+    /// takes a new sign-in.
+    static func removeProfile(_ id: String) async throws {
+        guard let bin = locateBinary() else { throw ClientError.notInstalled }
+        _ = try await runTask(bin: bin, args: ["switch", "remove", id])
+    }
+
     /// Switch the active profile. No re-authentication: the daemon
     /// already holds the node key for each stored profile, so this is a
     /// brief reconnect, not a login.
@@ -631,9 +643,8 @@ enum TailscaleClient {
             DebugLog.write("[ts/cli] FAILED exit=\(process.terminationStatus) "
                 + "stderr=\(errString.trimmingCharacters(in: .whitespacesAndNewlines)) "
                 + "stdout=\(outString.trimmingCharacters(in: .whitespacesAndNewlines))")
-            throw ClientError.daemonNotRunning(
-                "exit \(process.terminationStatus): \(errString.trimmingCharacters(in: .whitespacesAndNewlines))"
-            )
+            throw ClientError.commandFailed(failureMessage(
+                stderr: errString, stdout: outString, exitCode: process.terminationStatus))
         }
         // Suppress logging the full status JSON (10s of KB) to
         // keep the log readable. For `set` and other terse
@@ -647,6 +658,26 @@ enum TailscaleClient {
             }
         }
         return outString
+    }
+
+    /// What a failed `tailscale` command said, for the user.
+    ///
+    /// The CLI opens every answer with a "client version != tailscaled
+    /// server version" warning when the two differ. That line says nothing
+    /// about why this command failed, and shown first it reads as the cause.
+    /// Some commands (`switch`) put what they have to say on stdout instead.
+    static func failureMessage(stderr: String, stdout: String, exitCode: Int32) -> String {
+        func said(_ text: String) -> String {
+            text.split(whereSeparator: \.isNewline)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty && !$0.hasPrefix("Warning: client version") }
+                .joined(separator: " ")
+        }
+        let err = said(stderr)
+        if !err.isEmpty { return err }
+        let out = said(stdout)
+        if !out.isEmpty { return out }
+        return "tailscale exited with status \(exitCode) and said nothing"
     }
 
     /// Set by the deadline timer, read once the process has exited.
