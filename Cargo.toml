@@ -49,7 +49,7 @@ tracing-subscriber  = { version = "0.3", features = ["env-filter", "fmt"] }
 # D-Bus (tokio backend)
 zbus        = { version = "5.15",  features = ["tokio"] }
 # WireGuard kernel netlink control
-wireguard-control = "1.7.1"
+wireguard-control = "2.0.0"
 # GNOME Keyring / KWallet secret storage
 secret-service = { version = "5.0", features = ["rt-tokio-crypto-rust"] }
 # Identifiers
