@@ -54,7 +54,7 @@ rfd = { version = "0.17", default-features = false }
 
 # Azure publishes a VPN profile as a .zip; reading it directly spares the
 # operator unpacking it. Decompression only.
-zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # ShellExecuteW (open a sign-in page in the default browser) and the
 # registry value that says whether Windows is in dark mode.
