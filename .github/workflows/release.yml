@@ -191,7 +191,7 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$APP" "$RUNNER_TEMP/SuperManagerMac-unsigned.zip"
 
       - name: Upload unsigned macOS app bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-unsigned-app
           path: ${{ runner.temp }}/SuperManagerMac-unsigned.zip
@@ -519,7 +519,7 @@ jobs:
           fi
 
       - name: Upload signed macOS release artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-release-dist
           path: |
@@ -583,7 +583,7 @@ jobs:
 
       - name: Upload installer test logs
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-installer-test-logs
           path: ${{ runner.temp }}/supermanager-installer-test/
@@ -617,7 +617,7 @@ jobs:
               Out-File -FilePath "$stableExe.sha256" -Encoding ascii
 
       - name: Upload Windows release artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-release-dist
           path: dist-win/*
